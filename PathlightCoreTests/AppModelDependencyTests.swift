@@ -411,6 +411,56 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testEnabledLongTermWatchPersistsAttributedEvents() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "long-term.mov")
+        let monitor = ControlledDiskActivityMonitor()
+        let eventStore = RecordingActivityEventStore()
+        let target = LongTermWatchTarget(
+            rootPath: root,
+            options: LongTermWatchTargetOptions(
+                minimumRecordedByteDelta: 1,
+                aggregationWindow: 0,
+                recordsFileNames: true
+            )
+        )
+        let model = AppModel(dependencies: makeDependencies(
+            activityMonitor: monitor,
+            activitySizeProvider: { url in
+                url.path == file.path ? 16_384 : nil
+            },
+            activityEventStore: eventStore,
+            longTermWatchTargetPersistence: RecordingLongTermWatchTargetPersistence(targets: [target])
+        ))
+
+        try await waitUntil("long-term monitor subscribed") {
+            monitor.watchedRoot == root.standardizedFileURL
+        }
+
+        monitor.yield(
+            DiskActivityChange(
+                kind: .created,
+                path: file,
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 300)
+            )
+        )
+
+        try await waitForAsyncCondition("long-term activity event persisted") {
+            await eventStore.appendedEventsSnapshot().count == 1
+        }
+
+        let appendedEvents = await eventStore.appendedEventsSnapshot()
+        XCTAssertEqual(appendedEvents.first?.path, file)
+        XCTAssertEqual(appendedEvents.first?.byteDelta, 16_384)
+
+        try await waitUntil("long-term activity history refreshed") {
+            model.activityHistory?.eventCount == 1
+        }
+        XCTAssertEqual(model.activityHistory?.rootPath, root.standardizedFileURL)
+    }
+
+    @MainActor
     func testFullDiskAccessFromOnboardingShowsWelcomeAfterRelaunch() {
         let preferences = SpyAppPreferencesStore(
             preferences: AppPreferences(
@@ -2521,6 +2571,7 @@ private struct EmptyDiskActivityMonitor: DiskActivityMonitoring {
 private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<DiskActivityChange>.Continuation?
+    private var root: URL?
 
     var isWatching: Bool {
         lock.lock()
@@ -2528,10 +2579,17 @@ private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unch
         return continuation != nil
     }
 
+    var watchedRoot: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return root
+    }
+
     nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
         AsyncStream { continuation in
             lock.lock()
             self.continuation = continuation
+            self.root = root
             lock.unlock()
         }
     }

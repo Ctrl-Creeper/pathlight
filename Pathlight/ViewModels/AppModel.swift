@@ -229,6 +229,8 @@ final class AppModel: ObservableObject {
     private var activityHistoryTaskID: UUID?
     private var longTermWatchBaselineTask: Task<Void, Never>?
     private var longTermWatchBaselineTaskID: UUID?
+    private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
+    private var longTermWatchTaskIDs: [LongTermWatchTarget.ID: UUID] = [:]
     private var postTrashRemovalRequests: [PostTrashRemovalRequest] = []
     private var fullDiskAccessRefreshTask: Task<Void, Never>?
     private var targetCapacityDescriptionsRefreshTask: Task<Void, Never>?
@@ -279,6 +281,7 @@ final class AppModel: ObservableObject {
         observeMountedVolumes()
         observePreferences()
         quickLookController.installKeyMonitor()
+        startEnabledLongTermWatches()
     }
 
     deinit {
@@ -303,6 +306,7 @@ final class AppModel: ObservableObject {
         stopShortTermWatch()
         cancelActivityHistoryRefresh(clearHistory: true)
         cancelLongTermWatchBaseline()
+        stopAllLongTermWatches()
         exportPanelTask?.cancel()
         exportPanelTask = nil
         isExportPanelPresented = false
@@ -593,6 +597,7 @@ final class AppModel: ObservableObject {
                 target,
                 currentTargets: self.longTermWatchTargets
             )
+            self.startLongTermWatch(for: target)
         }
     }
 
@@ -602,9 +607,18 @@ final class AppModel: ObservableObject {
             forRootPath: rootPath,
             currentTargets: longTermWatchTargets
         )
+        if let target = longTermWatchTargets.first(where: { $0.rootPath == rootPath.standardizedFileURL }) {
+            if isEnabled {
+                startLongTermWatch(for: target)
+            } else {
+                stopLongTermWatch(targetID: target.id)
+            }
+        }
     }
 
     func removeLongTermWatchTarget(rootPath: URL) {
+        let targetID = rootPath.standardizedFileURL.path
+        stopLongTermWatch(targetID: targetID)
         longTermWatchTargets = dependencies.longTermWatchTargets.remove(
             rootPath: rootPath,
             currentTargets: longTermWatchTargets
@@ -615,6 +629,78 @@ final class AppModel: ObservableObject {
         longTermWatchBaselineTask?.cancel()
         longTermWatchBaselineTask = nil
         longTermWatchBaselineTaskID = nil
+    }
+
+    private func startEnabledLongTermWatches() {
+        for target in longTermWatchTargets where target.isEnabled {
+            startLongTermWatch(for: target)
+        }
+    }
+
+    private func startLongTermWatch(for target: LongTermWatchTarget) {
+        guard target.isEnabled else {
+            stopLongTermWatch(targetID: target.id)
+            return
+        }
+
+        stopLongTermWatch(targetID: target.id)
+
+        let taskID = UUID()
+        longTermWatchTaskIDs[target.id] = taskID
+        let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
+        let sizeProvider = dependencies.activitySizeProvider
+        let priorSizeProvider = dependencies.activityPriorSizeProvider
+        let eventStore = dependencies.activityEventStore
+
+        longTermWatchTasks[target.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.longTermWatchTaskIDs[target.id] == taskID {
+                    self.longTermWatchTasks[target.id] = nil
+                    self.longTermWatchTaskIDs[target.id] = nil
+                }
+            }
+
+            let stream = coordinator.sessions(
+                rootPath: target.rootPath,
+                options: target.options.diskActivityOptions,
+                sizeProvider: sizeProvider,
+                priorSizeProvider: priorSizeProvider
+            )
+            var persistedEventCount = 0
+            for await session in stream {
+                guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
+                    break
+                }
+
+                if session.events.count > persistedEventCount {
+                    let newEvents = Array(session.events[persistedEventCount...])
+                    persistedEventCount = session.events.count
+                    if let eventStore {
+                        do {
+                            try await eventStore.append(newEvents)
+                            self.refreshActivityHistory(rootPath: session.rootPath)
+                        } catch {
+                            // A failed journal write should not interrupt long-term monitoring.
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func stopLongTermWatch(targetID: LongTermWatchTarget.ID) {
+        longTermWatchTasks[targetID]?.cancel()
+        longTermWatchTasks[targetID] = nil
+        longTermWatchTaskIDs[targetID] = nil
+    }
+
+    private func stopAllLongTermWatches() {
+        for task in longTermWatchTasks.values {
+            task.cancel()
+        }
+        longTermWatchTasks.removeAll()
+        longTermWatchTaskIDs.removeAll()
     }
 
     func recordSunburstSegmentClick() {
