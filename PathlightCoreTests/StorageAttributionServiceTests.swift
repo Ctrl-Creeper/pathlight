@@ -104,4 +104,31 @@ struct StorageAttributionServiceTests {
         #expect(events.first?.byteDelta == nil)
         #expect(events.first?.confidence == .unknown)
     }
+
+    @Test("aggregates many changes under the same parent inside the window")
+    func aggregatesChangesByParentInsideWindow() {
+        let root = URL(filePath: "/Users/example/Library/Caches", directoryHint: .isDirectory)
+        let parent = root.appending(path: "Browser")
+        let changes = [
+            DiskActivityChange(kind: .created, path: parent.appending(path: "a.cache"), rootPath: root, timestamp: Date(timeIntervalSince1970: 100)),
+            DiskActivityChange(kind: .created, path: parent.appending(path: "b.cache"), rootPath: root, timestamp: Date(timeIntervalSince1970: 130)),
+            DiskActivityChange(kind: .modified, path: parent.appending(path: "c.cache"), rootPath: root, timestamp: Date(timeIntervalSince1970: 140))
+        ]
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 10,
+                aggregationWindow: 300,
+                longTermRecordsFileNames: false
+            ),
+            sizeProvider: { _ in 50 }
+        )
+
+        let events = service.process(changes)
+
+        #expect(events.count == 1)
+        #expect(events.first?.kind == .aggregate)
+        #expect(events.first?.path == parent)
+        #expect(events.first?.byteDelta == 150)
+        #expect(events.first?.affectedItemCount == 3)
+    }
 }

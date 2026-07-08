@@ -18,7 +18,7 @@ struct StorageAttributionService {
     }
 
     func process(_ changes: [DiskActivityChange]) -> [DiskActivityEvent] {
-        changes.compactMap { change in
+        let events: [DiskActivityEvent] = changes.compactMap { change in
             guard let event = event(for: change) else {
                 return nil
             }
@@ -27,6 +27,7 @@ struct StorageAttributionService {
             }
             return abs(byteDelta) >= options.minimumRecordedByteDelta ? event : nil
         }
+        return aggregate(events)
     }
 
     private func event(for change: DiskActivityChange) -> DiskActivityEvent? {
@@ -87,5 +88,64 @@ struct StorageAttributionService {
             previousPath: previousPath,
             affectedItemCount: 1
         )
+    }
+
+    private func aggregate(_ events: [DiskActivityEvent]) -> [DiskActivityEvent] {
+        guard !options.longTermRecordsFileNames, options.aggregationWindow > 0 else {
+            return events
+        }
+
+        let groups = Dictionary(grouping: events) { event in
+            AggregationKey(event: event, window: options.aggregationWindow)
+        }
+        return groups.values
+            .map(aggregateGroup)
+            .sorted { lhs, rhs in
+                if lhs.timestamp == rhs.timestamp {
+                    return lhs.path.path < rhs.path.path
+                }
+                return lhs.timestamp < rhs.timestamp
+            }
+    }
+
+    private func aggregateGroup(_ events: [DiskActivityEvent]) -> DiskActivityEvent {
+        guard events.count > 1 else {
+            return events[0]
+        }
+
+        let sortedEvents = events.sorted { lhs, rhs in
+            if lhs.timestamp == rhs.timestamp {
+                return lhs.path.path < rhs.path.path
+            }
+            return lhs.timestamp < rhs.timestamp
+        }
+        let knownDelta = sortedEvents.compactMap(\.byteDelta).reduce(Int64(0), +)
+        let byteDelta = sortedEvents.contains { $0.byteDelta == nil } ? nil : knownDelta
+        let confidence: DiskActivityEventConfidence = sortedEvents.allSatisfy { $0.confidence == .confirmed }
+            ? .confirmed
+            : .estimated
+
+        return DiskActivityEvent(
+            kind: .aggregate,
+            path: URL(filePath: sortedEvents[0].path.deletingLastPathComponent().path),
+            rootPath: sortedEvents[0].rootPath,
+            timestamp: sortedEvents[0].timestamp,
+            byteDelta: byteDelta,
+            confidence: byteDelta == nil ? .unknown : confidence,
+            previousPath: nil,
+            affectedItemCount: sortedEvents.reduce(0) { $0 + $1.affectedItemCount }
+        )
+    }
+
+    private struct AggregationKey: Hashable {
+        let rootPath: String
+        let parentPath: String
+        let bucket: Int
+
+        init(event: DiskActivityEvent, window: TimeInterval) {
+            rootPath = event.rootPath.standardizedFileURL.path
+            parentPath = event.path.deletingLastPathComponent().standardizedFileURL.path
+            bucket = Int(floor(event.timestamp.timeIntervalSince1970 / window))
+        }
     }
 }
