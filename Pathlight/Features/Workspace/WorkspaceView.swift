@@ -35,6 +35,7 @@ struct WorkspaceActions {
     let bulkFileActions: BulkFileActions
     let startShortTermWatch: (URL) -> Void
     let stopShortTermWatch: () -> Void
+    let refreshActivityHistory: (URL) -> Void
     let openFullDiskAccessSettings: () -> Void
     let setDiscardPileDragActive: (Bool) -> Void
     let setDiscardPileDragActiveAfterThreshold: (Bool) -> Void
@@ -81,6 +82,7 @@ struct WorkspaceView: View {
     let discardPileHiddenNodeIDs: Set<FileNodeRecord.ID>
     let startupDiskTarget: ScanTarget?
     let liveWatchSession: WatchSessionModel?
+    let activityHistory: ActivityHistorySnapshot?
     let fullDiskAccessStatus: FullDiskAccessStatus
     let freeSpaceAvailableCapacity: (ScanSnapshot, FileNodeRecord) -> Int64?
     let actions: WorkspaceActions
@@ -95,6 +97,11 @@ struct WorkspaceView: View {
                     session: liveWatchSession,
                     onStop: actions.stopShortTermWatch
                 )
+            }
+
+            if let visibleActivityHistory {
+                Divider()
+                ActivityHistoryPanel(snapshot: visibleActivityHistory)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,6 +135,14 @@ struct WorkspaceView: View {
                         }
                         .help("Stop Watching")
                     }
+
+                    Button {
+                        actions.refreshActivityHistory(watchRoot)
+                    } label: {
+                        Label("Refresh Activity History", systemImage: "clock.arrow.circlepath")
+                    }
+                    .disabled(scanState.isScanning)
+                    .help("Refresh Activity History")
                 }
 
                 if scanState.canStopScan {
@@ -160,6 +175,11 @@ struct WorkspaceView: View {
         }
         .dropDestination(for: URL.self) { urls, _ in
             actions.handleDroppedURLs(urls)
+        }
+        .task(id: watchRoot?.standardizedFileURL.path) {
+            if let watchRoot {
+                actions.refreshActivityHistory(watchRoot)
+            }
         }
     }
 
@@ -196,6 +216,17 @@ struct WorkspaceView: View {
 
     private var watchRoot: URL? {
         scanState.snapshot?.target.url ?? scanState.selectedTarget?.url
+    }
+
+    private var visibleActivityHistory: ActivityHistorySnapshot? {
+        guard let watchRoot,
+              let activityHistory,
+              activityHistory.rootPath == watchRoot.standardizedFileURL,
+              activityHistory.eventCount > 0 else {
+            return nil
+        }
+
+        return activityHistory
     }
 }
 

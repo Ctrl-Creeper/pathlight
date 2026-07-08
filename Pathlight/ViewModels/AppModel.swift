@@ -191,6 +191,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var discardPile = DiscardPileState()
     @Published private(set) var usageStats = AppUsageStats.empty
     @Published private(set) var liveWatchSession: WatchSessionModel?
+    @Published private(set) var activityHistory: ActivityHistorySnapshot?
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
 
     private let dependencies: AppDependencies
@@ -223,6 +224,8 @@ final class AppModel: ObservableObject {
     private var exportConfirmationDismissTask: Task<Void, Never>?
     private var liveWatchTask: Task<Void, Never>?
     private var liveWatchTaskID: UUID?
+    private var activityHistoryTask: Task<Void, Never>?
+    private var activityHistoryTaskID: UUID?
     private var postTrashRemovalRequests: [PostTrashRemovalRequest] = []
     private var fullDiskAccessRefreshTask: Task<Void, Never>?
     private var targetCapacityDescriptionsRefreshTask: Task<Void, Never>?
@@ -294,6 +297,7 @@ final class AppModel: ObservableObject {
         targetCapacityDescriptionsRefreshTask?.cancel()
         targetCapacityDescriptionsRefreshTask = nil
         stopShortTermWatch()
+        cancelActivityHistoryRefresh(clearHistory: true)
         exportPanelTask?.cancel()
         exportPanelTask = nil
         isExportPanelPresented = false
@@ -478,7 +482,12 @@ final class AppModel: ObservableObject {
                     let newEvents = Array(session.events[persistedEventCount...])
                     persistedEventCount = session.events.count
                     if let activityEventStore = self.dependencies.activityEventStore {
-                        try? await activityEventStore.append(newEvents)
+                        do {
+                            try await activityEventStore.append(newEvents)
+                            self.refreshActivityHistory(rootPath: session.rootPath)
+                        } catch {
+                            // A failed journal write should not interrupt the live watch session.
+                        }
                     }
                 }
             }
@@ -490,6 +499,59 @@ final class AppModel: ObservableObject {
         liveWatchTask = nil
         liveWatchTaskID = nil
         liveWatchSession = nil
+    }
+
+    func refreshActivityHistory(
+        rootPath: URL,
+        bucketInterval: TimeInterval = 3_600,
+        eventLimit: Int = 500
+    ) {
+        cancelActivityHistoryRefresh(clearHistory: false)
+
+        guard let activityEventStore = dependencies.activityEventStore else {
+            activityHistory = nil
+            return
+        }
+
+        let taskID = UUID()
+        activityHistoryTaskID = taskID
+        let service = ActivityHistoryService(store: activityEventStore)
+
+        activityHistoryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.activityHistoryTaskID == taskID {
+                    self.activityHistoryTask = nil
+                    self.activityHistoryTaskID = nil
+                }
+            }
+
+            do {
+                let history = try await service.loadHistory(
+                    rootPath: rootPath,
+                    eventLimit: eventLimit,
+                    bucketInterval: bucketInterval
+                )
+                guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
+                    return
+                }
+                self.activityHistory = history
+            } catch {
+                guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
+                    return
+                }
+                self.activityHistory = nil
+            }
+        }
+    }
+
+    private func cancelActivityHistoryRefresh(clearHistory: Bool) {
+        activityHistoryTask?.cancel()
+        activityHistoryTask = nil
+        activityHistoryTaskID = nil
+        if clearHistory {
+            activityHistory = nil
+        }
     }
 
     func recordSunburstSegmentClick() {

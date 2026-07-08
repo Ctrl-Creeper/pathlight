@@ -334,6 +334,54 @@ final class AppModelDependencyTests: XCTestCase {
         let appendedEvents = await eventStore.appendedEventsSnapshot()
         XCTAssertEqual(appendedEvents.first?.path, file)
         XCTAssertEqual(appendedEvents.first?.byteDelta, 8_192)
+
+        try await waitUntil("activity history refreshed from short-term watch") {
+            model.activityHistory?.eventCount == 1
+        }
+        XCTAssertEqual(model.activityHistory?.totalNetByteDelta, 8_192)
+    }
+
+    @MainActor
+    func testRefreshActivityHistoryLoadsAggregatedJournalEvents() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let eventStore = RecordingActivityEventStore()
+        try await eventStore.append([
+            DiskActivityEvent(
+                kind: .created,
+                path: root.appending(path: "installer.dmg"),
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 3_600),
+                byteDelta: 2_048,
+                confidence: .confirmed,
+                previousPath: nil,
+                affectedItemCount: 1
+            ),
+            DiskActivityEvent(
+                kind: .deleted,
+                path: root.appending(path: "old-cache.zip"),
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 3_900),
+                byteDelta: -1_024,
+                confidence: .estimated,
+                previousPath: nil,
+                affectedItemCount: 1
+            )
+        ])
+        let model = AppModel(dependencies: makeDependencies(activityEventStore: eventStore))
+
+        model.refreshActivityHistory(
+            rootPath: root,
+            bucketInterval: 3_600,
+            eventLimit: 100
+        )
+
+        try await waitUntil("activity history loaded") {
+            model.activityHistory?.eventCount == 2
+        }
+
+        XCTAssertEqual(model.activityHistory?.rootPath, root.standardizedFileURL)
+        XCTAssertEqual(model.activityHistory?.totalNetByteDelta, 1_024)
+        XCTAssertEqual(model.activityHistory?.buckets.first?.byteDelta, 1_024)
     }
 
     @MainActor
