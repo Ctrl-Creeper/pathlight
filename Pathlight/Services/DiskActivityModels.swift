@@ -50,3 +50,13 @@ struct DiskActivityAggregationOptions: Equatable, Sendable {
         longTermRecordsFileNames: false
     )
 }
+
+struct WatchSessionSummary: Equatable, Sendable {
+    let id: UUID
+    let rootPath: URL
+    let startedAt: Date
+    let endedAt: Date
+    let netByteDelta: Int64
+    let eventCount: Int
+    let unknownSizeEventCount: Int
+}
