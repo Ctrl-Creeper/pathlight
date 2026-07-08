@@ -292,6 +292,51 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testShortTermWatchPersistsAttributedEvents() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "new-video.mov")
+        let monitor = ControlledDiskActivityMonitor()
+        let eventStore = RecordingActivityEventStore()
+        let model = AppModel(dependencies: makeDependencies(
+            activityMonitor: monitor,
+            activitySizeProvider: { url in
+                url.path == file.path ? 8_192 : nil
+            },
+            activityEventStore: eventStore
+        ))
+
+        model.startShortTermWatch(
+            rootPath: root,
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 1,
+                aggregationWindow: 0,
+                longTermRecordsFileNames: true
+            )
+        )
+
+        try await waitUntil("short-term monitor subscribed") {
+            monitor.isWatching
+        }
+
+        monitor.yield(
+            DiskActivityChange(
+                kind: .created,
+                path: file,
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 240)
+            )
+        )
+
+        try await waitForAsyncCondition("activity event persisted") {
+            await eventStore.appendedEventsSnapshot().count == 1
+        }
+
+        let appendedEvents = await eventStore.appendedEventsSnapshot()
+        XCTAssertEqual(appendedEvents.first?.path, file)
+        XCTAssertEqual(appendedEvents.first?.byteDelta, 8_192)
+    }
+
+    @MainActor
     func testFullDiskAccessFromOnboardingShowsWelcomeAfterRelaunch() {
         let preferences = SpyAppPreferencesStore(
             preferences: AppPreferences(
@@ -2435,6 +2480,24 @@ private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unch
     }
 }
 
+private actor RecordingActivityEventStore: ActivityEventStoring {
+    private var appendedEvents: [DiskActivityEvent] = []
+
+    func append(_ events: [DiskActivityEvent]) async throws {
+        appendedEvents.append(contentsOf: events)
+    }
+
+    func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
+        Array(appendedEvents
+            .filter { $0.rootPath.standardizedFileURL == rootPath.standardizedFileURL }
+            .suffix(limit))
+    }
+
+    func appendedEventsSnapshot() -> [DiskActivityEvent] {
+        appendedEvents
+    }
+}
+
 @MainActor
 private func makeDependencies(
     preferences: SpyAppPreferencesStore = SpyAppPreferencesStore(preferences: .defaults),
@@ -2446,7 +2509,8 @@ private func makeDependencies(
     usageStats: any AppUsageStatsPersisting = InMemoryAppUsageStatsStore(),
     activityMonitor: any DiskActivityMonitoring = EmptyDiskActivityMonitor(),
     activitySizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
-    activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
+    activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
+    activityEventStore: (any ActivityEventStoring)? = nil
 ) -> AppDependencies {
     AppDependencies(
         preferences: preferences,
@@ -2460,7 +2524,8 @@ private func makeDependencies(
         usageStats: usageStats,
         activityMonitor: activityMonitor,
         activitySizeProvider: activitySizeProvider,
-        activityPriorSizeProvider: activityPriorSizeProvider
+        activityPriorSizeProvider: activityPriorSizeProvider,
+        activityEventStore: activityEventStore
     )
 }
 

@@ -468,11 +468,19 @@ final class AppModel: ObservableObject {
                 sizeProvider: sizeProvider,
                 priorSizeProvider: priorSizeProvider
             )
+            var persistedEventCount = 0
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
                     break
                 }
                 self.liveWatchSession = session
+                if session.events.count > persistedEventCount {
+                    let newEvents = Array(session.events[persistedEventCount...])
+                    persistedEventCount = session.events.count
+                    if let activityEventStore = self.dependencies.activityEventStore {
+                        try? await activityEventStore.append(newEvents)
+                    }
+                }
             }
         }
     }

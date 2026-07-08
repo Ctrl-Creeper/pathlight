@@ -1,6 +1,6 @@
 import Foundation
 
-struct DiskActivityChange: Equatable, Sendable {
+nonisolated struct DiskActivityChange: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case created
         case modified
@@ -14,7 +14,7 @@ struct DiskActivityChange: Equatable, Sendable {
     let timestamp: Date
 }
 
-enum DiskActivityEventKind: Equatable, Sendable {
+nonisolated enum DiskActivityEventKind: Equatable, Codable, Sendable {
     case created
     case modified
     case deleted
@@ -22,13 +22,13 @@ enum DiskActivityEventKind: Equatable, Sendable {
     case aggregate
 }
 
-enum DiskActivityEventConfidence: Equatable, Sendable {
+nonisolated enum DiskActivityEventConfidence: Equatable, Codable, Sendable {
     case confirmed
     case estimated
     case unknown
 }
 
-struct DiskActivityEvent: Equatable, Sendable {
+nonisolated struct DiskActivityEvent: Equatable, Codable, Sendable {
     let kind: DiskActivityEventKind
     let path: URL
     let rootPath: URL
@@ -39,7 +39,7 @@ struct DiskActivityEvent: Equatable, Sendable {
     let affectedItemCount: Int
 }
 
-struct DiskActivityAggregationOptions: Equatable, Sendable {
+nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
     let minimumRecordedByteDelta: Int64
     let aggregationWindow: TimeInterval
     let longTermRecordsFileNames: Bool
@@ -51,7 +51,7 @@ struct DiskActivityAggregationOptions: Equatable, Sendable {
     )
 }
 
-struct WatchSessionSummary: Equatable, Sendable {
+nonisolated struct WatchSessionSummary: Equatable, Sendable {
     let id: UUID
     let rootPath: URL
     let startedAt: Date
