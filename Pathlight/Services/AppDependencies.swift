@@ -17,6 +17,8 @@ struct AppDependencies {
     var activitySizeProvider: StorageAttributionService.SizeProvider
     var activityPriorSizeProvider: StorageAttributionService.SizeProvider
     var activityEventStore: (any ActivityEventStoring)?
+    var longTermWatchTargets: LongTermWatchTargetStore
+    var activityBaselineService: ActivityBaselineService
 
     init(
         preferences: any AppPreferencesPersisting,
@@ -28,7 +30,11 @@ struct AppDependencies {
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
         activitySizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
         activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
-        activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live()
+        activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live(),
+        longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
+            persistence: UserDefaultsLongTermWatchTargetPersistence()
+        ),
+        activityBaselineService: ActivityBaselineService = ActivityBaselineService()
     ) {
         self.preferences = preferences
         self.recentTargets = recentTargets
@@ -40,6 +46,8 @@ struct AppDependencies {
         self.activitySizeProvider = activitySizeProvider
         self.activityPriorSizeProvider = activityPriorSizeProvider
         self.activityEventStore = activityEventStore
+        self.longTermWatchTargets = longTermWatchTargets
+        self.activityBaselineService = activityBaselineService
     }
 
     static var live: AppDependencies {

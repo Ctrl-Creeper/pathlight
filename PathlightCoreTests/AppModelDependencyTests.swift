@@ -385,6 +385,32 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testEnableLongTermWatchCreatesBaselineAndPersistsTarget() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let persistence = RecordingLongTermWatchTargetPersistence()
+        let baselineService = ActivityBaselineService(
+            sizeProvider: { url in
+                url.standardizedFileURL == root.standardizedFileURL ? 4_096 : nil
+            },
+            contentsProvider: { _ in [] }
+        )
+        let model = AppModel(dependencies: makeDependencies(
+            longTermWatchTargetPersistence: persistence,
+            activityBaselineService: baselineService
+        ))
+
+        model.enableLongTermWatch(rootPath: root)
+
+        try await waitUntil("long-term watch target baseline persisted") {
+            model.longTermWatchTargets.first?.baseline?.allocatedSize == 4_096
+        }
+
+        XCTAssertEqual(model.longTermWatchTargets.first?.rootPath, root.standardizedFileURL)
+        XCTAssertEqual(model.longTermWatchTargets.first?.isEnabled, true)
+        XCTAssertEqual(persistence.savedTargets.last, model.longTermWatchTargets)
+    }
+
+    @MainActor
     func testFullDiskAccessFromOnboardingShowsWelcomeAfterRelaunch() {
         let preferences = SpyAppPreferencesStore(
             preferences: AppPreferences(
@@ -2546,6 +2572,30 @@ private actor RecordingActivityEventStore: ActivityEventStoring {
     }
 }
 
+private final class RecordingLongTermWatchTargetPersistence: LongTermWatchTargetPersisting {
+    var targets: [LongTermWatchTarget]
+    var savedTargets: [[LongTermWatchTarget]] = []
+    var didClear = false
+
+    init(targets: [LongTermWatchTarget] = []) {
+        self.targets = targets
+    }
+
+    func loadTargets() -> [LongTermWatchTarget] {
+        targets
+    }
+
+    func saveTargets(_ targets: [LongTermWatchTarget]) {
+        self.targets = targets
+        savedTargets.append(targets)
+    }
+
+    func clearTargets() {
+        didClear = true
+        targets = []
+    }
+}
+
 @MainActor
 private func makeDependencies(
     preferences: SpyAppPreferencesStore = SpyAppPreferencesStore(preferences: .defaults),
@@ -2558,7 +2608,12 @@ private func makeDependencies(
     activityMonitor: any DiskActivityMonitoring = EmptyDiskActivityMonitor(),
     activitySizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
     activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
-    activityEventStore: (any ActivityEventStoring)? = nil
+    activityEventStore: (any ActivityEventStoring)? = nil,
+    longTermWatchTargetPersistence: any LongTermWatchTargetPersisting = RecordingLongTermWatchTargetPersistence(),
+    activityBaselineService: ActivityBaselineService = ActivityBaselineService(
+        sizeProvider: { _ in nil },
+        contentsProvider: { _ in [] }
+    )
 ) -> AppDependencies {
     AppDependencies(
         preferences: preferences,
@@ -2573,7 +2628,9 @@ private func makeDependencies(
         activityMonitor: activityMonitor,
         activitySizeProvider: activitySizeProvider,
         activityPriorSizeProvider: activityPriorSizeProvider,
-        activityEventStore: activityEventStore
+        activityEventStore: activityEventStore,
+        longTermWatchTargets: LongTermWatchTargetStore(persistence: longTermWatchTargetPersistence),
+        activityBaselineService: activityBaselineService
     )
 }
 

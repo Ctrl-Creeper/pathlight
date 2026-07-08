@@ -44,6 +44,7 @@ struct ContentView: View {
                 startupDiskTarget: appModel.startupDiskTarget,
                 liveWatchSession: appModel.liveWatchSession,
                 activityHistory: appModel.activityHistory,
+                longTermWatchTargets: appModel.longTermWatchTargets,
                 fullDiskAccessStatus: appModel.fullDiskAccessStatus,
                 freeSpaceAvailableCapacity: { snapshot, focusNode in
                     appModel.sunburstFreeSpaceAvailableCapacity(for: snapshot, focusNode: focusNode)
@@ -573,6 +574,7 @@ private struct WorkspaceDetailView: View {
     let startupDiskTarget: ScanTarget?
     let liveWatchSession: WatchSessionModel?
     let activityHistory: ActivityHistorySnapshot?
+    let longTermWatchTargets: [LongTermWatchTarget]
     let fullDiskAccessStatus: FullDiskAccessStatus
     let freeSpaceAvailableCapacity: (ScanSnapshot, FileNodeRecord) -> Int64?
     let actions: WorkspaceActions
@@ -589,6 +591,7 @@ private struct WorkspaceDetailView: View {
             startupDiskTarget: startupDiskTarget,
             liveWatchSession: liveWatchSession,
             activityHistory: activityHistory,
+            longTermWatchTargets: longTermWatchTargets,
             fullDiskAccessStatus: fullDiskAccessStatus,
             freeSpaceAvailableCapacity: freeSpaceAvailableCapacity,
             actions: actions
@@ -640,6 +643,7 @@ private extension ContentView {
             startShortTermWatch: { appModel.startShortTermWatch(rootPath: $0) },
             stopShortTermWatch: { appModel.stopShortTermWatch() },
             refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
+            enableLongTermWatch: { appModel.enableLongTermWatch(rootPath: $0) },
             openFullDiskAccessSettings: { appModel.prepareAndOpenFullDiskAccessSettings() },
             setDiscardPileDragActive: setDiscardPileDragIsActive,
             setDiscardPileDragActiveAfterThreshold: setDiscardPileDragIsActiveAfterThreshold

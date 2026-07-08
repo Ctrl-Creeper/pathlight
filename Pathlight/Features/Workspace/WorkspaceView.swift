@@ -36,6 +36,7 @@ struct WorkspaceActions {
     let startShortTermWatch: (URL) -> Void
     let stopShortTermWatch: () -> Void
     let refreshActivityHistory: (URL) -> Void
+    let enableLongTermWatch: (URL) -> Void
     let openFullDiskAccessSettings: () -> Void
     let setDiscardPileDragActive: (Bool) -> Void
     let setDiscardPileDragActiveAfterThreshold: (Bool) -> Void
@@ -83,6 +84,7 @@ struct WorkspaceView: View {
     let startupDiskTarget: ScanTarget?
     let liveWatchSession: WatchSessionModel?
     let activityHistory: ActivityHistorySnapshot?
+    let longTermWatchTargets: [LongTermWatchTarget]
     let fullDiskAccessStatus: FullDiskAccessStatus
     let freeSpaceAvailableCapacity: (ScanSnapshot, FileNodeRecord) -> Int64?
     let actions: WorkspaceActions
@@ -143,6 +145,16 @@ struct WorkspaceView: View {
                     }
                     .disabled(scanState.isScanning)
                     .help("Refresh Activity History")
+
+                    if !isWatchRootTracked {
+                        Button {
+                            actions.enableLongTermWatch(watchRoot)
+                        } label: {
+                            Label("Track", systemImage: "clock.badge.plus")
+                        }
+                        .disabled(scanState.isScanning)
+                        .help("Track Long-Term Activity")
+                    }
                 }
 
                 if scanState.canStopScan {
@@ -227,6 +239,17 @@ struct WorkspaceView: View {
         }
 
         return activityHistory
+    }
+
+    private var isWatchRootTracked: Bool {
+        guard let watchRoot else {
+            return false
+        }
+
+        let rootPath = watchRoot.standardizedFileURL.path
+        return longTermWatchTargets.contains { target in
+            target.rootPath.standardizedFileURL.path == rootPath
+        }
     }
 }
 

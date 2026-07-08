@@ -192,6 +192,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var usageStats = AppUsageStats.empty
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
+    @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
 
     private let dependencies: AppDependencies
@@ -226,6 +227,8 @@ final class AppModel: ObservableObject {
     private var liveWatchTaskID: UUID?
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
+    private var longTermWatchBaselineTask: Task<Void, Never>?
+    private var longTermWatchBaselineTaskID: UUID?
     private var postTrashRemovalRequests: [PostTrashRemovalRequest] = []
     private var fullDiskAccessRefreshTask: Task<Void, Never>?
     private var targetCapacityDescriptionsRefreshTask: Task<Void, Never>?
@@ -259,6 +262,7 @@ final class AppModel: ObservableObject {
         lastPersistedScanPreferences = preferences.scan
         showsOnboarding = !preferences.didCompleteOnboarding
         usageStats = dependencies.usageStats.loadUsageStats()
+        longTermWatchTargets = dependencies.longTermWatchTargets.loadTargets()
         fullDiskAccessStatus = dependencies.systemActions.usesAsyncFullDiskAccessStatus
             ? .unknown
             : dependencies.systemActions.currentFullDiskAccessStatus()
@@ -298,6 +302,7 @@ final class AppModel: ObservableObject {
         targetCapacityDescriptionsRefreshTask = nil
         stopShortTermWatch()
         cancelActivityHistoryRefresh(clearHistory: true)
+        cancelLongTermWatchBaseline()
         exportPanelTask?.cancel()
         exportPanelTask = nil
         isExportPanelPresented = false
@@ -552,6 +557,64 @@ final class AppModel: ObservableObject {
         if clearHistory {
             activityHistory = nil
         }
+    }
+
+    func enableLongTermWatch(
+        rootPath: URL,
+        options: LongTermWatchTargetOptions = .default
+    ) {
+        cancelLongTermWatchBaseline()
+
+        let taskID = UUID()
+        longTermWatchBaselineTaskID = taskID
+        let baselineService = dependencies.activityBaselineService
+
+        longTermWatchBaselineTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.longTermWatchBaselineTaskID == taskID {
+                    self.longTermWatchBaselineTask = nil
+                    self.longTermWatchBaselineTaskID = nil
+                }
+            }
+
+            let baseline = await baselineService.captureBaseline(rootPath: rootPath)
+            guard !Task.isCancelled, self.longTermWatchBaselineTaskID == taskID else {
+                return
+            }
+
+            let target = LongTermWatchTarget(
+                rootPath: rootPath,
+                isEnabled: true,
+                options: options,
+                baseline: baseline
+            )
+            self.longTermWatchTargets = self.dependencies.longTermWatchTargets.upsert(
+                target,
+                currentTargets: self.longTermWatchTargets
+            )
+        }
+    }
+
+    func setLongTermWatchEnabled(_ isEnabled: Bool, rootPath: URL) {
+        longTermWatchTargets = dependencies.longTermWatchTargets.setEnabled(
+            isEnabled,
+            forRootPath: rootPath,
+            currentTargets: longTermWatchTargets
+        )
+    }
+
+    func removeLongTermWatchTarget(rootPath: URL) {
+        longTermWatchTargets = dependencies.longTermWatchTargets.remove(
+            rootPath: rootPath,
+            currentTargets: longTermWatchTargets
+        )
+    }
+
+    private func cancelLongTermWatchBaseline() {
+        longTermWatchBaselineTask?.cancel()
+        longTermWatchBaselineTask = nil
+        longTermWatchBaselineTaskID = nil
     }
 
     func recordSunburstSegmentClick() {
