@@ -126,6 +126,19 @@ final class SidebarModelTests: XCTestCase {
 
         XCTAssertEqual(model.activeTargetID, smart.id)
     }
+
+    @MainActor
+    func testRebuildingTargetSectionsKeepsActivityDashboardActive() {
+        let model = SidebarModel(
+            recentTargetStore: makeSidebarRecentTargetStore(),
+            preferredSmartTargetIDs: { [] }
+        )
+
+        model.setActiveTargetID(SidebarModel.activityDashboardID)
+        model.refreshTargetSections(availableTargets: [], recentTargets: [])
+
+        XCTAssertEqual(model.activeTargetID, SidebarModel.activityDashboardID)
+    }
 }
 
 private func makeSidebarRecentTargetStore(

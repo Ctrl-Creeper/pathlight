@@ -98,6 +98,19 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectingActivityDashboardDoesNotStartScan() {
+        let scanService = ControlledAppModelScanService()
+        let model = AppModel(dependencies: makeDependencies(scanService: scanService))
+
+        model.selectSidebarTarget(id: SidebarModel.activityDashboardID)
+
+        XCTAssertTrue(model.isActivityDashboardSelected)
+        XCTAssertEqual(model.sidebar.activeTargetID, SidebarModel.activityDashboardID)
+        XCTAssertFalse(model.scanState.isScanning)
+        XCTAssertTrue(scanService.requests.isEmpty)
+    }
+
+    @MainActor
     func testPreferenceChangesPersistThroughInjectedStore() async throws {
         let preferences = SpyAppPreferencesStore(preferences: .defaults)
         let model = AppModel(dependencies: makeDependencies(preferences: preferences))

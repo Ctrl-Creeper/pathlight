@@ -17,6 +17,8 @@ struct SidebarTargetDisplay: Equatable, Identifiable {
 
 @MainActor
 final class SidebarModel: ObservableObject {
+    static let activityDashboardID = "pathlight.activity"
+
     @Published private(set) var smartTargetRows: [SidebarTargetDisplay] = []
     @Published private(set) var recentScanTargetRows: [SidebarTargetDisplay] = []
     @Published private(set) var activeTargetID: String?
@@ -111,6 +113,10 @@ final class SidebarModel: ObservableObject {
     }
 
     private func clearActiveTargetIfMissing() {
+        guard activeTargetID != Self.activityDashboardID else {
+            return
+        }
+
         guard let activeTargetID,
               !smartTargetValues.contains(where: { $0.id == activeTargetID }),
               !recentScanTargetValues.contains(where: { $0.id == activeTargetID }) else {

@@ -14,6 +14,7 @@ struct SidebarView: View {
     @FocusState.Binding var focusedWorkspaceTarget: WorkspaceFocusTarget?
     let discardPileSummary: DiscardPileSummary
     let discardPileDragIsActive: Bool
+    let longTermWatchTargetCount: Int
     let actions: SidebarActions
 
     @State private var discardPileDropIsTargeted = false
@@ -32,6 +33,11 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: selection) {
+                Section("Monitor") {
+                    ActivitySidebarRow(trackedFolderCount: longTermWatchTargetCount)
+                        .tag(SidebarModel.activityDashboardID)
+                }
+
                 if !model.smartTargetRows.isEmpty {
                     Section("Smart Locations") {
                         ForEach(model.smartTargetRows) { row in
@@ -87,6 +93,37 @@ struct SidebarView: View {
             payloads.flatMap(\.nodeIDs),
             snapshotID
         )
+    }
+}
+
+private struct ActivitySidebarRow: View {
+    let trackedFolderCount: Int
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Activity")
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        } icon: {
+            Image(systemName: "waveform.path.ecg")
+                .symbolRenderingMode(.hierarchical)
+        }
+        .help("Activity Dashboard")
+    }
+
+    private var subtitle: String {
+        guard trackedFolderCount > 0 else {
+            return "No tracked folders"
+        }
+
+        return trackedFolderCount == 1 ? "1 tracked folder" : "\(trackedFolderCount.formatted()) tracked folders"
     }
 }
 

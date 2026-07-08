@@ -29,28 +29,37 @@ struct ContentView: View {
                 focusedWorkspaceTarget: $focusedWorkspaceTarget,
                 discardPileSummary: appModel.discardPileSummary,
                 discardPileDragIsActive: discardPileDragIsActive,
+                longTermWatchTargetCount: appModel.longTermWatchTargets.count,
                 actions: sidebarActions
             )
                 .navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 320)
         } detail: {
-            WorkspaceDetailView(
-                scanState: appModel.scanState,
-                navigation: appModel.navigation,
-                isInspectorPresented: $showsInspector,
-                focusedWorkspaceTarget: $focusedWorkspaceTarget,
-                maxRenderedDepth: appModel.maxRenderedDepth,
-                showFreeSpaceInSunburst: appModel.showFreeSpaceInSunburst,
-                discardPileHiddenNodeIDs: appModel.discardPileHiddenNodeIDs,
-                startupDiskTarget: appModel.startupDiskTarget,
-                liveWatchSession: appModel.liveWatchSession,
-                activityHistory: appModel.activityHistory,
-                longTermWatchTargets: appModel.longTermWatchTargets,
-                fullDiskAccessStatus: appModel.fullDiskAccessStatus,
-                freeSpaceAvailableCapacity: { snapshot, focusNode in
-                    appModel.sunburstFreeSpaceAvailableCapacity(for: snapshot, focusNode: focusNode)
-                },
-                actions: workspaceActions
-            )
+            if appModel.isActivityDashboardSelected {
+                ActivityDashboardView(
+                    targets: appModel.longTermWatchTargets,
+                    history: appModel.activityHistory,
+                    actions: activityDashboardActions
+                )
+            } else {
+                WorkspaceDetailView(
+                    scanState: appModel.scanState,
+                    navigation: appModel.navigation,
+                    isInspectorPresented: $showsInspector,
+                    focusedWorkspaceTarget: $focusedWorkspaceTarget,
+                    maxRenderedDepth: appModel.maxRenderedDepth,
+                    showFreeSpaceInSunburst: appModel.showFreeSpaceInSunburst,
+                    discardPileHiddenNodeIDs: appModel.discardPileHiddenNodeIDs,
+                    startupDiskTarget: appModel.startupDiskTarget,
+                    liveWatchSession: appModel.liveWatchSession,
+                    activityHistory: appModel.activityHistory,
+                    longTermWatchTargets: appModel.longTermWatchTargets,
+                    fullDiskAccessStatus: appModel.fullDiskAccessStatus,
+                    freeSpaceAvailableCapacity: { snapshot, focusNode in
+                        appModel.sunburstFreeSpaceAvailableCapacity(for: snapshot, focusNode: focusNode)
+                    },
+                    actions: workspaceActions
+                )
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .focusedSceneValue(\.workspaceFocusAction) { target in
@@ -62,7 +71,7 @@ struct ContentView: View {
         .background(WorkspaceWindowObserver { window in
             appModel.setWorkspaceWindowNumber(window?.windowNumber)
         })
-        .inspector(isPresented: $showsInspector) {
+        .inspector(isPresented: inspectorVisibilityBinding) {
             SelectionInspectorView(
                 scanState: appModel.scanState,
                 navigation: appModel.navigation,
@@ -619,6 +628,22 @@ private struct WorkspaceDetailView: View {
 }
 
 private extension ContentView {
+    var inspectorVisibilityBinding: Binding<Bool> {
+        Binding(
+            get: { showsInspector && !appModel.isActivityDashboardSelected },
+            set: { showsInspector = $0 }
+        )
+    }
+
+    var activityDashboardActions: ActivityDashboardActions {
+        ActivityDashboardActions(
+            refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
+            setLongTermWatchEnabled: { appModel.setLongTermWatchEnabled($0, rootPath: $1) },
+            removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0) },
+            revealInFinder: { appModel.revealURLInFinder($0) }
+        )
+    }
+
     var workspaceActions: WorkspaceActions {
         WorkspaceActions(
             chooseFolder: { appModel.presentOpenPanelAndScan() },

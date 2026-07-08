@@ -41,6 +41,7 @@ let package = Package(
                 "Services/AtomicDirectorySummarizer.swift",
                 "Services/AtomicDirectorySummaryModels.swift",
                 "Services/ActivityBaselineService.swift",
+                "Services/ActivityDashboardPresentation.swift",
                 "Services/ActivityEventStore.swift",
                 "Services/ActivityHistoryService.swift",
                 "Services/ActivityHistoryPresentation.swift",

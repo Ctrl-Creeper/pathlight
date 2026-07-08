@@ -350,6 +350,10 @@ final class AppModel: ObservableObject {
         sidebarModel
     }
 
+    var isActivityDashboardSelected: Bool {
+        sidebarModel.activeTargetID == SidebarModel.activityDashboardID
+    }
+
     var discardPileNodes: [FileNodeRecord] {
         resolvedDiscardPileNodes()
     }
@@ -1373,6 +1377,13 @@ final class AppModel: ObservableObject {
     }
 
     private func selectSidebarTargetNow(id: String?) {
+        if id == SidebarModel.activityDashboardID {
+            cancelDeferredSidebarSelection()
+            sidebarScanCacheController.cancelPendingSidebarTargetRestore()
+            sidebarModel.setActiveTargetID(SidebarModel.activityDashboardID)
+            return
+        }
+
         guard let id,
               let target = sidebarTarget(id: id) else {
             return
@@ -1435,6 +1446,10 @@ final class AppModel: ObservableObject {
 
     func revealTargetInFinder(_ target: ScanTarget) {
         dependencies.systemActions.reveal(target.url)
+    }
+
+    func revealURLInFinder(_ url: URL) {
+        dependencies.systemActions.reveal(url)
     }
 
     func openSelected() {
