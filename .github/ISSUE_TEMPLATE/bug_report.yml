@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report reproducible Radix bug.
+description: Report reproducible Pathlight bug.
 labels:
   - bug
   - needs-triage
@@ -8,16 +8,16 @@ body:
     id: latest_version
     attributes:
       label: Latest Version
-      description: Please confirm you are using the latest Radix release before reporting a bug.
+      description: Please confirm you are using the latest Pathlight release before reporting a bug.
       options:
-        - label: I am using the latest version of Radix.
+        - label: I am using the latest version of Pathlight.
           required: true
 
   - type: dropdown
     id: affected_area
     attributes:
       label: Affected Area
-      description: Pick the closest part of Radix.
+      description: Pick the closest part of Pathlight.
       options:
         - Scan engine / scan progress estimation / scan results
         - Onboarding / welcome screen
@@ -36,7 +36,7 @@ body:
     attributes:
       label: Summary
       description: What broke?
-      placeholder: Radix skipped files in ~/Library without showing a clear warning.
+      placeholder: Pathlight skipped files in ~/Library without showing a clear warning.
     validations:
       required: true
 
@@ -46,7 +46,7 @@ body:
       label: Steps to Reproduce
       description: List the actions that trigger the bug.
       placeholder: |
-        1. Open Radix
+        1. Open Pathlight
         2. Scan a folder or volume
         3. Click a sunburst segment
         4. Observe...
@@ -57,7 +57,7 @@ body:
     id: expected
     attributes:
       label: Expected Behavior
-      description: What should Radix do instead?
+      description: What should Pathlight do instead?
     validations:
       required: false
 
@@ -94,9 +94,9 @@ body:
       required: false
 
   - type: input
-    id: radix_version
+    id: pathlight_version
     attributes:
-      label: Radix Version
+      label: Pathlight Version
       description: App release where bug occurred.
       placeholder: v1.2.0
     validations:
@@ -123,7 +123,7 @@ body:
     id: regression
     attributes:
       label: Regression
-      description: If this worked before, which Radix version or commit last worked?
+      description: If this worked before, which Pathlight version or commit last worked?
       placeholder: Worked in v1.0.0, broken on main@abc1234.
     validations:
       required: false

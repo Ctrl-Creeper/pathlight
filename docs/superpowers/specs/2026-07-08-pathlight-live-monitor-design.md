@@ -2,7 +2,7 @@
 
 ## Summary
 
-Pathlight extends Radix from a static disk space analyzer into a storage change monitor. The first version adds file-level timeline and storage attribution without promising app/process attribution. It uses macOS file system change observation to answer a different question from system monitors: not "how busy is the disk," but "where did storage change, and when?"
+Pathlight extends Pathlight from a static disk space analyzer into a storage change monitor. The first version adds file-level timeline and storage attribution without promising app/process attribution. It uses macOS file system change observation to answer a different question from system monitors: not "how busy is the disk," but "where did storage change, and when?"
 
 The feature has two user-facing modes:
 
@@ -18,7 +18,7 @@ Endpoint Security-based app attribution is explicitly out of scope for this firs
 - Provide a detailed timeline for temporary sessions.
 - Provide long-term size trends and important historical events for configured folders.
 - Keep privacy, energy use, and log volume under user control.
-- Preserve Radix's existing scan, sunburst, file browser, and snapshot architecture.
+- Preserve Pathlight's existing scan, sunburst, file browser, and snapshot architecture.
 
 ## Non-Goals
 
@@ -136,7 +136,7 @@ The implementation should add a live monitoring layer beside the existing scan s
 - Bridges live events into SwiftUI view models.
 - Keeps this behavior separate from `ScanCoordinator`, which remains responsible for static scans and scan snapshots.
 
-### Relationship To Existing Radix Components
+### Relationship To Existing Pathlight Components
 
 `ScanEngine` should remain the source of truth for full scans.
 
@@ -189,7 +189,7 @@ Important UI principles:
 
 Pathlight should explain monitoring in plain language before enabling it.
 
-First-version monitoring should work with paths the user can already access. For protected locations, the app may guide users toward Full Disk Access, consistent with Radix's existing permission model.
+First-version monitoring should work with paths the user can already access. For protected locations, the app may guide users toward Full Disk Access, consistent with Pathlight's existing permission model.
 
 Long-term file-level names should not be enabled silently. Folder-level aggregation should be the default for long-term history.
 

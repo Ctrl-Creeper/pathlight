@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a focused Radix improvement.
+description: Suggest a focused Pathlight improvement.
 labels:
   - enhancement
   - needs-triage
@@ -8,16 +8,16 @@ body:
     id: latest_version
     attributes:
       label: Latest Version
-      description: Please confirm you are using the latest Radix release before requesting a feature.
+      description: Please confirm you are using the latest Pathlight release before requesting a feature.
       options:
-        - label: I am using the latest version of Radix.
+        - label: I am using the latest version of Pathlight.
           required: true
 
   - type: dropdown
     id: affected_area
     attributes:
       label: Affected Area
-      description: Pick the closest part of Radix.
+      description: Pick the closest part of Pathlight.
       options:
         - Scan engine / scan progress estimation / scan results
         - Onboarding / welcome screen
@@ -49,8 +49,8 @@ body:
     id: summary
     attributes:
       label: Summary
-      description: What should Radix support or improve?
-      placeholder: Radix should let me compare two scans of the same folder to see what changed.
+      description: What should Pathlight support or improve?
+      placeholder: Pathlight should let me compare two scans of the same folder to see what changed.
     validations:
       required: true
 

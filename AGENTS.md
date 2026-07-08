@@ -4,7 +4,7 @@ This file tells coding agents how to work effectively in this repository.
 
 ## Purpose
 
-Radix is a native macOS disk space analyzer built in Swift and SwiftUI. When developing Radix, prioritize Swift/SwiftUI best practices and modern code.
+Pathlight is a native macOS disk space analyzer built in Swift and SwiftUI. When developing Pathlight, prioritize Swift/SwiftUI best practices and modern code.
 
 ## Commit Guidelines
 
@@ -19,16 +19,16 @@ Radix is a native macOS disk space analyzer built in Swift and SwiftUI. When dev
 
 ## Environment Facts
 
-- Repository root: `Radix/`
+- Repository root: `Pathlight/`
 - Swift 6
 - macOS target: macOS 14.0+
 - App UI framework: SwiftUI (always preferred over UIKit/AppKit)
-- Tests: `RadixCoreTests/`
+- Tests: `PathlightCoreTests/`
 
 ## Project Structure
 
 ```
-Radix/
+Pathlight/
 ├── App/                  # App entry point, commands, window management
 ├── Models/               # Core data types (FileNodeRecord, ScanSnapshot, etc.)
 ├── Services/             # Scan engine, sunburst geometry, formatters
@@ -51,21 +51,21 @@ Important paths:
 
 - `README.md`: product intent, feature summary, high-level architecture
 - `Package.swift`: exact package target membership
-- `Radix/RadixApp.swift`: app entry
-- `Radix/ContentView.swift`: root content composition
-- `Radix/ViewModels/AppModel.swift`: central `@MainActor` app state and UI coordination
-- `Radix/Models/`: core scan targets, node records, tree storage, snapshots, progress, file actions, and trash safety
-- `Radix/Services/ScanEngine.swift`: actor-based filesystem scanner
-- `Radix/Services/SunburstGeometry.swift`: sunburst layout math
-- `Radix/Services/SystemIntegration.swift`: Finder/open/trash/system-facing actions
-- `Radix/Shared/`: shared UI helpers
-- `RadixCoreTests/`: package-level unit and benchmark-style tests
+- `Pathlight/PathlightApp.swift`: app entry
+- `Pathlight/ContentView.swift`: root content composition
+- `Pathlight/ViewModels/AppModel.swift`: central `@MainActor` app state and UI coordination
+- `Pathlight/Models/`: core scan targets, node records, tree storage, snapshots, progress, file actions, and trash safety
+- `Pathlight/Services/ScanEngine.swift`: actor-based filesystem scanner
+- `Pathlight/Services/SunburstGeometry.swift`: sunburst layout math
+- `Pathlight/Services/SystemIntegration.swift`: Finder/open/trash/system-facing actions
+- `Pathlight/Shared/`: shared UI helpers
+- `PathlightCoreTests/`: package-level unit and benchmark-style tests
 - `releases/`: release/update assets
 - Sparkle is managed through Xcode Swift Package Manager; do not add vendored Sparkle folders or frameworks to the repo.
 
 ## Product Constraints
 
-Radix makes several user-facing promises. Do not casually violate them:
+Pathlight makes several user-facing promises. Do not casually violate them:
 
 - Scans should feel fast and responsive.
 - The app should not mutate files unless the user explicitly requests an action.
@@ -96,9 +96,9 @@ Do not use Context7 for:
 
 ## If You Need A Starting Point
 
-- Scanner bug or data bug: start with `Radix/Services/ScanEngine.swift` and the matching tests in `RadixCoreTests/`
-- Selection/navigation/UI state bug: start with `Radix/ViewModels/AppModel.swift`
-- Tree/index behavior bug: start with `Radix/Models/FileTreeStore.swift`
-- Search behavior bug: start with `Radix/Services/FileBrowserModel.swift`
-- Size or display formatting bug: start with `Radix/Services/FileSizeFormatter.swift`
-- Visualization/layout bug: start with `Radix/Services/SunburstGeometry.swift`
+- Scanner bug or data bug: start with `Pathlight/Services/ScanEngine.swift` and the matching tests in `PathlightCoreTests/`
+- Selection/navigation/UI state bug: start with `Pathlight/ViewModels/AppModel.swift`
+- Tree/index behavior bug: start with `Pathlight/Models/FileTreeStore.swift`
+- Search behavior bug: start with `Pathlight/Services/FileBrowserModel.swift`
+- Size or display formatting bug: start with `Pathlight/Services/FileSizeFormatter.swift`
+- Visualization/layout bug: start with `Pathlight/Services/SunburstGeometry.swift`

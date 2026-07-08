@@ -3,20 +3,20 @@
 import PackageDescription
 
 let package = Package(
-    name: "RadixCore",
+    name: "PathlightCore",
     platforms: [
         .macOS("14.0")
     ],
     products: [
         .library(
-            name: "RadixCore",
-            targets: ["RadixCore"]
+            name: "PathlightCore",
+            targets: ["PathlightCore"]
         )
     ],
     targets: [
         .target(
-            name: "RadixCore",
-            path: "Radix",
+            name: "PathlightCore",
+            path: "Pathlight",
             exclude: [
                 "App",
                 "AppIcon.icon",
@@ -24,9 +24,8 @@ let package = Package(
                 "ContentView.swift",
                 "Features",
                 "Info.plist",
-                "RadixApp.swift",
-                "Shared",
-                "Views"
+                "PathlightApp.swift",
+                "Shared"
             ],
             sources: [
                 "Models/FileNodeActions.swift",
@@ -81,9 +80,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "RadixCoreTests",
-            dependencies: ["RadixCore"],
-            path: "RadixCoreTests"
+            name: "PathlightCoreTests",
+            dependencies: ["PathlightCore"],
+            path: "PathlightCoreTests"
         )
     ]
 )

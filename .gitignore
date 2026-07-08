@@ -1,6 +1,6 @@
 .build/
 *.xcuserstate
 xcuserdata/
-Radix.xcodeproj/xcuserdata/
+Pathlight.xcodeproj/xcuserdata/
 Sparkle-*/
 releases/
