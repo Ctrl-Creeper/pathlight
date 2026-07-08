@@ -4,3 +4,5 @@ xcuserdata/
 Pathlight.xcodeproj/xcuserdata/
 Sparkle-*/
 releases/
+
+.DS_Store
