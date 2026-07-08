@@ -7,9 +7,9 @@ import CryptoKit
 import Foundation
 
 private enum ScanArchiveNodeIOConstants {
-    static let readChunkSize = 1024 * 1024
-    static let maxNodeLineByteCount = 1024 * 1024
-    static let newlineData = Data([0x0A])
+    nonisolated static let readChunkSize = 1024 * 1024
+    nonisolated static let maxNodeLineByteCount = 1024 * 1024
+    nonisolated static let newlineData = Data([0x0A])
 }
 
 nonisolated struct ScanArchiveNodePayload: Sendable {
@@ -178,7 +178,7 @@ extension ScanArchiveService {
         } catch {
             throw ScanArchiveError.nodes("invalid JSONL node: \(error.localizedDescription)")
         }
-        guard nodesByID[node.id] == nil else {
+        if let _ = nodesByID[node.id] {
             throw ScanArchiveError.nodes("duplicate node ID \(node.id)")
         }
         nodesByID[node.id] = node

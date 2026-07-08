@@ -1211,7 +1211,7 @@ actor ScanEngine {
         warnings: inout [ScanWarning],
         continuation: AsyncThrowingStream<ScanProgressEvent, Error>.Continuation
     ) -> Bool {
-        guard nodesByID[node.id] == nil else {
+        if let _ = nodesByID[node.id] {
             let warning = ScanWarningFactory.makeDuplicateNodeWarning(for: node.url)
             warnings.append(warning)
             continuation.yield(.warning(warning))

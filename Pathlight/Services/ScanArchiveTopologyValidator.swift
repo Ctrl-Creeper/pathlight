@@ -3,6 +3,8 @@
 //  Pathlight
 //
 
+import Foundation
+
 extension ScanArchiveService {
     func validateTopology(
         _ topology: ScanArchiveResolvedTopology,
@@ -20,7 +22,7 @@ extension ScanArchiveService {
         guard rootNode.url.path == expectedTargetPath else {
             throw ScanArchiveError.topology("root path does not match target path")
         }
-        for parentID in topology.childIDsByID.keys where nodesByID[parentID] == nil {
+        for parentID in topology.childIDsByID.keys where !nodesByID.keys.contains(parentID) {
             throw ScanArchiveError.topology("child map parent \(parentID) is missing from node payload")
         }
 
