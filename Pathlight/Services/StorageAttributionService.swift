@@ -149,3 +149,22 @@ struct StorageAttributionService {
         }
     }
 }
+
+enum FileAllocatedSizeProvider {
+    nonisolated static func allocatedSize(for url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [
+            .totalFileAllocatedSizeKey,
+            .fileAllocatedSizeKey
+        ]) else {
+            return nil
+        }
+
+        if let totalFileAllocatedSize = values.totalFileAllocatedSize {
+            return Int64(totalFileAllocatedSize)
+        }
+        if let fileAllocatedSize = values.fileAllocatedSize {
+            return Int64(fileAllocatedSize)
+        }
+        return nil
+    }
+}

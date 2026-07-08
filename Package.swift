@@ -53,6 +53,7 @@ let package = Package(
                 "Services/FileBrowserSorting.swift",
                 "Services/FileSizeFormatter.swift",
                 "Services/HardLinkDeduplicator.swift",
+                "Services/LiveWatchSessionCoordinator.swift",
                 "Services/QuickLookIntegration.swift",
                 "Services/RecentTargetStore.swift",
                 "Services/ScanArchiveModels.swift",

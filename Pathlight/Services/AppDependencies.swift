@@ -13,6 +13,9 @@ struct AppDependencies {
     var scanService: any ScanEventStreaming
     var scanArchiveService: any ScanArchiveServicing
     var usageStats: any AppUsageStatsPersisting
+    var activityMonitor: any DiskActivityMonitoring
+    var activitySizeProvider: StorageAttributionService.SizeProvider
+    var activityPriorSizeProvider: StorageAttributionService.SizeProvider
 
     init(
         preferences: any AppPreferencesPersisting,
@@ -20,7 +23,10 @@ struct AppDependencies {
         systemActions: AppSystemActions,
         scanService: any ScanEventStreaming = ScanEngine(),
         scanArchiveService: any ScanArchiveServicing = ScanArchiveService(),
-        usageStats: any AppUsageStatsPersisting = InMemoryAppUsageStatsStore()
+        usageStats: any AppUsageStatsPersisting = InMemoryAppUsageStatsStore(),
+        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activitySizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
+        activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
     ) {
         self.preferences = preferences
         self.recentTargets = recentTargets
@@ -28,6 +34,9 @@ struct AppDependencies {
         self.scanService = scanService
         self.scanArchiveService = scanArchiveService
         self.usageStats = usageStats
+        self.activityMonitor = activityMonitor
+        self.activitySizeProvider = activitySizeProvider
+        self.activityPriorSizeProvider = activityPriorSizeProvider
     }
 
     static var live: AppDependencies {

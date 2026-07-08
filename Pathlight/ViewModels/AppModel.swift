@@ -190,6 +190,7 @@ final class AppModel: ObservableObject {
     @Published var pendingTrashSelection: PendingTrashSelection?
     @Published private(set) var discardPile = DiscardPileState()
     @Published private(set) var usageStats = AppUsageStats.empty
+    @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
 
     private let dependencies: AppDependencies
@@ -220,6 +221,8 @@ final class AppModel: ObservableObject {
     private var snapshotArchiveTask: Task<Void, Never>?
     private var snapshotArchiveProgressTask: Task<Void, Never>?
     private var exportConfirmationDismissTask: Task<Void, Never>?
+    private var liveWatchTask: Task<Void, Never>?
+    private var liveWatchTaskID: UUID?
     private var postTrashRemovalRequests: [PostTrashRemovalRequest] = []
     private var fullDiskAccessRefreshTask: Task<Void, Never>?
     private var targetCapacityDescriptionsRefreshTask: Task<Void, Never>?
@@ -290,6 +293,7 @@ final class AppModel: ObservableObject {
         fullDiskAccessRefreshTask = nil
         targetCapacityDescriptionsRefreshTask?.cancel()
         targetCapacityDescriptionsRefreshTask = nil
+        stopShortTermWatch()
         exportPanelTask?.cancel()
         exportPanelTask = nil
         isExportPanelPresented = false
@@ -435,6 +439,49 @@ final class AppModel: ObservableObject {
     func clearUsageStats() {
         usageStats = .empty
         dependencies.usageStats.clearUsageStats()
+    }
+
+    func startShortTermWatch(
+        rootPath: URL,
+        options: DiskActivityAggregationOptions = .default
+    ) {
+        stopShortTermWatch()
+
+        let taskID = UUID()
+        liveWatchTaskID = taskID
+        let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
+        let sizeProvider = dependencies.activitySizeProvider
+        let priorSizeProvider = dependencies.activityPriorSizeProvider
+
+        liveWatchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.liveWatchTaskID == taskID {
+                    self.liveWatchTask = nil
+                    self.liveWatchTaskID = nil
+                }
+            }
+
+            let stream = coordinator.sessions(
+                rootPath: rootPath,
+                options: options,
+                sizeProvider: sizeProvider,
+                priorSizeProvider: priorSizeProvider
+            )
+            for await session in stream {
+                guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
+                    break
+                }
+                self.liveWatchSession = session
+            }
+        }
+    }
+
+    func stopShortTermWatch() {
+        liveWatchTask?.cancel()
+        liveWatchTask = nil
+        liveWatchTaskID = nil
+        liveWatchSession = nil
     }
 
     func recordSunburstSegmentClick() {

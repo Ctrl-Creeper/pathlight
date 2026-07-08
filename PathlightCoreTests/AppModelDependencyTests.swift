@@ -243,6 +243,55 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testShortTermWatchUpdatesLiveSessionThroughInjectedMonitor() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "archive.zip")
+        let monitor = ControlledDiskActivityMonitor()
+        let model = AppModel(dependencies: makeDependencies(
+            activityMonitor: monitor,
+            activitySizeProvider: { url in
+                url.path == file.path ? 4_096 : nil
+            }
+        ))
+
+        model.startShortTermWatch(
+            rootPath: root,
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 1,
+                aggregationWindow: 0,
+                longTermRecordsFileNames: true
+            )
+        )
+
+        try await waitUntil("short-term watch session started") {
+            model.liveWatchSession?.rootPath == root.standardizedFileURL
+        }
+        try await waitUntil("short-term monitor subscribed") {
+            monitor.isWatching
+        }
+
+        monitor.yield(
+            DiskActivityChange(
+                kind: .created,
+                path: file,
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 200)
+            )
+        )
+
+        try await waitUntil("short-term watch records attributed event") {
+            model.liveWatchSession?.events.first?.byteDelta == 4_096
+        }
+
+        XCTAssertEqual(model.liveWatchSession?.events.first?.kind, .created)
+        XCTAssertEqual(model.liveWatchSession?.events.first?.path, file)
+
+        model.stopShortTermWatch()
+
+        XCTAssertNil(model.liveWatchSession)
+    }
+
+    @MainActor
     func testFullDiskAccessFromOnboardingShowsWelcomeAfterRelaunch() {
         let preferences = SpyAppPreferencesStore(
             preferences: AppPreferences(
@@ -2342,6 +2391,50 @@ private final class ControlledAppModelScanService: ScanEventStreaming, @unchecke
     }
 }
 
+private struct EmptyDiskActivityMonitor: DiskActivityMonitoring {
+    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+}
+
+private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncStream<DiskActivityChange>.Continuation?
+
+    var isWatching: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return continuation != nil
+    }
+
+    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+        AsyncStream { continuation in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func yield(_ change: DiskActivityChange) {
+        lock.lock()
+        let continuation = continuation
+        lock.unlock()
+
+        continuation?.yield(change)
+    }
+
+    func finish() {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+
+        continuation?.finish()
+    }
+}
+
 @MainActor
 private func makeDependencies(
     preferences: SpyAppPreferencesStore = SpyAppPreferencesStore(preferences: .defaults),
@@ -2350,7 +2443,10 @@ private func makeDependencies(
     systemActions: AppSystemActions = .inert,
     scanService: any ScanEventStreaming = ScanEngine(),
     scanArchiveService: any ScanArchiveServicing = ScanArchiveService(),
-    usageStats: any AppUsageStatsPersisting = InMemoryAppUsageStatsStore()
+    usageStats: any AppUsageStatsPersisting = InMemoryAppUsageStatsStore(),
+    activityMonitor: any DiskActivityMonitoring = EmptyDiskActivityMonitor(),
+    activitySizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
+    activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
 ) -> AppDependencies {
     AppDependencies(
         preferences: preferences,
@@ -2361,7 +2457,10 @@ private func makeDependencies(
         systemActions: systemActions,
         scanService: scanService,
         scanArchiveService: scanArchiveService,
-        usageStats: usageStats
+        usageStats: usageStats,
+        activityMonitor: activityMonitor,
+        activitySizeProvider: activitySizeProvider,
+        activityPriorSizeProvider: activityPriorSizeProvider
     )
 }
 
