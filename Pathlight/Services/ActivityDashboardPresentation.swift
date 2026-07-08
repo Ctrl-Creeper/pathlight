@@ -24,7 +24,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
     init(
         targets: [LongTermWatchTarget],
         selectedRootPath: URL?,
-        history: ActivityHistorySnapshot?,
+        histories: [ActivityHistorySnapshot],
         eventLimit: Int = 16,
         bucketLimit: Int = 32
     ) {
@@ -40,7 +40,9 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         }
 
         let standardizedSelectedRoot = selectedRootPath?.standardizedFileURL
-        let historyByRoot = history.map { [$0.rootPath.standardizedFileURL.path: $0] } ?? [:]
+        let historyByRoot = histories.reduce(into: [String: ActivityHistorySnapshot]()) { historiesByRoot, history in
+            historiesByRoot[history.rootPath.standardizedFileURL.path] = history
+        }
         targetRows = targets.map { target in
             let targetHistory = historyByRoot[target.rootPath.standardizedFileURL.path]
             return Self.targetRow(for: target, history: targetHistory)
@@ -52,8 +54,8 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             selectedTargetID = targets.first?.id
         }
 
-        if let history,
-           selectedTargetID == history.rootPath.standardizedFileURL.path {
+        if let selectedTargetID,
+           let history = historyByRoot[selectedTargetID] {
             let historyPresentation = ActivityHistoryPresentation(
                 snapshot: history,
                 eventLimit: eventLimit,

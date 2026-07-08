@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ActivityDashboardActions {
     let refreshActivityHistory: (URL) -> Void
+    let refreshActivityDashboardHistories: ([URL]) -> Void
     let setLongTermWatchEnabled: (Bool, URL) -> Void
     let removeLongTermWatchTarget: (URL) -> Void
     let revealInFinder: (URL) -> Void
@@ -9,7 +10,7 @@ struct ActivityDashboardActions {
 
 struct ActivityDashboardView: View {
     let targets: [LongTermWatchTarget]
-    let history: ActivityHistorySnapshot?
+    let histories: [ActivityHistorySnapshot]
     let actions: ActivityDashboardActions
 
     @State private var selectedTargetID: String?
@@ -26,7 +27,7 @@ struct ActivityDashboardView: View {
         ActivityDashboardPresentation(
             targets: targets,
             selectedRootPath: selectedRootPath,
-            history: history
+            histories: histories
         )
     }
 
@@ -42,7 +43,7 @@ struct ActivityDashboardView: View {
             ToolbarItemGroup(placement: .automatic) {
                 if let selectedRootPath {
                     Button {
-                        actions.refreshActivityHistory(selectedRootPath)
+                        refreshAllTargetHistories()
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
@@ -59,10 +60,11 @@ struct ActivityDashboardView: View {
         }
         .onAppear {
             reconcileSelectedTarget()
-            refreshSelectedHistory()
+            refreshAllTargetHistories()
         }
         .onChange(of: targets) { _, _ in
             reconcileSelectedTarget()
+            refreshAllTargetHistories()
         }
         .onChange(of: selectedTargetID) { _, _ in
             refreshSelectedHistory()
@@ -146,7 +148,7 @@ struct ActivityDashboardView: View {
     }
 
     private var historyRootIDIfTracked: String? {
-        guard let history else { return nil }
+        guard let history = histories.first else { return nil }
         let historyRootID = history.rootPath.standardizedFileURL.path
         guard targets.contains(where: { $0.id == historyRootID }) else {
             return nil
@@ -157,6 +159,10 @@ struct ActivityDashboardView: View {
     private func refreshSelectedHistory() {
         guard let selectedRootPath else { return }
         actions.refreshActivityHistory(selectedRootPath)
+    }
+
+    private func refreshAllTargetHistories() {
+        actions.refreshActivityDashboardHistories(targets.map(\.rootPath))
     }
 }
 

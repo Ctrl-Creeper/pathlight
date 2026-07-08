@@ -192,6 +192,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var usageStats = AppUsageStats.empty
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
+    @Published private(set) var activityDashboardHistories: [String: ActivityHistorySnapshot] = [:]
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
 
@@ -227,6 +228,8 @@ final class AppModel: ObservableObject {
     private var liveWatchTaskID: UUID?
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
+    private var activityDashboardHistoryTask: Task<Void, Never>?
+    private var activityDashboardHistoryTaskID: UUID?
     private var longTermWatchBaselineTask: Task<Void, Never>?
     private var longTermWatchBaselineTaskID: UUID?
     private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
@@ -305,6 +308,7 @@ final class AppModel: ObservableObject {
         targetCapacityDescriptionsRefreshTask = nil
         stopShortTermWatch()
         cancelActivityHistoryRefresh(clearHistory: true)
+        cancelActivityDashboardHistoryRefresh(clearHistories: true)
         cancelLongTermWatchBaseline()
         stopAllLongTermWatches()
         exportPanelTask?.cancel()
@@ -523,6 +527,7 @@ final class AppModel: ObservableObject {
 
         guard let activityEventStore = dependencies.activityEventStore else {
             activityHistory = nil
+            activityDashboardHistories.removeValue(forKey: rootPath.standardizedFileURL.path)
             return
         }
 
@@ -549,11 +554,75 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.activityHistory = history
+                self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
             } catch {
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
                 }
                 self.activityHistory = nil
+                self.activityDashboardHistories.removeValue(forKey: rootPath.standardizedFileURL.path)
+            }
+        }
+    }
+
+    func refreshActivityDashboardHistories(
+        rootPaths: [URL],
+        bucketInterval: TimeInterval = 3_600,
+        eventLimit: Int = 500
+    ) {
+        cancelActivityDashboardHistoryRefresh(clearHistories: false)
+
+        let standardizedRoots = rootPaths
+            .map(\.standardizedFileURL)
+            .reduce(into: [String: URL]()) { rootsByID, root in
+                rootsByID[root.path] = root
+            }
+            .values
+            .sorted { $0.path < $1.path }
+
+        guard !standardizedRoots.isEmpty else { return }
+
+        guard let activityEventStore = dependencies.activityEventStore else {
+            for root in standardizedRoots {
+                activityDashboardHistories.removeValue(forKey: root.path)
+            }
+            return
+        }
+
+        let taskID = UUID()
+        activityDashboardHistoryTaskID = taskID
+        let service = ActivityHistoryService(store: activityEventStore)
+
+        activityDashboardHistoryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.activityDashboardHistoryTaskID == taskID {
+                    self.activityDashboardHistoryTask = nil
+                    self.activityDashboardHistoryTaskID = nil
+                }
+            }
+
+            for root in standardizedRoots {
+                guard !Task.isCancelled, self.activityDashboardHistoryTaskID == taskID else {
+                    return
+                }
+
+                do {
+                    let history = try await service.loadHistory(
+                        rootPath: root,
+                        eventLimit: eventLimit,
+                        bucketInterval: bucketInterval
+                    )
+                    guard !Task.isCancelled, self.activityDashboardHistoryTaskID == taskID else {
+                        return
+                    }
+                    self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
+                } catch {
+                    guard !Task.isCancelled, self.activityDashboardHistoryTaskID == taskID else {
+                        return
+                    }
+                    self.activityDashboardHistories.removeValue(forKey: root.path)
+                }
             }
         }
     }
@@ -564,6 +633,16 @@ final class AppModel: ObservableObject {
         activityHistoryTaskID = nil
         if clearHistory {
             activityHistory = nil
+            activityDashboardHistories.removeAll()
+        }
+    }
+
+    private func cancelActivityDashboardHistoryRefresh(clearHistories: Bool) {
+        activityDashboardHistoryTask?.cancel()
+        activityDashboardHistoryTask = nil
+        activityDashboardHistoryTaskID = nil
+        if clearHistories {
+            activityDashboardHistories.removeAll()
         }
     }
 

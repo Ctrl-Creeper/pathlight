@@ -8,9 +8,8 @@ struct ActivityDashboardPresentationTests {
     func summarizesLongTermTargetsAndSelectedHistory() {
         let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let desktop = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
-        let history = ActivityHistorySnapshot(
+        let history = historySnapshot(
             rootPath: downloads,
-            generatedAt: Date(timeIntervalSince1970: 20_000),
             totalNetByteDelta: 1_024 * 1_024 * 1_024,
             eventCount: 3,
             unknownSizeEventCount: 1,
@@ -43,7 +42,7 @@ struct ActivityDashboardPresentationTests {
                 LongTermWatchTarget(rootPath: desktop, isEnabled: false)
             ],
             selectedRootPath: downloads,
-            history: history
+            histories: [history]
         )
 
         #expect(presentation.title == "Activity")
@@ -58,12 +57,42 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.timelineRows.map(\.title) == ["Created movie.mov", "Deleted missing.zip"])
     }
 
+    @Test("shows per-target history summaries for unselected targets")
+    func showsPerTargetHistorySummaries() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let desktop = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
+        let downloadsHistory = historySnapshot(
+            rootPath: downloads,
+            totalNetByteDelta: 20 * 1_024 * 1_024,
+            eventCount: 2
+        )
+        let desktopHistory = historySnapshot(
+            rootPath: desktop,
+            totalNetByteDelta: -5 * 1_024 * 1_024,
+            eventCount: 1
+        )
+
+        let presentation = ActivityDashboardPresentation(
+            targets: [
+                LongTermWatchTarget(rootPath: downloads),
+                LongTermWatchTarget(rootPath: desktop)
+            ],
+            selectedRootPath: downloads,
+            histories: [downloadsHistory, desktopHistory]
+        )
+
+        #expect(presentation.targetRows.map(\.changeText) == ["+21 MB net", "-5.2 MB net"])
+        #expect(presentation.targetRows.map(\.eventText) == ["2 events", "1 event"])
+        #expect(presentation.trendBuckets.isEmpty)
+        #expect(presentation.selectedTargetID == downloads.standardizedFileURL.path)
+    }
+
     @Test("shows empty state when there are no long-term targets")
     func showsEmptyState() {
         let presentation = ActivityDashboardPresentation(
             targets: [],
             selectedRootPath: nil,
-            history: nil
+            histories: []
         )
 
         #expect(presentation.summaryText == "No tracked folders")
@@ -71,6 +100,25 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.targetRows.isEmpty)
         #expect(presentation.timelineRows.isEmpty)
     }
+}
+
+private func historySnapshot(
+    rootPath: URL,
+    totalNetByteDelta: Int64,
+    eventCount: Int,
+    unknownSizeEventCount: Int = 0,
+    buckets: [ActivityHistoryBucket] = [],
+    recentEvents: [DiskActivityEvent] = []
+) -> ActivityHistorySnapshot {
+    ActivityHistorySnapshot(
+        rootPath: rootPath,
+        generatedAt: Date(timeIntervalSince1970: 20_000),
+        totalNetByteDelta: totalNetByteDelta,
+        eventCount: eventCount,
+        unknownSizeEventCount: unknownSizeEventCount,
+        buckets: buckets,
+        recentEvents: recentEvents
+    )
 }
 
 private func event(

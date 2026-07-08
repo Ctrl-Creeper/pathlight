@@ -37,7 +37,7 @@ struct ContentView: View {
             if appModel.isActivityDashboardSelected {
                 ActivityDashboardView(
                     targets: appModel.longTermWatchTargets,
-                    history: appModel.activityHistory,
+                    histories: Array(appModel.activityDashboardHistories.values),
                     actions: activityDashboardActions
                 )
             } else {
@@ -638,6 +638,7 @@ private extension ContentView {
     var activityDashboardActions: ActivityDashboardActions {
         ActivityDashboardActions(
             refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
+            refreshActivityDashboardHistories: { appModel.refreshActivityDashboardHistories(rootPaths: $0) },
             setLongTermWatchEnabled: { appModel.setLongTermWatchEnabled($0, rootPath: $1) },
             removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0) },
             revealInFinder: { appModel.revealURLInFinder($0) }

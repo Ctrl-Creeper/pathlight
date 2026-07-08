@@ -398,6 +398,96 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testRefreshActivityHistoryKeepsDashboardHistoryPerRoot() async throws {
+        let downloads = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let desktop = URL(filePath: "/watched-desktop", directoryHint: .isDirectory)
+        let eventStore = RecordingActivityEventStore()
+        try await eventStore.append([
+            DiskActivityEvent(
+                kind: .created,
+                path: downloads.appending(path: "installer.dmg"),
+                rootPath: downloads,
+                timestamp: Date(timeIntervalSince1970: 3_600),
+                byteDelta: 2_048,
+                confidence: .confirmed,
+                previousPath: nil,
+                affectedItemCount: 1
+            ),
+            DiskActivityEvent(
+                kind: .deleted,
+                path: desktop.appending(path: "old.zip"),
+                rootPath: desktop,
+                timestamp: Date(timeIntervalSince1970: 7_200),
+                byteDelta: -1_024,
+                confidence: .estimated,
+                previousPath: nil,
+                affectedItemCount: 1
+            )
+        ])
+        let model = AppModel(dependencies: makeDependencies(activityEventStore: eventStore))
+
+        model.refreshActivityHistory(rootPath: downloads, bucketInterval: 3_600, eventLimit: 100)
+        try await waitUntil("downloads dashboard history loaded") {
+            model.activityDashboardHistories[downloads.standardizedFileURL.path]?.eventCount == 1
+        }
+
+        model.refreshActivityHistory(rootPath: desktop, bucketInterval: 3_600, eventLimit: 100)
+        try await waitUntil("desktop dashboard history loaded") {
+            model.activityDashboardHistories[desktop.standardizedFileURL.path]?.eventCount == 1
+        }
+
+        XCTAssertEqual(model.activityDashboardHistories[downloads.standardizedFileURL.path]?.totalNetByteDelta, 2_048)
+        XCTAssertEqual(model.activityDashboardHistories[desktop.standardizedFileURL.path]?.totalNetByteDelta, -1_024)
+        XCTAssertEqual(model.activityHistory?.rootPath, desktop.standardizedFileURL)
+    }
+
+    @MainActor
+    func testRefreshActivityDashboardHistoriesLoadsMultipleRootsWithoutChangingSelectedHistory() async throws {
+        let downloads = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let desktop = URL(filePath: "/watched-desktop", directoryHint: .isDirectory)
+        let eventStore = RecordingActivityEventStore()
+        try await eventStore.append([
+            DiskActivityEvent(
+                kind: .created,
+                path: downloads.appending(path: "installer.dmg"),
+                rootPath: downloads,
+                timestamp: Date(timeIntervalSince1970: 3_600),
+                byteDelta: 2_048,
+                confidence: .confirmed,
+                previousPath: nil,
+                affectedItemCount: 1
+            ),
+            DiskActivityEvent(
+                kind: .deleted,
+                path: desktop.appending(path: "old.zip"),
+                rootPath: desktop,
+                timestamp: Date(timeIntervalSince1970: 7_200),
+                byteDelta: -1_024,
+                confidence: .estimated,
+                previousPath: nil,
+                affectedItemCount: 1
+            )
+        ])
+        let model = AppModel(dependencies: makeDependencies(activityEventStore: eventStore))
+
+        model.refreshActivityDashboardHistories(
+            rootPaths: [downloads, desktop, downloads],
+            bucketInterval: 3_600,
+            eventLimit: 100
+        )
+
+        try await waitUntil("all dashboard histories loaded") {
+            model.activityDashboardHistories[downloads.standardizedFileURL.path]?.eventCount == 1 &&
+                model.activityDashboardHistories[desktop.standardizedFileURL.path]?.eventCount == 1
+        }
+
+        XCTAssertEqual(model.activityDashboardHistories.count, 2)
+        XCTAssertEqual(model.activityDashboardHistories[downloads.standardizedFileURL.path]?.totalNetByteDelta, 2_048)
+        XCTAssertEqual(model.activityDashboardHistories[desktop.standardizedFileURL.path]?.totalNetByteDelta, -1_024)
+        XCTAssertNil(model.activityHistory)
+    }
+
+    @MainActor
     func testEnableLongTermWatchCreatesBaselineAndPersistsTarget() async throws {
         let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
         let persistence = RecordingLongTermWatchTargetPersistence()
