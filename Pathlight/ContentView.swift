@@ -42,6 +42,7 @@ struct ContentView: View {
                 showFreeSpaceInSunburst: appModel.showFreeSpaceInSunburst,
                 discardPileHiddenNodeIDs: appModel.discardPileHiddenNodeIDs,
                 startupDiskTarget: appModel.startupDiskTarget,
+                liveWatchSession: appModel.liveWatchSession,
                 fullDiskAccessStatus: appModel.fullDiskAccessStatus,
                 freeSpaceAvailableCapacity: { snapshot, focusNode in
                     appModel.sunburstFreeSpaceAvailableCapacity(for: snapshot, focusNode: focusNode)
@@ -569,6 +570,7 @@ private struct WorkspaceDetailView: View {
     let showFreeSpaceInSunburst: Bool
     let discardPileHiddenNodeIDs: Set<FileNodeRecord.ID>
     let startupDiskTarget: ScanTarget?
+    let liveWatchSession: WatchSessionModel?
     let fullDiskAccessStatus: FullDiskAccessStatus
     let freeSpaceAvailableCapacity: (ScanSnapshot, FileNodeRecord) -> Int64?
     let actions: WorkspaceActions
@@ -583,6 +585,7 @@ private struct WorkspaceDetailView: View {
             showFreeSpaceInSunburst: showFreeSpaceInSunburst,
             discardPileHiddenNodeIDs: discardPileHiddenNodeIDs,
             startupDiskTarget: startupDiskTarget,
+            liveWatchSession: liveWatchSession,
             fullDiskAccessStatus: fullDiskAccessStatus,
             freeSpaceAvailableCapacity: freeSpaceAvailableCapacity,
             actions: actions
@@ -631,6 +634,8 @@ private extension ContentView {
             recordSunburstSegmentClick: { appModel.recordSunburstSegmentClick() },
             selectedFileActions: previewSelectedFileActions,
             bulkFileActions: bulkFileActions,
+            startShortTermWatch: { appModel.startShortTermWatch(rootPath: $0) },
+            stopShortTermWatch: { appModel.stopShortTermWatch() },
             openFullDiskAccessSettings: { appModel.prepareAndOpenFullDiskAccessSettings() },
             setDiscardPileDragActive: setDiscardPileDragIsActive,
             setDiscardPileDragActiveAfterThreshold: setDiscardPileDragIsActiveAfterThreshold

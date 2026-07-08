@@ -33,6 +33,8 @@ struct WorkspaceActions {
     let recordSunburstSegmentClick: () -> Void
     let selectedFileActions: SelectedFileActions
     let bulkFileActions: BulkFileActions
+    let startShortTermWatch: (URL) -> Void
+    let stopShortTermWatch: () -> Void
     let openFullDiskAccessSettings: () -> Void
     let setDiscardPileDragActive: (Bool) -> Void
     let setDiscardPileDragActiveAfterThreshold: (Bool) -> Void
@@ -78,37 +80,20 @@ struct WorkspaceView: View {
     let showFreeSpaceInSunburst: Bool
     let discardPileHiddenNodeIDs: Set<FileNodeRecord.ID>
     let startupDiskTarget: ScanTarget?
+    let liveWatchSession: WatchSessionModel?
     let fullDiskAccessStatus: FullDiskAccessStatus
     let freeSpaceAvailableCapacity: (ScanSnapshot, FileNodeRecord) -> Int64?
     let actions: WorkspaceActions
 
     var body: some View {
-        Group {
-            if let snapshot = scanState.snapshot,
-               let focusNode = navigation.currentFocusNode {
-                ActiveWorkspaceView(
-                    scanState: scanState,
-                    navigation: navigation,
-                    snapshot: snapshot,
-                    focusNode: focusNode,
-                    focusedWorkspaceTarget: $focusedWorkspaceTarget,
-                    maxRenderedDepth: maxRenderedDepth,
-                    showFreeSpaceInSunburst: showFreeSpaceInSunburst,
-                    discardPileHiddenNodeIDs: discardPileHiddenNodeIDs,
-                    fullDiskAccessStatus: fullDiskAccessStatus,
-                    freeSpaceAvailableCapacity: freeSpaceAvailableCapacity,
-                    actions: actions
-                )
-            } else if scanState.isScanning {
-                ScanningWorkspaceState(
-                    progress: scanState.progress,
-                    selectedTarget: scanState.selectedTarget,
-                    actions: actions
-                )
-            } else {
-                EmptyWorkspaceState(
-                    startupDiskTarget: startupDiskTarget,
-                    actions: actions
+        VStack(spacing: 0) {
+            workspaceContent
+
+            if let liveWatchSession {
+                Divider()
+                ActivityTimelinePanel(
+                    session: liveWatchSession,
+                    onStop: actions.stopShortTermWatch
                 )
             }
         }
@@ -125,6 +110,25 @@ struct WorkspaceView: View {
                 }
                 .disabled(scanState.isScanning)
                 .help("Choose Folder")
+
+                if let watchRoot {
+                    if liveWatchSession == nil {
+                        Button {
+                            actions.startShortTermWatch(watchRoot)
+                        } label: {
+                            Label("Watch", systemImage: "waveform.path.ecg")
+                        }
+                        .disabled(scanState.isScanning)
+                        .help("Watch File Activity")
+                    } else {
+                        Button {
+                            actions.stopShortTermWatch()
+                        } label: {
+                            Label("Stop Watching", systemImage: "stop.circle")
+                        }
+                        .help("Stop Watching")
+                    }
+                }
 
                 if scanState.canStopScan {
                     Button {
@@ -157,6 +161,41 @@ struct WorkspaceView: View {
         .dropDestination(for: URL.self) { urls, _ in
             actions.handleDroppedURLs(urls)
         }
+    }
+
+    @ViewBuilder
+    private var workspaceContent: some View {
+        if let snapshot = scanState.snapshot,
+           let focusNode = navigation.currentFocusNode {
+            ActiveWorkspaceView(
+                scanState: scanState,
+                navigation: navigation,
+                snapshot: snapshot,
+                focusNode: focusNode,
+                focusedWorkspaceTarget: $focusedWorkspaceTarget,
+                maxRenderedDepth: maxRenderedDepth,
+                showFreeSpaceInSunburst: showFreeSpaceInSunburst,
+                discardPileHiddenNodeIDs: discardPileHiddenNodeIDs,
+                fullDiskAccessStatus: fullDiskAccessStatus,
+                freeSpaceAvailableCapacity: freeSpaceAvailableCapacity,
+                actions: actions
+            )
+        } else if scanState.isScanning {
+            ScanningWorkspaceState(
+                progress: scanState.progress,
+                selectedTarget: scanState.selectedTarget,
+                actions: actions
+            )
+        } else {
+            EmptyWorkspaceState(
+                startupDiskTarget: startupDiskTarget,
+                actions: actions
+            )
+        }
+    }
+
+    private var watchRoot: URL? {
+        scanState.snapshot?.target.url ?? scanState.selectedTarget?.url
     }
 }
 
