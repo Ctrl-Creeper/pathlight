@@ -52,6 +52,21 @@ enum FSEventsChangeMapper {
     }
 }
 
+enum FSEventsPathDecoder {
+    nonisolated static func paths(
+        eventCount: Int,
+        eventPaths: UnsafeMutableRawPointer
+    ) -> [String] {
+        let pathPointers = eventPaths.assumingMemoryBound(to: UnsafePointer<CChar>?.self)
+        return (0..<eventCount).compactMap { index in
+            guard let pathPointer = pathPointers[index] else {
+                return nil
+            }
+            return String(cString: pathPointer)
+        }
+    }
+}
+
 final class FSEventsDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
     nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
         let watchedRoot = root.standardizedFileURL
@@ -153,10 +168,10 @@ private final class FSEventsStreamBox: @unchecked Sendable {
         eventFlags: UnsafePointer<FSEventStreamEventFlags>,
         eventIDs: UnsafePointer<FSEventStreamEventId>
     ) {
-        let paths = unsafeBitCast(eventPaths, to: NSArray.self)
-        guard let stringPaths = paths as? [String] else {
-            return
-        }
+        let stringPaths = FSEventsPathDecoder.paths(
+            eventCount: eventCount,
+            eventPaths: eventPaths
+        )
 
         let timestamp = Date()
         for index in 0..<min(eventCount, stringPaths.count) {

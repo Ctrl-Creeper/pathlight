@@ -5,6 +5,25 @@ import Testing
 
 @Suite("FSEvents change mapper")
 struct FSEventsChangeMapperTests {
+    @Test("decodes the callback's C string path array")
+    func decodesCPathArray() {
+        let first = Array("/Users/example/Downloads/first.txt".utf8CString)
+        let second = Array("/Users/example/Downloads/second.txt".utf8CString)
+
+        first.withUnsafeBufferPointer { firstBuffer in
+            second.withUnsafeBufferPointer { secondBuffer in
+                var pathPointers: [UnsafePointer<CChar>?] = [firstBuffer.baseAddress, secondBuffer.baseAddress]
+                pathPointers.withUnsafeMutableBufferPointer { pointerBuffer in
+                    let eventPaths = UnsafeMutableRawPointer(pointerBuffer.baseAddress!)
+                    #expect(FSEventsPathDecoder.paths(eventCount: 2, eventPaths: eventPaths) == [
+                        "/Users/example/Downloads/first.txt",
+                        "/Users/example/Downloads/second.txt"
+                    ])
+                }
+            }
+        }
+    }
+
     @Test("maps item created flags")
     func mapsCreatedFlags() {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
