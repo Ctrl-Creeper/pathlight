@@ -49,12 +49,36 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.summaryText == "2 tracked folders • 1 active")
         #expect(presentation.selectedTargetID == downloads.standardizedFileURL.path)
         #expect(presentation.targetRows.map(\.title) == ["Downloads", "Desktop"])
-        #expect(presentation.targetRows.map(\.statusText) == ["Active", "Paused"])
+        #expect(presentation.targetRows.map(\.statusText) == ["Starting", "Paused"])
         #expect(presentation.targetRows.first?.changeText == "+1.07 GB net")
         #expect(presentation.targetRows.first?.eventText == "3 events")
         #expect(presentation.targetRows.first?.thresholdText == "Records changes over 1 MB")
         #expect(presentation.trendBuckets.map(\.detail) == ["+1.07 GB"])
         #expect(presentation.timelineRows.map(\.title) == ["Created movie.mov", "Deleted missing.zip"])
+    }
+
+    @Test("shows runtime watch state and last activity time")
+    func showsRuntimeWatchStateAndLastActivityTime() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let lastActivityAt = Date(timeIntervalSince1970: 9_000)
+        let presentation = ActivityDashboardPresentation(
+            targets: [LongTermWatchTarget(rootPath: downloads)],
+            selectedRootPath: downloads,
+            histories: [],
+            runtimeStatuses: [
+                downloads.standardizedFileURL.path: LongTermWatchRuntimeStatus(
+                    state: .reconnecting,
+                    lastActivityAt: lastActivityAt,
+                    retryCount: 2
+                )
+            ]
+        )
+
+        #expect(presentation.targetRows.first?.statusText == "Reconnecting")
+        #expect(
+            presentation.targetRows.first?.lastActivityText
+                == "Last activity \(PathlightFormatters.date(lastActivityAt))"
+        )
     }
 
     @Test("shows per-target history summaries for unselected targets")

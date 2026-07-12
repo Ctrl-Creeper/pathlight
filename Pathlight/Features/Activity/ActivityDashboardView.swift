@@ -11,6 +11,7 @@ struct ActivityDashboardActions {
 struct ActivityDashboardView: View {
     let targets: [LongTermWatchTarget]
     let histories: [ActivityHistorySnapshot]
+    let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
     let actions: ActivityDashboardActions
 
     @State private var selectedTargetID: String?
@@ -27,7 +28,8 @@ struct ActivityDashboardView: View {
         ActivityDashboardPresentation(
             targets: targets,
             selectedRootPath: selectedRootPath,
-            histories: histories
+            histories: histories,
+            runtimeStatuses: runtimeStatuses
         )
     }
 
@@ -200,6 +202,11 @@ private struct ActivityDashboardTargetRow: View {
                 ActivityDashboardMetric(title: row.statusText, value: row.changeText)
                 ActivityDashboardMetric(title: row.eventText, value: row.thresholdText)
             }
+
+            Text(row.lastActivityText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
             HStack(spacing: 8) {
                 Button {

@@ -38,6 +38,7 @@ struct ContentView: View {
                 ActivityDashboardView(
                     targets: appModel.longTermWatchTargets,
                     histories: Array(appModel.activityDashboardHistories.values),
+                    runtimeStatuses: appModel.longTermWatchRuntimeStatuses,
                     actions: activityDashboardActions
                 )
             } else {
@@ -195,6 +196,7 @@ struct ContentView: View {
             switch newPhase {
             case .active:
                 appModel.refreshFullDiskAccessStatus()
+                appModel.refreshLaunchAtLoginStatus()
             case .background:
                 discardPileDragDidEnd()
                 appModel.suspendBackgroundActivity()
@@ -666,7 +668,7 @@ private extension ContentView {
             recordSunburstSegmentClick: { appModel.recordSunburstSegmentClick() },
             selectedFileActions: previewSelectedFileActions,
             bulkFileActions: bulkFileActions,
-            startShortTermWatch: { appModel.startShortTermWatch(rootPath: $0) },
+            startShortTermWatch: { appModel.startShortTermWatch(rootPath: $0, options: $1) },
             stopShortTermWatch: { appModel.stopShortTermWatch() },
             refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
             enableLongTermWatch: { appModel.enableLongTermWatch(rootPath: $0) },

@@ -16,7 +16,7 @@ struct LiveWatchSessionCoordinatorTests {
             timestamp: Date(timeIntervalSince1970: 110)
         )
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(changes: [change])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 301)])
         )
 
         var iterator = coordinator.sessions(
@@ -55,8 +55,8 @@ struct LiveWatchSessionCoordinatorTests {
         #expect(finishedSession == nil)
     }
 
-    @Test("does not publish update snapshots for filtered changes")
-    func skipsFilteredChanges() async {
+    @Test("publishes the cursor after filtered changes")
+    func publishesCursorAfterFilteredChanges() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let file = root.appending(path: "tiny.txt")
         let change = DiskActivityChange(
@@ -66,7 +66,7 @@ struct LiveWatchSessionCoordinatorTests {
             timestamp: Date(timeIntervalSince1970: 120)
         )
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(changes: [change])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 302)])
         )
 
         var iterator = coordinator.sessions(
@@ -83,18 +83,22 @@ struct LiveWatchSessionCoordinatorTests {
         let initialSession = await iterator.next()
         #expect(initialSession?.events.isEmpty == true)
 
+        let cursorUpdate = await iterator.next()
+        #expect(cursorUpdate?.events.isEmpty == true)
+        #expect(cursorUpdate?.lastObservedEventID == 302)
+
         let finishedSession = await iterator.next()
         #expect(finishedSession == nil)
     }
 }
 
 private struct StaticDiskActivityMonitor: DiskActivityMonitoring {
-    let changes: [DiskActivityChange]
+    let events: [DiskActivityStreamEvent]
 
-    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
-            for change in changes where change.rootPath.standardizedFileURL == root.standardizedFileURL {
-                continuation.yield(change)
+            for event in events {
+                continuation.yield(event)
             }
             continuation.finish()
         }

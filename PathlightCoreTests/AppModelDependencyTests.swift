@@ -111,6 +111,76 @@ final class AppModelDependencyTests: XCTestCase {
     }
 
     @MainActor
+    func testLaunchAtLoginUsesInjectedService() {
+        let launchAtLoginService = RecordingLaunchAtLoginService()
+        let model = AppModel(dependencies: makeDependencies(
+            launchAtLoginService: launchAtLoginService
+        ))
+
+        XCTAssertEqual(model.launchAtLoginStatus, .disabled)
+
+        model.setLaunchAtLoginEnabled(true)
+        XCTAssertEqual(model.launchAtLoginStatus, .enabled)
+
+        model.openLoginItemsSettings()
+        XCTAssertTrue(launchAtLoginService.didOpenLoginItemsSettings)
+    }
+
+    @MainActor
+    func testLongTermWatchReconnectsWhenMonitorStreamEnds() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let target = LongTermWatchTarget(rootPath: root, isEnabled: true)
+        let model = AppModel(dependencies: makeDependencies(
+            longTermWatchTargetPersistence: RecordingLongTermWatchTargetPersistence(targets: [target])
+        ))
+
+        try await waitUntil("long-term watch reconnecting") {
+            model.longTermWatchRuntimeStatuses[target.id]?.state == .reconnecting
+        }
+
+        XCTAssertEqual(model.longTermWatchRuntimeStatuses[target.id]?.retryCount, 1)
+        model.cleanup()
+    }
+
+    @MainActor
+    func testLongTermWatchResumesFromCheckpointAndMarksHistoryGaps() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let checkpoint = LongTermWatchCheckpoint(
+            eventID: 88,
+            recordedAt: Date(timeIntervalSince1970: 100),
+            hasHistoryGap: false
+        )
+        let target = LongTermWatchTarget(rootPath: root, checkpoint: checkpoint)
+        let monitor = ControlledDiskActivityMonitor()
+        let persistence = RecordingLongTermWatchTargetPersistence(targets: [target])
+        let baselineService = ActivityBaselineService(
+            sizeProvider: { _ in 4_096 },
+            contentsProvider: { _ in [] }
+        )
+        let model = AppModel(dependencies: makeDependencies(
+            activityMonitor: monitor,
+            longTermWatchTargetPersistence: persistence,
+            activityBaselineService: baselineService
+        ))
+
+        try await waitUntil("long-term monitor resumes from checkpoint") {
+            monitor.watchedRoot == root.standardizedFileURL && monitor.requestedSinceEventID == 88
+        }
+
+        monitor.yield(.requiresRescan(eventID: 89))
+
+        try await waitUntil("long-term history gap is persisted") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 89 &&
+                model.longTermWatchTargets.first?.checkpoint?.hasHistoryGap == true &&
+                model.longTermWatchRuntimeStatuses[target.id]?.state == .historyGap
+        }
+
+        XCTAssertEqual(model.longTermWatchTargets.first?.baseline?.allocatedSize, 4_096)
+        XCTAssertEqual(persistence.savedTargets.last, model.longTermWatchTargets)
+        model.cleanup()
+    }
+
+    @MainActor
     func testPreferenceChangesPersistThroughInjectedStore() async throws {
         let preferences = SpyAppPreferencesStore(preferences: .defaults)
         let model = AppModel(dependencies: makeDependencies(preferences: preferences))
@@ -302,6 +372,39 @@ final class AppModelDependencyTests: XCTestCase {
         model.stopShortTermWatch()
 
         XCTAssertNil(model.liveWatchSession)
+    }
+
+    @MainActor
+    func testShortTermWatchRecordsSmallEventsWithDefaultOptions() async throws {
+        let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "small.txt")
+        let monitor = ControlledDiskActivityMonitor()
+        let model = AppModel(dependencies: makeDependencies(
+            activityMonitor: monitor,
+            activitySizeProvider: { url in
+                url.path == file.path ? 512 : nil
+            }
+        ))
+
+        model.startShortTermWatch(rootPath: root)
+
+        try await waitUntil("short-term monitor subscribed") {
+            monitor.isWatching
+        }
+        monitor.yield(
+            DiskActivityChange(
+                kind: .created,
+                path: file,
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 220)
+            )
+        )
+
+        try await waitUntil("short-term watch records a small event") {
+            model.liveWatchSession?.events.first?.byteDelta == 512
+        }
+        XCTAssertEqual(model.liveWatchSession?.events.first?.path, file)
+        model.stopShortTermWatch()
     }
 
     @MainActor
@@ -2664,7 +2767,7 @@ private final class ControlledAppModelScanService: ScanEventStreaming, @unchecke
 }
 
 private struct EmptyDiskActivityMonitor: DiskActivityMonitoring {
-    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             continuation.finish()
         }
@@ -2673,8 +2776,10 @@ private struct EmptyDiskActivityMonitor: DiskActivityMonitoring {
 
 private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: AsyncStream<DiskActivityChange>.Continuation?
+    private var continuation: AsyncStream<DiskActivityStreamEvent>.Continuation?
     private var root: URL?
+    private var sinceEventID: UInt64?
+    private var nextEventID: UInt64 = 1
 
     var isWatching: Bool {
         lock.lock()
@@ -2688,11 +2793,18 @@ private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unch
         return root
     }
 
-    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+    var requestedSinceEventID: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sinceEventID
+    }
+
+    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             lock.lock()
             self.continuation = continuation
             self.root = root
+            self.sinceEventID = eventID
             lock.unlock()
         }
     }
@@ -2700,9 +2812,19 @@ private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unch
     func yield(_ change: DiskActivityChange) {
         lock.lock()
         let continuation = continuation
+        let eventID = nextEventID
+        nextEventID += 1
         lock.unlock()
 
-        continuation?.yield(change)
+        continuation?.yield(.change(change, eventID: eventID))
+    }
+
+    func yield(_ event: DiskActivityStreamEvent) {
+        lock.lock()
+        let continuation = continuation
+        lock.unlock()
+
+        continuation?.yield(event)
     }
 
     func finish() {
@@ -2727,6 +2849,12 @@ private actor RecordingActivityEventStore: ActivityEventStoring {
             .filter { $0.rootPath.standardizedFileURL == rootPath.standardizedFileURL }
             .suffix(limit))
     }
+
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
 
     func appendedEventsSnapshot() -> [DiskActivityEvent] {
         appendedEvents
@@ -2774,7 +2902,13 @@ private func makeDependencies(
     activityBaselineService: ActivityBaselineService = ActivityBaselineService(
         sizeProvider: { _ in nil },
         contentsProvider: { _ in [] }
-    )
+    ),
+    activityStoragePreferences: any ActivityStoragePreferencesPersisting = RecordingActivityStoragePreferencesStore(),
+    activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(
+        eventJournalURL: URL(filePath: "/tmp/pathlight-empty-activity-events.jsonl"),
+        sizeIndexJournalURL: URL(filePath: "/tmp/pathlight-empty-activity-size-index.jsonl")
+    ),
+    launchAtLoginService: any LaunchAtLoginControlling = RecordingLaunchAtLoginService()
 ) -> AppDependencies {
     AppDependencies(
         preferences: preferences,
@@ -2791,8 +2925,44 @@ private func makeDependencies(
         activityPriorSizeProvider: activityPriorSizeProvider,
         activityEventStore: activityEventStore,
         longTermWatchTargets: LongTermWatchTargetStore(persistence: longTermWatchTargetPersistence),
-        activityBaselineService: activityBaselineService
+        activityBaselineService: activityBaselineService,
+        activityStoragePreferences: activityStoragePreferences,
+        activityStorageUsageService: activityStorageUsageService,
+        launchAtLoginService: launchAtLoginService
     )
+}
+
+private final class RecordingLaunchAtLoginService: LaunchAtLoginControlling {
+    private(set) var status: LaunchAtLoginStatus = .disabled
+    private(set) var didOpenLoginItemsSettings = false
+
+    func currentStatus() -> LaunchAtLoginStatus {
+        status
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        status = enabled ? .enabled : .disabled
+    }
+
+    func openLoginItemsSettings() {
+        didOpenLoginItemsSettings = true
+    }
+}
+
+private final class RecordingActivityStoragePreferencesStore: ActivityStoragePreferencesPersisting {
+    var preferences: ActivityStoragePreferences
+
+    init(preferences: ActivityStoragePreferences = .defaults) {
+        self.preferences = preferences
+    }
+
+    func loadPreferences() -> ActivityStoragePreferences {
+        preferences
+    }
+
+    func savePreferences(_ preferences: ActivityStoragePreferences) {
+        self.preferences = preferences
+    }
 }
 
 @MainActor

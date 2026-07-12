@@ -19,6 +19,9 @@ struct AppDependencies {
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
+    var activityStoragePreferences: any ActivityStoragePreferencesPersisting
+    var activityStorageUsageService: ActivityStorageUsageService
+    var launchAtLoginService: any LaunchAtLoginControlling
 
     init(
         preferences: any AppPreferencesPersisting,
@@ -34,7 +37,10 @@ struct AppDependencies {
         longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence()
         ),
-        activityBaselineService: ActivityBaselineService = ActivityBaselineService()
+        activityBaselineService: ActivityBaselineService = ActivityBaselineService(),
+        activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
+        activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
+        launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService()
     ) {
         self.preferences = preferences
         self.recentTargets = recentTargets
@@ -48,10 +54,24 @@ struct AppDependencies {
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
+        self.activityStoragePreferences = activityStoragePreferences
+        self.activityStorageUsageService = activityStorageUsageService
+        self.launchAtLoginService = launchAtLoginService
     }
 
     static var live: AppDependencies {
         let systemActions = AppSystemActions.live
+        let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
+        let activityStorageLineCodec = ActivityStorageLineCodec(
+            preferencesStore: activityStoragePreferences
+        )
+        let activitySizeIndex = ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
+        let activitySizeProvider: StorageAttributionService.SizeProvider = { url in
+            activitySizeIndex.recordKnownSize(
+                FileAllocatedSizeProvider.allocatedSize(for: url),
+                for: url
+            )
+        }
         return AppDependencies(
             preferences: UserDefaultsAppPreferencesStore(),
             recentTargets: RecentTargetStore(
@@ -62,7 +82,16 @@ struct AppDependencies {
             ),
             systemActions: systemActions,
             scanService: ScanEngine(),
-            usageStats: UserDefaultsAppUsageStatsStore()
+            usageStats: UserDefaultsAppUsageStatsStore(),
+            activitySizeProvider: activitySizeProvider,
+            activityPriorSizeProvider: { url in
+                activitySizeIndex.takeKnownSize(for: url)
+            },
+            activityEventStore: JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec),
+            activityBaselineService: ActivityBaselineService(sizeProvider: activitySizeProvider),
+            activityStoragePreferences: activityStoragePreferences,
+            activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
+            launchAtLoginService: SystemLaunchAtLoginService()
         )
     }
 }

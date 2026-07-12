@@ -18,6 +18,12 @@ struct SettingsView: View {
                 }
                 .tag(SettingsTab.privacy.rawValue)
 
+            ActivityStorageSettingsPane()
+                .tabItem {
+                    Label("Storage", systemImage: "internaldrive")
+                }
+                .tag(SettingsTab.storage.rawValue)
+
             StatsSettingsPane()
                 .tabItem {
                     Label("Stats", systemImage: "chart.bar")
@@ -32,6 +38,7 @@ struct SettingsView: View {
 private enum SettingsTab: String {
     case general
     case privacy
+    case storage
     case stats
 }
 
@@ -94,8 +101,41 @@ private struct GeneralSettingsPane: View {
                     appModel.restoreDefaultPreferences()
                 }
             }
+
+            Section("Long-Term Monitoring") {
+                Toggle(
+                    "Launch Pathlight at Login",
+                    isOn: Binding(
+                        get: { appModel.launchAtLoginStatus == .enabled },
+                        set: { appModel.setLaunchAtLoginEnabled($0) }
+                    )
+                )
+
+                if appModel.launchAtLoginStatus == .requiresApproval {
+                    Button("Review Login Items") {
+                        appModel.openLoginItemsSettings()
+                    }
+                }
+
+                Text(appModel.launchAtLoginStatus.monitoringSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+    }
+}
+
+private extension LaunchAtLoginStatus {
+    var monitoringSummary: String {
+        switch self {
+        case .enabled:
+            return "Pathlight will start after you sign in and restore enabled long-term watches."
+        case .disabled:
+            return "Pathlight restores enabled long-term watches whenever the app is opened."
+        case .requiresApproval:
+            return "macOS needs approval before Pathlight can launch at login."
+        }
     }
 }
 
@@ -510,6 +550,121 @@ private struct StatsSettingsPane: View {
         }
 
         return sizeText(Int64(bytesPerSecond.rounded())) + "/s"
+    }
+}
+
+private struct ActivityStorageSettingsPane: View {
+    @EnvironmentObject private var appModel: AppModel
+    @State private var isConfirmingReset = false
+
+    private let retentionOptions = [30, 90, 180, 365, 730, 1_825, 36_500]
+    private let storageLimitOptions: [Int64] = [
+        500 * 1_024 * 1_024,
+        1_024 * 1_024 * 1_024,
+        5 * 1_024 * 1_024 * 1_024,
+        10 * 1_024 * 1_024 * 1_024
+    ]
+
+    var body: some View {
+        Form {
+            Section("Current Storage") {
+                StatValueRow("Total activity data", value: sizeText(appModel.activityStorageUsage.totalBytes))
+                StatValueRow("Activity events", value: sizeText(appModel.activityStorageUsage.eventJournalBytes))
+                StatValueRow("Size attribution index", value: sizeText(appModel.activityStorageUsage.sizeIndexJournalBytes))
+                StatValueRow("Activity event rows", value: countText(appModel.activityStorageUsage.eventEntryCount))
+                StatValueRow("Size index rows", value: countText(appModel.activityStorageUsage.sizeIndexEntryCount))
+
+                HStack {
+                    Button("Refresh") {
+                        appModel.refreshActivityStorageUsage()
+                    }
+
+                    Button("Compact Now") {
+                        appModel.compactActivityStorage()
+                    }
+
+                    Button("Reset Activity Storage", role: .destructive) {
+                        isConfirmingReset = true
+                    }
+                    .disabled(appModel.activityStorageUsage.totalBytes == 0)
+                }
+            }
+
+            Section("Retention") {
+                Picker("Detailed file-level logs", selection: $appModel.activityDetailedRetentionDays) {
+                    ForEach(retentionOptions, id: \.self) { days in
+                        Text(retentionLabel(days)).tag(days)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Picker("Aggregate history", selection: $appModel.activityAggregateRetentionDays) {
+                    ForEach(retentionOptions, id: \.self) { days in
+                        Text(retentionLabel(days)).tag(days)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Picker("Storage limit", selection: $appModel.activityStorageLimitBytes) {
+                    ForEach(storageLimitOptions, id: \.self) { bytes in
+                        Text(PathlightFormatters.size(bytes)).tag(bytes)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            Section("Privacy") {
+                Toggle("Encrypt new activity data", isOn: $appModel.activityEncryptNewData)
+                Text("New activity journals are sealed with AES-GCM before they are written. The key is stored in macOS Keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                Button("Restore Activity Storage Defaults") {
+                    appModel.restoreDefaultActivityStoragePreferences()
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog(
+            "Reset Activity Storage?",
+            isPresented: $isConfirmingReset,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Activity Storage", role: .destructive) {
+                appModel.resetActivityStorage()
+            }
+
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes locally stored activity history and the size attribution index on this Mac.")
+        }
+    }
+
+    private func retentionLabel(_ days: Int) -> String {
+        switch days {
+        case 36_500:
+            return "Forever"
+        case 365:
+            return "1 year"
+        case 730:
+            return "2 years"
+        case 1_825:
+            return "5 years"
+        default:
+            return "\(days) days"
+        }
+    }
+
+    private func sizeText(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "0 bytes" }
+        return PathlightFormatters.size(bytes)
+    }
+
+    private func countText(_ value: Int) -> String {
+        value.formatted()
     }
 }
 

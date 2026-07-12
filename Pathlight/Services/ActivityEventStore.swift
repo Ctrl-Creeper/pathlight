@@ -1,17 +1,27 @@
 import Foundation
 
-protocol ActivityEventStoring: Sendable {
+nonisolated protocol ActivityEventStoring: Sendable {
     func append(_ events: [DiskActivityEvent]) async throws
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws
 }
 
 actor JSONLActivityEventStore: ActivityEventStoring {
     private let journalURL: URL
+    private let lineCodec: ActivityStorageLineCodec
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    init(journalURL: URL) {
+    init(
+        journalURL: URL,
+        lineCodec: ActivityStorageLineCodec = .plaintext
+    ) {
         self.journalURL = journalURL
+        self.lineCodec = lineCodec
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -22,8 +32,10 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         self.decoder = decoder
     }
 
-    static func live() -> JSONLActivityEventStore {
-        JSONLActivityEventStore(journalURL: defaultJournalURL())
+    static func live(
+        lineCodec: ActivityStorageLineCodec = .plaintext
+    ) -> JSONLActivityEventStore {
+        JSONLActivityEventStore(journalURL: defaultJournalURL(), lineCodec: lineCodec)
     }
 
     nonisolated static func defaultJournalURL() -> URL {
@@ -43,19 +55,19 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         }
 
         let fileManager = FileManager.default
-        try fileManager.createDirectory(
-            at: journalURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+        try ActivityStorageFileProtection.createProtectedDirectory(
+            at: journalURL.deletingLastPathComponent()
         )
 
         if !fileManager.fileExists(atPath: journalURL.path) {
-            fileManager.createFile(atPath: journalURL.path, contents: nil)
+            try ActivityStorageFileProtection.ensureProtectedFile(at: journalURL)
         }
+        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
 
         let lines = try events
             .map { event in
                 let data = try encoder.encode(event)
-                return String(decoding: data, as: UTF8.self)
+                return try lineCodec.encode(data)
             }
             .joined(separator: "\n")
         let payload = Data((lines + "\n").utf8)
@@ -66,6 +78,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         }
         try handle.seekToEnd()
         try handle.write(contentsOf: payload)
+        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
     }
 
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
@@ -81,7 +94,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         return contents
             .split(separator: "\n", omittingEmptySubsequences: true)
             .compactMap { line -> DiskActivityEvent? in
-                guard let data = String(line).data(using: .utf8),
+                guard let data = try? lineCodec.decode(line),
                       let event = try? decoder.decode(DiskActivityEvent.self, from: data),
                       event.rootPath.standardizedFileURL.path == root else {
                     return nil
@@ -96,5 +109,154 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             }
             .prefix(limit)
             .map { $0 }
+    }
+
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date = Date()
+    ) async throws {
+        guard FileManager.default.fileExists(atPath: journalURL.path) else {
+            return
+        }
+
+        let events = try readAllEvents()
+        let retainedEvents = retainedEvents(
+            from: events,
+            preferences: preferences,
+            eventJournalLimitBytes: eventJournalLimitBytes,
+            now: now
+        )
+        try rewriteJournal(with: retainedEvents)
+    }
+
+    private func readAllEvents() throws -> [DiskActivityEvent] {
+        let data = try Data(contentsOf: journalURL)
+        let contents = String(decoding: data, as: UTF8.self)
+
+        return contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard let data = try? lineCodec.decode(line) else {
+                    return nil
+                }
+                return try? decoder.decode(DiskActivityEvent.self, from: data)
+            }
+    }
+
+    private func retainedEvents(
+        from events: [DiskActivityEvent],
+        preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) -> [DiskActivityEvent] {
+        let detailedCutoff = now.addingTimeInterval(-TimeInterval(preferences.detailedRetentionDays) * 86_400)
+        let aggregateRetentionDays = max(
+            preferences.detailedRetentionDays,
+            preferences.aggregateRetentionDays
+        )
+        let aggregateCutoff = now.addingTimeInterval(-TimeInterval(aggregateRetentionDays) * 86_400)
+        let survivingEvents = events.filter { $0.timestamp >= aggregateCutoff }
+        let olderDetailedEvents = survivingEvents.filter {
+            $0.kind != .aggregate && $0.timestamp < detailedCutoff
+        }
+        let detailedOrExistingAggregateEvents = survivingEvents.filter {
+            $0.kind == .aggregate || $0.timestamp >= detailedCutoff
+        }
+        let dailyAggregates = Dictionary(grouping: olderDetailedEvents, by: DailyAggregationKey.init)
+            .values
+            .map(Self.dailyAggregate)
+
+        let candidates = (detailedOrExistingAggregateEvents + dailyAggregates)
+            .sorted(by: Self.newestFirst)
+        guard eventJournalLimitBytes > 0 else {
+            return []
+        }
+
+        var retained: [DiskActivityEvent] = []
+        var usedBytes: Int64 = 0
+        for event in candidates {
+            guard let line = try? encodedLine(for: event) else {
+                continue
+            }
+            let lineBytes = Int64(line.utf8.count + 1)
+            guard usedBytes + lineBytes <= eventJournalLimitBytes else {
+                continue
+            }
+            retained.append(event)
+            usedBytes += lineBytes
+        }
+
+        return retained.sorted(by: Self.oldestFirst)
+    }
+
+    private func rewriteJournal(with events: [DiskActivityEvent]) throws {
+        try ActivityStorageFileProtection.createProtectedDirectory(
+            at: journalURL.deletingLastPathComponent()
+        )
+        let contents = try events
+            .map(encodedLine(for:))
+            .joined(separator: "\n")
+        let data = contents.isEmpty ? Data() : Data((contents + "\n").utf8)
+        try data.write(to: journalURL, options: .atomic)
+        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
+    }
+
+    private func encodedLine(for event: DiskActivityEvent) throws -> String {
+        try lineCodec.encode(encoder.encode(event))
+    }
+
+    nonisolated private static func dailyAggregate(_ events: [DiskActivityEvent]) -> DiskActivityEvent {
+        let sortedEvents = events.sorted(by: oldestFirst)
+        let firstEvent = sortedEvents[0]
+        let hasUnknownSize = sortedEvents.contains { $0.byteDelta == nil }
+        let byteDelta = hasUnknownSize ? nil : sortedEvents.compactMap(\.byteDelta).reduce(Int64(0), +)
+        let confidence: DiskActivityEventConfidence
+        if byteDelta == nil {
+            confidence = .unknown
+        } else if sortedEvents.allSatisfy({ $0.confidence == .confirmed }) {
+            confidence = .confirmed
+        } else {
+            confidence = .estimated
+        }
+
+        return DiskActivityEvent(
+            kind: .aggregate,
+            path: firstEvent.rootPath.standardizedFileURL,
+            rootPath: firstEvent.rootPath.standardizedFileURL,
+            timestamp: dayStart(for: firstEvent.timestamp),
+            byteDelta: byteDelta,
+            confidence: confidence,
+            previousPath: nil,
+            affectedItemCount: sortedEvents.reduce(0) { $0 + $1.affectedItemCount }
+        )
+    }
+
+    nonisolated private static func dayStart(for date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970 / 86_400) * 86_400)
+    }
+
+    nonisolated private static func newestFirst(lhs: DiskActivityEvent, rhs: DiskActivityEvent) -> Bool {
+        if lhs.timestamp == rhs.timestamp {
+            return lhs.path.path > rhs.path.path
+        }
+        return lhs.timestamp > rhs.timestamp
+    }
+
+    nonisolated private static func oldestFirst(lhs: DiskActivityEvent, rhs: DiskActivityEvent) -> Bool {
+        if lhs.timestamp == rhs.timestamp {
+            return lhs.path.path < rhs.path.path
+        }
+        return lhs.timestamp < rhs.timestamp
+    }
+
+    nonisolated private struct DailyAggregationKey: Hashable {
+        let rootPath: String
+        let dayStart: Date
+
+        init(event: DiskActivityEvent) {
+            rootPath = event.rootPath.standardizedFileURL.path
+            dayStart = JSONLActivityEventStore.dayStart(for: event.timestamp)
+        }
     }
 }

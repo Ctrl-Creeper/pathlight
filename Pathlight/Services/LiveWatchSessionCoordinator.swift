@@ -9,6 +9,7 @@ struct LiveWatchSessionCoordinator: Sendable {
 
     func sessions(
         rootPath: URL,
+        sinceEventID: UInt64? = nil,
         startedAt: Date = Date(),
         options: DiskActivityAggregationOptions = .default,
         sizeProvider: @escaping StorageAttributionService.SizeProvider,
@@ -17,7 +18,12 @@ struct LiveWatchSessionCoordinator: Sendable {
         let standardizedRoot = rootPath.standardizedFileURL
         return AsyncStream { continuation in
             let task = Task {
-                var session = WatchSessionModel(rootPath: standardizedRoot, startedAt: startedAt)
+                var session = WatchSessionModel(
+                    rootPath: standardizedRoot,
+                    startedAt: startedAt,
+                    lastObservedEventID: sinceEventID,
+                    historyState: sinceEventID == nil ? .live : .catchingUp
+                )
                 continuation.yield(session)
 
                 let attributionService = StorageAttributionService(
@@ -25,17 +31,25 @@ struct LiveWatchSessionCoordinator: Sendable {
                     sizeProvider: sizeProvider,
                     priorSizeProvider: priorSizeProvider
                 )
-                for await change in monitor.changes(for: standardizedRoot) {
+                for await streamEvent in monitor.events(for: standardizedRoot, since: sinceEventID) {
                     guard !Task.isCancelled else {
                         break
                     }
 
-                    let events = attributionService.process([change])
-                    guard !events.isEmpty else {
-                        continue
+                    switch streamEvent {
+                    case let .change(change, eventID):
+                        session.record(eventID: eventID)
+                        let events = attributionService.process([change])
+                        if !events.isEmpty {
+                            session.append(events)
+                        }
+                    case let .historyCaughtUp(eventID):
+                        session.record(eventID: eventID)
+                        session.setHistoryState(.live)
+                    case let .requiresRescan(eventID):
+                        session.record(eventID: eventID)
+                        session.setHistoryState(.gapDetected)
                     }
-
-                    session.append(events)
                     continuation.yield(session)
                 }
 

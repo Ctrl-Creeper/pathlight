@@ -163,6 +163,10 @@ final class AppModel: ObservableObject {
     @Published var scanCloudStorageFolders = false
     @Published var useScanExclusions = false
     @Published var exclusionPatterns = AppScanPreferences.defaults.exclusionPatterns
+    @Published var activityDetailedRetentionDays = ActivityStoragePreferences.defaults.detailedRetentionDays
+    @Published var activityAggregateRetentionDays = ActivityStoragePreferences.defaults.aggregateRetentionDays
+    @Published var activityStorageLimitBytes = ActivityStoragePreferences.defaults.storageLimitBytes
+    @Published var activityEncryptNewData = ActivityStoragePreferences.defaults.encryptNewData
     @Published private(set) var availableTargets: [ScanTarget] = [] {
         didSet {
             refreshSidebarTargetSections()
@@ -193,7 +197,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
     @Published private(set) var activityDashboardHistories: [String: ActivityHistorySnapshot] = [:]
+    @Published private(set) var activityStorageUsage = ActivityStorageUsageSnapshot.empty
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
+    @Published private(set) var longTermWatchRuntimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:]
+    @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus = .disabled
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
 
     private let dependencies: AppDependencies
@@ -204,6 +211,7 @@ final class AppModel: ObservableObject {
     private var lastActionErrorTitle: String?
     private let sidebarScanCacheController: SidebarScanCacheController
     private var lastPersistedScanPreferences: AppScanPreferences?
+    private var lastPersistedActivityStoragePreferences: ActivityStoragePreferences?
 
     private static let viewUpdateDeferralDelay: Duration = .milliseconds(1)
     private static let scanPreferencePersistenceDebounce: RunLoop.SchedulerTimeType.Stride = .milliseconds(50)
@@ -230,6 +238,10 @@ final class AppModel: ObservableObject {
     private var activityHistoryTaskID: UUID?
     private var activityDashboardHistoryTask: Task<Void, Never>?
     private var activityDashboardHistoryTaskID: UUID?
+    private var activityStorageUsageTask: Task<Void, Never>?
+    private var activityStorageUsageTaskID: UUID?
+    private var activityStoragePolicyTask: Task<Void, Never>?
+    private var activityStoragePolicyTaskID: UUID?
     private var longTermWatchBaselineTask: Task<Void, Never>?
     private var longTermWatchBaselineTaskID: UUID?
     private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
@@ -265,9 +277,16 @@ final class AppModel: ObservableObject {
         useScanExclusions = preferences.scan.useScanExclusions
         exclusionPatterns = preferences.scan.exclusionPatterns
         lastPersistedScanPreferences = preferences.scan
+        let activityStoragePreferences = dependencies.activityStoragePreferences.loadPreferences()
+        activityDetailedRetentionDays = activityStoragePreferences.detailedRetentionDays
+        activityAggregateRetentionDays = activityStoragePreferences.aggregateRetentionDays
+        activityStorageLimitBytes = activityStoragePreferences.storageLimitBytes
+        activityEncryptNewData = activityStoragePreferences.encryptNewData
+        lastPersistedActivityStoragePreferences = activityStoragePreferences
         showsOnboarding = !preferences.didCompleteOnboarding
         usageStats = dependencies.usageStats.loadUsageStats()
         longTermWatchTargets = dependencies.longTermWatchTargets.loadTargets()
+        launchAtLoginStatus = dependencies.launchAtLoginService.currentStatus()
         fullDiskAccessStatus = dependencies.systemActions.usesAsyncFullDiskAccessStatus
             ? .unknown
             : dependencies.systemActions.currentFullDiskAccessStatus()
@@ -283,8 +302,11 @@ final class AppModel: ObservableObject {
         observeScanCoordinator()
         observeMountedVolumes()
         observePreferences()
+        observeActivityStoragePreferences()
         quickLookController.installKeyMonitor()
         startEnabledLongTermWatches()
+        refreshActivityStorageUsage()
+        applyActivityStoragePolicy()
     }
 
     deinit {
@@ -309,6 +331,8 @@ final class AppModel: ObservableObject {
         stopShortTermWatch()
         cancelActivityHistoryRefresh(clearHistory: true)
         cancelActivityDashboardHistoryRefresh(clearHistories: true)
+        cancelActivityStorageUsageRefresh()
+        cancelActivityStoragePolicy()
         cancelLongTermWatchBaseline()
         stopAllLongTermWatches()
         exportPanelTask?.cancel()
@@ -462,9 +486,51 @@ final class AppModel: ObservableObject {
         dependencies.usageStats.clearUsageStats()
     }
 
+    func restoreDefaultActivityStoragePreferences() {
+        activityDetailedRetentionDays = ActivityStoragePreferences.defaults.detailedRetentionDays
+        activityAggregateRetentionDays = ActivityStoragePreferences.defaults.aggregateRetentionDays
+        activityStorageLimitBytes = ActivityStoragePreferences.defaults.storageLimitBytes
+        activityEncryptNewData = ActivityStoragePreferences.defaults.encryptNewData
+    }
+
+    func refreshActivityStorageUsage() {
+        cancelActivityStorageUsageRefresh()
+
+        let taskID = UUID()
+        activityStorageUsageTaskID = taskID
+        let service = dependencies.activityStorageUsageService
+        activityStorageUsageTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let usage = await service.loadUsage()
+            guard !Task.isCancelled, self.activityStorageUsageTaskID == taskID else {
+                return
+            }
+            self.activityStorageUsage = usage
+            self.activityStorageUsageTask = nil
+            self.activityStorageUsageTaskID = nil
+        }
+    }
+
+    func compactActivityStorage() {
+        applyActivityStoragePolicy()
+    }
+
+    func resetActivityStorage() {
+        let service = dependencies.activityStorageUsageService
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await service.resetStorage()
+                self.activityStorageUsage = .empty
+            } catch {
+                self.lastErrorMessage = "Pathlight could not reset activity storage."
+            }
+        }
+    }
+
     func startShortTermWatch(
         rootPath: URL,
-        options: DiskActivityAggregationOptions = .default
+        options: DiskActivityAggregationOptions = .shortTermDefault
     ) {
         stopShortTermWatch()
 
@@ -501,6 +567,7 @@ final class AppModel: ObservableObject {
                     if let activityEventStore = self.dependencies.activityEventStore {
                         do {
                             try await activityEventStore.append(newEvents)
+                            self.applyActivityStoragePolicy()
                             self.refreshActivityHistory(rootPath: session.rootPath)
                         } catch {
                             // A failed journal write should not interrupt the live watch session.
@@ -646,6 +713,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func cancelActivityStorageUsageRefresh() {
+        activityStorageUsageTask?.cancel()
+        activityStorageUsageTask = nil
+        activityStorageUsageTaskID = nil
+    }
+
     func enableLongTermWatch(
         rootPath: URL,
         options: LongTermWatchTargetOptions = .default
@@ -702,6 +775,7 @@ final class AppModel: ObservableObject {
     func removeLongTermWatchTarget(rootPath: URL) {
         let targetID = rootPath.standardizedFileURL.path
         stopLongTermWatch(targetID: targetID)
+        longTermWatchRuntimeStatuses.removeValue(forKey: targetID)
         longTermWatchTargets = dependencies.longTermWatchTargets.remove(
             rootPath: rootPath,
             currentTargets: longTermWatchTargets
@@ -730,6 +804,11 @@ final class AppModel: ObservableObject {
 
         let taskID = UUID()
         longTermWatchTaskIDs[target.id] = taskID
+        updateLongTermWatchRuntimeStatus(
+            targetID: target.id,
+            state: .starting,
+            retryCount: 0
+        )
         let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
@@ -744,30 +823,99 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            let stream = coordinator.sessions(
-                rootPath: target.rootPath,
-                options: target.options.diskActivityOptions,
-                sizeProvider: sizeProvider,
-                priorSizeProvider: priorSizeProvider
-            )
-            var persistedEventCount = 0
-            for await session in stream {
+            var retryCount = 0
+            while !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID {
+                let currentTarget = self.longTermWatchTargets.first(where: { $0.id == target.id }) ?? target
+                let stream = coordinator.sessions(
+                    rootPath: currentTarget.rootPath,
+                    sinceEventID: currentTarget.checkpoint?.eventID,
+                    options: currentTarget.options.diskActivityOptions,
+                    sizeProvider: sizeProvider,
+                    priorSizeProvider: priorSizeProvider
+                )
+                var persistedEventCount = 0
+                var didCaptureGapBaseline = false
+                for await session in stream {
+                    guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
+                        break
+                    }
+
+                    retryCount = 0
+                    let existingCheckpoint = self.longTermWatchTargets.first(where: { $0.id == target.id })?.checkpoint
+                    if let eventID = session.lastObservedEventID,
+                       eventID != existingCheckpoint?.eventID || session.historyState == .gapDetected {
+                        let checkpoint = LongTermWatchCheckpoint(
+                            eventID: eventID,
+                            recordedAt: Date(),
+                            hasHistoryGap: existingCheckpoint?.hasHistoryGap == true || session.historyState == .gapDetected
+                        )
+                        self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateCheckpoint(
+                            checkpoint,
+                            forRootPath: target.rootPath,
+                            currentTargets: self.longTermWatchTargets
+                        )
+                    }
+
+                    let runtimeState: LongTermWatchRuntimeState
+                    switch session.historyState {
+                    case .live:
+                        runtimeState = existingCheckpoint?.hasHistoryGap == true ? .historyGap : .watching
+                    case .catchingUp:
+                        runtimeState = .catchingUp
+                    case .gapDetected:
+                        runtimeState = .historyGap
+                    }
+                    self.updateLongTermWatchRuntimeStatus(
+                        targetID: target.id,
+                        state: runtimeState,
+                        retryCount: retryCount
+                    )
+
+                    if session.historyState == .gapDetected, !didCaptureGapBaseline {
+                        didCaptureGapBaseline = true
+                        let baseline = await self.dependencies.activityBaselineService.captureBaseline(rootPath: target.rootPath)
+                        guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
+                            break
+                        }
+                        self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateBaseline(
+                            baseline,
+                            forRootPath: target.rootPath,
+                            currentTargets: self.longTermWatchTargets
+                        )
+                    }
+                    if session.events.count > persistedEventCount {
+                        let newEvents = Array(session.events[persistedEventCount...])
+                        persistedEventCount = session.events.count
+                        self.updateLongTermWatchRuntimeStatus(
+                            targetID: target.id,
+                            state: runtimeState,
+                            lastActivityAt: newEvents.map(\.timestamp).max(),
+                            retryCount: retryCount
+                        )
+                        if let eventStore {
+                            do {
+                                try await eventStore.append(newEvents)
+                                self.applyActivityStoragePolicy()
+                                self.refreshActivityHistory(rootPath: session.rootPath)
+                            } catch {
+                                // A failed journal write should not interrupt long-term monitoring.
+                            }
+                        }
+                    }
+                }
+
                 guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
                     break
                 }
 
-                if session.events.count > persistedEventCount {
-                    let newEvents = Array(session.events[persistedEventCount...])
-                    persistedEventCount = session.events.count
-                    if let eventStore {
-                        do {
-                            try await eventStore.append(newEvents)
-                            self.refreshActivityHistory(rootPath: session.rootPath)
-                        } catch {
-                            // A failed journal write should not interrupt long-term monitoring.
-                        }
-                    }
-                }
+                retryCount += 1
+                self.updateLongTermWatchRuntimeStatus(
+                    targetID: target.id,
+                    state: .reconnecting,
+                    retryCount: retryCount
+                )
+                let delayNanoseconds = UInt64(min(1 << min(retryCount - 1, 5), 30)) * 1_000_000_000
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
             }
         }
     }
@@ -776,6 +924,7 @@ final class AppModel: ObservableObject {
         longTermWatchTasks[targetID]?.cancel()
         longTermWatchTasks[targetID] = nil
         longTermWatchTaskIDs[targetID] = nil
+        updateLongTermWatchRuntimeStatus(targetID: targetID, state: .paused, retryCount: 0)
     }
 
     private func stopAllLongTermWatches() {
@@ -784,6 +933,40 @@ final class AppModel: ObservableObject {
         }
         longTermWatchTasks.removeAll()
         longTermWatchTaskIDs.removeAll()
+        for target in longTermWatchTargets {
+            updateLongTermWatchRuntimeStatus(targetID: target.id, state: .paused, retryCount: 0)
+        }
+    }
+
+    func setLaunchAtLoginEnabled(_ enabled: Bool) {
+        do {
+            try dependencies.launchAtLoginService.setEnabled(enabled)
+        } catch {
+            lastErrorMessage = "Pathlight could not update its Login Item setting."
+        }
+        launchAtLoginStatus = dependencies.launchAtLoginService.currentStatus()
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        launchAtLoginStatus = dependencies.launchAtLoginService.currentStatus()
+    }
+
+    func openLoginItemsSettings() {
+        dependencies.launchAtLoginService.openLoginItemsSettings()
+    }
+
+    private func updateLongTermWatchRuntimeStatus(
+        targetID: LongTermWatchTarget.ID,
+        state: LongTermWatchRuntimeState,
+        lastActivityAt: Date? = nil,
+        retryCount: Int
+    ) {
+        let existingStatus = longTermWatchRuntimeStatuses[targetID]
+        longTermWatchRuntimeStatuses[targetID] = LongTermWatchRuntimeStatus(
+            state: state,
+            lastActivityAt: lastActivityAt ?? existingStatus?.lastActivityAt,
+            retryCount: retryCount
+        )
     }
 
     func recordSunburstSegmentClick() {
@@ -2725,6 +2908,30 @@ final class AppModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func observeActivityStoragePreferences() {
+        Publishers.CombineLatest4(
+            $activityDetailedRetentionDays,
+            $activityAggregateRetentionDays,
+            $activityStorageLimitBytes,
+            $activityEncryptNewData
+        )
+            .map { detailedRetentionDays, aggregateRetentionDays, storageLimitBytes, encryptNewData in
+                ActivityStoragePreferences(
+                    detailedRetentionDays: detailedRetentionDays,
+                    aggregateRetentionDays: aggregateRetentionDays,
+                    storageLimitBytes: storageLimitBytes,
+                    encryptNewData: encryptNewData
+                )
+            }
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: Self.scanPreferencePersistenceDebounce, scheduler: RunLoop.main)
+            .sink { [weak self] preferences in
+                self?.persistActivityStoragePreferences(preferences)
+            }
+            .store(in: &cancellables)
+    }
+
     private var currentScanPreferences: AppScanPreferences {
         AppScanPreferences(
             showHiddenFiles: showHiddenFiles,
@@ -2740,12 +2947,74 @@ final class AppModel: ObservableObject {
 
     private func flushPendingScanPreferences() {
         persistScanPreferences(currentScanPreferences)
+        persistActivityStoragePreferences(currentActivityStoragePreferences)
     }
 
     private func persistScanPreferences(_ preferences: AppScanPreferences) {
         guard lastPersistedScanPreferences != preferences else { return }
         dependencies.preferences.saveScanPreferences(preferences)
         lastPersistedScanPreferences = preferences
+    }
+
+    private var currentActivityStoragePreferences: ActivityStoragePreferences {
+        ActivityStoragePreferences(
+            detailedRetentionDays: activityDetailedRetentionDays,
+            aggregateRetentionDays: activityAggregateRetentionDays,
+            storageLimitBytes: activityStorageLimitBytes,
+            encryptNewData: activityEncryptNewData
+        )
+    }
+
+    private func persistActivityStoragePreferences(_ preferences: ActivityStoragePreferences) {
+        guard lastPersistedActivityStoragePreferences != preferences else { return }
+        dependencies.activityStoragePreferences.savePreferences(preferences)
+        lastPersistedActivityStoragePreferences = preferences
+        applyActivityStoragePolicy()
+    }
+
+    private func applyActivityStoragePolicy() {
+        guard let activityEventStore = dependencies.activityEventStore else {
+            return
+        }
+
+        cancelActivityStoragePolicy()
+        let taskID = UUID()
+        activityStoragePolicyTaskID = taskID
+        let preferences = currentActivityStoragePreferences
+        let usageService = dependencies.activityStorageUsageService
+        activityStoragePolicyTask = Task { @MainActor [weak self] in
+            let eventJournalLimitBytes = await usageService.availableEventJournalBytes(
+                storageLimitBytes: preferences.storageLimitBytes
+            )
+            guard !Task.isCancelled, self?.activityStoragePolicyTaskID == taskID else {
+                return
+            }
+            do {
+                try await activityEventStore.enforceStoragePolicy(
+                    preferences,
+                    eventJournalLimitBytes: eventJournalLimitBytes,
+                    now: Date()
+                )
+                guard !Task.isCancelled, self?.activityStoragePolicyTaskID == taskID else {
+                    return
+                }
+                self?.activityStoragePolicyTask = nil
+                self?.activityStoragePolicyTaskID = nil
+                self?.refreshActivityStorageUsage()
+            } catch {
+                // A cleanup failure should not interrupt disk activity monitoring.
+                if self?.activityStoragePolicyTaskID == taskID {
+                    self?.activityStoragePolicyTask = nil
+                    self?.activityStoragePolicyTaskID = nil
+                }
+            }
+        }
+    }
+
+    private func cancelActivityStoragePolicy() {
+        activityStoragePolicyTask?.cancel()
+        activityStoragePolicyTask = nil
+        activityStoragePolicyTaskID = nil
     }
 
     private static func scanPreferences(

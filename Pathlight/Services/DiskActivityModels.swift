@@ -14,6 +14,12 @@ nonisolated struct DiskActivityChange: Equatable, Sendable {
     let timestamp: Date
 }
 
+nonisolated enum DiskActivityStreamEvent: Equatable, Sendable {
+    case change(DiskActivityChange, eventID: UInt64)
+    case historyCaughtUp(eventID: UInt64)
+    case requiresRescan(eventID: UInt64)
+}
+
 nonisolated enum DiskActivityEventKind: Equatable, Codable, Sendable {
     case created
     case modified
@@ -49,6 +55,20 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
         aggregationWindow: 5 * 60,
         longTermRecordsFileNames: false
     )
+
+    static let shortTermDefault = DiskActivityAggregationOptions(
+        minimumRecordedByteDelta: 0,
+        aggregationWindow: 0,
+        longTermRecordsFileNames: true
+    )
+
+    static func shortTerm(minimumRecordedByteDelta: Int64) -> DiskActivityAggregationOptions {
+        DiskActivityAggregationOptions(
+            minimumRecordedByteDelta: minimumRecordedByteDelta,
+            aggregationWindow: 0,
+            longTermRecordsFileNames: true
+        )
+    }
 }
 
 nonisolated struct WatchSessionSummary: Equatable, Sendable {

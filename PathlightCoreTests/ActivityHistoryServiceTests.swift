@@ -120,4 +120,10 @@ private struct StaticActivityEventStore: ActivityEventStoring {
             }
             .prefix(limit))
     }
+
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
 }

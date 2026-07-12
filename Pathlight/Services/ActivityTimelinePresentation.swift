@@ -7,6 +7,7 @@ struct ActivityTimelinePresentation: Equatable, Sendable {
         let detail: String
         let path: String
         let timestamp: Date
+        let timestampText: String
     }
 
     let title: String
@@ -47,7 +48,8 @@ struct ActivityTimelinePresentation: Equatable, Sendable {
             title: "\(event.kindTitle) \(event.path.lastPathComponent)",
             detail: event.byteDelta.map(signedSize) ?? "Unknown size",
             path: event.path.path,
-            timestamp: event.timestamp
+            timestamp: event.timestamp,
+            timestampText: PathlightFormatters.date(event.timestamp)
         )
     }
 

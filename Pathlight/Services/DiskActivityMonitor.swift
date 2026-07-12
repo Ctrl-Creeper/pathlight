@@ -2,23 +2,30 @@ import CoreServices
 import Foundation
 
 protocol DiskActivityMonitoring: Sendable {
-    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange>
+    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent>
 }
 
 enum FSEventsChangeMapper {
-    nonisolated static func change(
+    nonisolated static func event(
         path: String,
         root: URL,
         flags: FSEventStreamEventFlags,
+        eventID: UInt64,
         timestamp: Date = Date()
-    ) -> DiskActivityChange? {
-        guard !flags.contains(anyOf: [
-            kFSEventStreamEventFlagHistoryDone,
+    ) -> DiskActivityStreamEvent {
+        if flags.contains(kFSEventStreamEventFlagHistoryDone) {
+            return .historyCaughtUp(eventID: eventID)
+        }
+        if flags.contains(anyOf: [
+            kFSEventStreamEventFlagMustScanSubDirs,
+            kFSEventStreamEventFlagUserDropped,
+            kFSEventStreamEventFlagKernelDropped,
+            kFSEventStreamEventFlagEventIdsWrapped,
             kFSEventStreamEventFlagRootChanged,
             kFSEventStreamEventFlagMount,
             kFSEventStreamEventFlagUnmount
-        ]) else {
-            return nil
+        ]) {
+            return .requiresRescan(eventID: eventID)
         }
 
         let eventPath = URL(filePath: path)
@@ -33,20 +40,27 @@ enum FSEventsChangeMapper {
             kind = .modified
         }
 
-        return DiskActivityChange(
-            kind: kind,
-            path: eventPath,
-            rootPath: root.standardizedFileURL,
-            timestamp: timestamp
+        return .change(
+            DiskActivityChange(
+                kind: kind,
+                path: eventPath,
+                rootPath: root.standardizedFileURL,
+                timestamp: timestamp
+            ),
+            eventID: eventID
         )
     }
 }
 
 final class FSEventsDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
-    nonisolated func changes(for root: URL) -> AsyncStream<DiskActivityChange> {
+    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
         let watchedRoot = root.standardizedFileURL
         return AsyncStream { continuation in
-            let streamBox = FSEventsStreamBox(root: watchedRoot, continuation: continuation)
+            let streamBox = FSEventsStreamBox(
+                root: watchedRoot,
+                sinceEventID: eventID,
+                continuation: continuation
+            )
             continuation.onTermination = { @Sendable [weak streamBox] _ in
                 streamBox?.stop()
             }
@@ -57,13 +71,19 @@ final class FSEventsDiskActivityMonitor: DiskActivityMonitoring, @unchecked Send
 
 private final class FSEventsStreamBox: @unchecked Sendable {
     private let root: URL
-    private let continuation: AsyncStream<DiskActivityChange>.Continuation
+    private let sinceEventID: UInt64?
+    private let continuation: AsyncStream<DiskActivityStreamEvent>.Continuation
     private let queue: DispatchQueue
     private let lock = NSLock()
     nonisolated(unsafe) private var stream: FSEventStreamRef?
 
-    nonisolated init(root: URL, continuation: AsyncStream<DiskActivityChange>.Continuation) {
+    nonisolated init(
+        root: URL,
+        sinceEventID: UInt64?,
+        continuation: AsyncStream<DiskActivityStreamEvent>.Continuation
+    ) {
         self.root = root
+        self.sinceEventID = sinceEventID
         self.continuation = continuation
         queue = DispatchQueue(label: "app.pathlight.disk-activity.fsevents.\(root.path.hashValue)")
     }
@@ -92,7 +112,7 @@ private final class FSEventsStreamBox: @unchecked Sendable {
             Self.callback,
             &context,
             [root.path] as CFArray,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            sinceEventID.map { FSEventStreamEventId($0) } ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.25,
             flags
         ) else {
@@ -130,7 +150,8 @@ private final class FSEventsStreamBox: @unchecked Sendable {
     private nonisolated func handle(
         eventCount: Int,
         eventPaths: UnsafeMutableRawPointer,
-        eventFlags: UnsafePointer<FSEventStreamEventFlags>
+        eventFlags: UnsafePointer<FSEventStreamEventFlags>,
+        eventIDs: UnsafePointer<FSEventStreamEventId>
     ) {
         let paths = unsafeBitCast(eventPaths, to: NSArray.self)
         guard let stringPaths = paths as? [String] else {
@@ -139,25 +160,29 @@ private final class FSEventsStreamBox: @unchecked Sendable {
 
         let timestamp = Date()
         for index in 0..<min(eventCount, stringPaths.count) {
-            guard let change = FSEventsChangeMapper.change(
+            let event = FSEventsChangeMapper.event(
                 path: stringPaths[index],
                 root: root,
                 flags: eventFlags[index],
+                eventID: UInt64(eventIDs[index]),
                 timestamp: timestamp
-            ) else {
-                continue
-            }
-            continuation.yield(change)
+            )
+            continuation.yield(event)
         }
     }
 
-    nonisolated(unsafe) private static let callback: FSEventStreamCallback = { _, info, eventCount, eventPaths, eventFlags, _ in
+    nonisolated(unsafe) private static let callback: FSEventStreamCallback = { _, info, eventCount, eventPaths, eventFlags, eventIDs in
         guard let info else {
             return
         }
 
         let streamBox = Unmanaged<FSEventsStreamBox>.fromOpaque(info).takeUnretainedValue()
-        streamBox.handle(eventCount: eventCount, eventPaths: eventPaths, eventFlags: eventFlags)
+        streamBox.handle(
+            eventCount: eventCount,
+            eventPaths: eventPaths,
+            eventFlags: eventFlags,
+            eventIDs: eventIDs
+        )
     }
 
     nonisolated(unsafe) private static let retainContext: CFAllocatorRetainCallBack = { info in

@@ -26,12 +26,14 @@ nonisolated struct LongTermWatchTarget: Codable, Equatable, Identifiable, Sendab
     var isEnabled: Bool
     var options: LongTermWatchTargetOptions
     var baseline: ActivityBaselineSnapshot?
+    var checkpoint: LongTermWatchCheckpoint?
 
     init(
         rootPath: URL,
         isEnabled: Bool = true,
         options: LongTermWatchTargetOptions = .default,
-        baseline: ActivityBaselineSnapshot? = nil
+        baseline: ActivityBaselineSnapshot? = nil,
+        checkpoint: LongTermWatchCheckpoint? = nil
     ) {
         let standardizedRoot = rootPath.standardizedFileURL
         self.id = standardizedRoot.path
@@ -39,7 +41,35 @@ nonisolated struct LongTermWatchTarget: Codable, Equatable, Identifiable, Sendab
         self.isEnabled = isEnabled
         self.options = options
         self.baseline = baseline
+        self.checkpoint = checkpoint
     }
+}
+
+nonisolated struct LongTermWatchCheckpoint: Codable, Equatable, Sendable {
+    let eventID: UInt64
+    let recordedAt: Date
+    let hasHistoryGap: Bool
+}
+
+nonisolated enum LongTermWatchRuntimeState: Equatable, Sendable {
+    case starting
+    case watching
+    case reconnecting
+    case catchingUp
+    case historyGap
+    case paused
+}
+
+nonisolated struct LongTermWatchRuntimeStatus: Equatable, Sendable {
+    let state: LongTermWatchRuntimeState
+    let lastActivityAt: Date?
+    let retryCount: Int
+
+    static let paused = LongTermWatchRuntimeStatus(
+        state: .paused,
+        lastActivityAt: nil,
+        retryCount: 0
+    )
 }
 
 protocol LongTermWatchTargetPersisting: AnyObject {
@@ -134,6 +164,44 @@ struct LongTermWatchTargetStore {
     ) -> [LongTermWatchTarget] {
         let targetID = rootPath.standardizedFileURL.path
         let updatedTargets = currentTargets.filter { $0.id != targetID }
+        persistence.saveTargets(updatedTargets)
+        return updatedTargets
+    }
+
+    func updateCheckpoint(
+        _ checkpoint: LongTermWatchCheckpoint,
+        forRootPath rootPath: URL,
+        currentTargets: [LongTermWatchTarget]
+    ) -> [LongTermWatchTarget] {
+        let targetID = rootPath.standardizedFileURL.path
+        let updatedTargets = currentTargets.map { target in
+            guard target.id == targetID else {
+                return target
+            }
+
+            var updatedTarget = target
+            updatedTarget.checkpoint = checkpoint
+            return updatedTarget
+        }
+        persistence.saveTargets(updatedTargets)
+        return updatedTargets
+    }
+
+    func updateBaseline(
+        _ baseline: ActivityBaselineSnapshot,
+        forRootPath rootPath: URL,
+        currentTargets: [LongTermWatchTarget]
+    ) -> [LongTermWatchTarget] {
+        let targetID = rootPath.standardizedFileURL.path
+        let updatedTargets = currentTargets.map { target in
+            guard target.id == targetID else {
+                return target
+            }
+
+            var updatedTarget = target
+            updatedTarget.baseline = baseline
+            return updatedTarget
+        }
         persistence.saveTargets(updatedTargets)
         return updatedTargets
     }

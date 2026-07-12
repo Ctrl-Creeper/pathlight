@@ -9,6 +9,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let changeText: String
         let eventText: String
         let thresholdText: String
+        let lastActivityText: String
         let isEnabled: Bool
         let rootPath: URL
     }
@@ -25,6 +26,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         targets: [LongTermWatchTarget],
         selectedRootPath: URL?,
         histories: [ActivityHistorySnapshot],
+        runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:],
         eventLimit: Int = 16,
         bucketLimit: Int = 32
     ) {
@@ -45,7 +47,11 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         }
         targetRows = targets.map { target in
             let targetHistory = historyByRoot[target.rootPath.standardizedFileURL.path]
-            return Self.targetRow(for: target, history: targetHistory)
+            return Self.targetRow(
+                for: target,
+                history: targetHistory,
+                runtimeStatus: runtimeStatuses[target.id]
+            )
         }
 
         if let standardizedSelectedRoot {
@@ -71,16 +77,21 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
 
     private static func targetRow(
         for target: LongTermWatchTarget,
-        history: ActivityHistorySnapshot?
+        history: ActivityHistorySnapshot?,
+        runtimeStatus: LongTermWatchRuntimeStatus?
     ) -> TargetRow {
-        TargetRow(
+        let status = runtimeStatus ?? (target.isEnabled
+            ? LongTermWatchRuntimeStatus(state: .starting, lastActivityAt: nil, retryCount: 0)
+            : .paused)
+        return TargetRow(
             id: target.id,
             title: displayName(for: target.rootPath),
             subtitle: target.rootPath.path,
-            statusText: target.isEnabled ? "Active" : "Paused",
+            statusText: statusText(for: status),
             changeText: history.map { "\(signedSize($0.totalNetByteDelta)) net" } ?? "No history",
             eventText: history.map { eventCountText($0.eventCount) } ?? "0 events",
             thresholdText: "Records changes over \(PathlightFormatters.size(target.options.minimumRecordedByteDelta))",
+            lastActivityText: lastActivityText(for: status),
             isEnabled: target.isEnabled,
             rootPath: target.rootPath
         )
@@ -93,6 +104,30 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
 
     private static func eventCountText(_ count: Int) -> String {
         count == 1 ? "1 event" : "\(count.formatted()) events"
+    }
+
+    private static func statusText(for status: LongTermWatchRuntimeStatus) -> String {
+        switch status.state {
+        case .starting:
+            return "Starting"
+        case .watching:
+            return "Watching"
+        case .reconnecting:
+            return "Reconnecting"
+        case .catchingUp:
+            return "Catching Up"
+        case .historyGap:
+            return "History Gap"
+        case .paused:
+            return "Paused"
+        }
+    }
+
+    private static func lastActivityText(for status: LongTermWatchRuntimeStatus) -> String {
+        guard let lastActivityAt = status.lastActivityAt else {
+            return status.state == .paused ? "Monitoring paused" : "No activity yet"
+        }
+        return "Last activity \(PathlightFormatters.date(lastActivityAt))"
     }
 
     private static func signedSize(_ bytes: Int64) -> String {

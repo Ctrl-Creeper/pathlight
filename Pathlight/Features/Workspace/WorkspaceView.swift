@@ -33,7 +33,7 @@ struct WorkspaceActions {
     let recordSunburstSegmentClick: () -> Void
     let selectedFileActions: SelectedFileActions
     let bulkFileActions: BulkFileActions
-    let startShortTermWatch: (URL) -> Void
+    let startShortTermWatch: (URL, DiskActivityAggregationOptions) -> Void
     let stopShortTermWatch: () -> Void
     let refreshActivityHistory: (URL) -> Void
     let enableLongTermWatch: (URL) -> Void
@@ -122,8 +122,16 @@ struct WorkspaceView: View {
 
                 if let watchRoot {
                     if liveWatchSession == nil {
-                        Button {
-                            actions.startShortTermWatch(watchRoot)
+                        Menu {
+                            Button("Every file change") {
+                                actions.startShortTermWatch(watchRoot, .shortTermDefault)
+                            }
+                            Button("Changes 1 KB and larger") {
+                                actions.startShortTermWatch(watchRoot, .shortTerm(minimumRecordedByteDelta: 1_024))
+                            }
+                            Button("Changes 1 MB and larger") {
+                                actions.startShortTermWatch(watchRoot, .shortTerm(minimumRecordedByteDelta: 1_024 * 1_024))
+                            }
                         } label: {
                             Label("Watch", systemImage: "waveform.path.ecg")
                         }

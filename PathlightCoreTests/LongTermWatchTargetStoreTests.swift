@@ -19,6 +19,11 @@ final class LongTermWatchTargetStoreTests: XCTestCase {
                 allocatedSize: 2_048,
                 measuredItemCount: 3,
                 unreadableItemCount: 1
+            ),
+            checkpoint: LongTermWatchCheckpoint(
+                eventID: 42,
+                recordedAt: Date(timeIntervalSince1970: 120),
+                hasHistoryGap: false
             )
         )
 
@@ -52,6 +57,26 @@ final class LongTermWatchTargetStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(updatedTargets.first?.isEnabled, false)
+        XCTAssertEqual(persistence.savedTargets, [updatedTargets])
+    }
+
+    func testStoreUpdatesCheckpoint() {
+        let target = LongTermWatchTarget(rootPath: URL(filePath: "/watched/downloads", directoryHint: .isDirectory))
+        let persistence = RecordingLongTermWatchTargetPersistence(targets: [target])
+        let store = LongTermWatchTargetStore(persistence: persistence)
+        let checkpoint = LongTermWatchCheckpoint(
+            eventID: 99,
+            recordedAt: Date(timeIntervalSince1970: 200),
+            hasHistoryGap: true
+        )
+
+        let updatedTargets = store.updateCheckpoint(
+            checkpoint,
+            forRootPath: target.rootPath,
+            currentTargets: [target]
+        )
+
+        XCTAssertEqual(updatedTargets.first?.checkpoint, checkpoint)
         XCTAssertEqual(persistence.savedTargets, [updatedTargets])
     }
 }

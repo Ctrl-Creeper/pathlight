@@ -5,7 +5,7 @@ struct ActivityTimelinePanel: View {
     let onStop: () -> Void
 
     private var presentation: ActivityTimelinePresentation {
-        ActivityTimelinePresentation(session: session, eventLimit: 6)
+        ActivityTimelinePresentation(session: session, eventLimit: 12)
     }
 
     var body: some View {
@@ -64,10 +64,16 @@ private struct ActivityTimelineRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Text(row.detail)
-                .font(.caption.monospacedDigit().weight(.medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(row.detail)
+                    .font(.caption.monospacedDigit().weight(.medium))
+
+                Text(row.timestampText)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(.secondary)
         }
         .help(row.path)
         .padding(.horizontal, 10)

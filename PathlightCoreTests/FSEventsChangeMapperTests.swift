@@ -10,16 +10,20 @@ struct FSEventsChangeMapperTests {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let file = root.appending(path: "new.dmg")
 
-        let change = FSEventsChangeMapper.change(
+        let event = FSEventsChangeMapper.event(
             path: file.path,
             root: root,
             flags: FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated),
+            eventID: 101,
             timestamp: Date(timeIntervalSince1970: 10)
         )
 
-        #expect(change?.kind == .created)
-        #expect(change?.path == file)
-        #expect(change?.rootPath == root)
+        #expect(event == .change(DiskActivityChange(
+            kind: .created,
+            path: file,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 10)
+        ), eventID: 101))
     }
 
     @Test("maps item removed flags")
@@ -27,14 +31,20 @@ struct FSEventsChangeMapperTests {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let file = root.appending(path: "old.zip")
 
-        let change = FSEventsChangeMapper.change(
+        let event = FSEventsChangeMapper.event(
             path: file.path,
             root: root,
             flags: FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved),
+            eventID: 102,
             timestamp: Date(timeIntervalSince1970: 11)
         )
 
-        #expect(change?.kind == .deleted)
+        #expect(event == .change(DiskActivityChange(
+            kind: .deleted,
+            path: file,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 11)
+        ), eventID: 102))
     }
 
     @Test("maps item renamed flags without previous path")
@@ -42,14 +52,20 @@ struct FSEventsChangeMapperTests {
         let root = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
         let file = root.appending(path: "renamed.mov")
 
-        let change = FSEventsChangeMapper.change(
+        let event = FSEventsChangeMapper.event(
             path: file.path,
             root: root,
             flags: FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed),
+            eventID: 103,
             timestamp: Date(timeIntervalSince1970: 12)
         )
 
-        #expect(change?.kind == .renamed(previousPath: nil))
+        #expect(event == .change(DiskActivityChange(
+            kind: .renamed(previousPath: nil),
+            path: file,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 12)
+        ), eventID: 103))
     }
 
     @Test("maps metadata and content changes as modified")
@@ -57,27 +73,42 @@ struct FSEventsChangeMapperTests {
         let root = URL(filePath: "/Users/example/Library/Caches", directoryHint: .isDirectory)
         let file = root.appending(path: "cache.db")
 
-        let change = FSEventsChangeMapper.change(
+        let event = FSEventsChangeMapper.event(
             path: file.path,
             root: root,
             flags: FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemInodeMetaMod),
+            eventID: 104,
             timestamp: Date(timeIntervalSince1970: 13)
         )
 
-        #expect(change?.kind == .modified)
+        #expect(event == .change(DiskActivityChange(
+            kind: .modified,
+            path: file,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 13)
+        ), eventID: 104))
     }
 
     @Test("ignores stream lifecycle flags")
-    func ignoresLifecycleFlags() {
+    func mapsHistoryCompletionAndRescanFlags() {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
 
-        let change = FSEventsChangeMapper.change(
+        let history = FSEventsChangeMapper.event(
             path: root.path,
             root: root,
             flags: FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone),
+            eventID: 105,
+            timestamp: Date(timeIntervalSince1970: 14)
+        )
+        let rescan = FSEventsChangeMapper.event(
+            path: root.path,
+            root: root,
+            flags: FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs),
+            eventID: 106,
             timestamp: Date(timeIntervalSince1970: 14)
         )
 
-        #expect(change == nil)
+        #expect(history == .historyCaughtUp(eventID: 105))
+        #expect(rescan == .requiresRescan(eventID: 106))
     }
 }
