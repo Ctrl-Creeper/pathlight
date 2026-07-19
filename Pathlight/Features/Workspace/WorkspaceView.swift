@@ -34,6 +34,7 @@ struct WorkspaceActions {
     let selectedFileActions: SelectedFileActions
     let bulkFileActions: BulkFileActions
     let startShortTermWatch: (URL, DiskActivityAggregationOptions) -> Void
+    let showLiveMonitor: () -> Void
     let stopShortTermWatch: () -> Void
     let refreshActivityHistory: (URL) -> Void
     let enableLongTermWatch: (URL) -> Void
@@ -93,14 +94,6 @@ struct WorkspaceView: View {
         VStack(spacing: 0) {
             workspaceContent
 
-            if let liveWatchSession {
-                Divider()
-                ActivityTimelinePanel(
-                    session: liveWatchSession,
-                    onStop: actions.stopShortTermWatch
-                )
-            }
-
             if let visibleActivityHistory {
                 Divider()
                 ActivityHistoryPanel(snapshot: visibleActivityHistory)
@@ -125,12 +118,15 @@ struct WorkspaceView: View {
                         Menu {
                             Button("Every file change") {
                                 actions.startShortTermWatch(watchRoot, .shortTermDefault)
+                                actions.showLiveMonitor()
                             }
                             Button("Changes 1 KB and larger") {
                                 actions.startShortTermWatch(watchRoot, .shortTerm(minimumRecordedByteDelta: 1_024))
+                                actions.showLiveMonitor()
                             }
                             Button("Changes 1 MB and larger") {
                                 actions.startShortTermWatch(watchRoot, .shortTerm(minimumRecordedByteDelta: 1_024 * 1_024))
+                                actions.showLiveMonitor()
                             }
                         } label: {
                             Label("Watch", systemImage: "waveform.path.ecg")

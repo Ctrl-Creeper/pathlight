@@ -87,6 +87,13 @@ struct PathlightApp: App {
             }
         }
 
+        Window("Live Monitor", id: "live-monitor") {
+            LiveMonitorWindowView()
+                .environmentObject(appModel)
+        }
+        .defaultSize(width: 460, height: 560)
+        .windowResizability(.contentMinSize)
+
         Settings {
             SettingsView()
                 .environmentObject(appModel)

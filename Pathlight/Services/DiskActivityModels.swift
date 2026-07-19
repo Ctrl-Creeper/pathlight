@@ -69,6 +69,10 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
             longTermRecordsFileNames: true
         )
     }
+
+    var isDetailedFileTimeline: Bool {
+        longTermRecordsFileNames && aggregationWindow == 0
+    }
 }
 
 nonisolated struct WatchSessionSummary: Equatable, Sendable {

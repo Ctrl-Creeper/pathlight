@@ -234,6 +234,7 @@ final class AppModel: ObservableObject {
     private var exportConfirmationDismissTask: Task<Void, Never>?
     private var liveWatchTask: Task<Void, Never>?
     private var liveWatchTaskID: UUID?
+    private var liveWatchBaselineTask: Task<Void, Never>?
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
     private var activityDashboardHistoryTask: Task<Void, Never>?
@@ -539,6 +540,11 @@ final class AppModel: ObservableObject {
         let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
+        let baselineService = dependencies.activityBaselineService
+
+        liveWatchBaselineTask = Task.detached {
+            _ = await baselineService.captureBaseline(rootPath: rootPath)
+        }
 
         liveWatchTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -582,6 +588,8 @@ final class AppModel: ObservableObject {
         liveWatchTask?.cancel()
         liveWatchTask = nil
         liveWatchTaskID = nil
+        liveWatchBaselineTask?.cancel()
+        liveWatchBaselineTask = nil
         liveWatchSession = nil
     }
 

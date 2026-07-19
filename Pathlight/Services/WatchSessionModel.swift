@@ -30,14 +30,56 @@ struct WatchSessionModel: Equatable, Sendable {
         self.historyState = historyState
     }
 
-    mutating func append(_ newEvents: [DiskActivityEvent]) {
-        events.append(contentsOf: newEvents)
+    mutating func append(
+        _ newEvents: [DiskActivityEvent],
+        coalescingWindow: TimeInterval = 0
+    ) {
+        for event in newEvents {
+            guard coalescingWindow > 0,
+                  let index = events.lastIndex(where: { existing in
+                      existing.rootPath.standardizedFileURL == event.rootPath.standardizedFileURL &&
+                          existing.path.standardizedFileURL == event.path.standardizedFileURL &&
+                          event.timestamp.timeIntervalSince(existing.timestamp) <= coalescingWindow &&
+                          event.timestamp >= existing.timestamp
+                  }),
+                  let mergedEvent = Self.merge(events[index], with: event) else {
+                events.append(event)
+                continue
+            }
+            events[index] = mergedEvent
+        }
         events.sort { lhs, rhs in
             if lhs.timestamp == rhs.timestamp {
                 return lhs.path.path < rhs.path.path
             }
             return lhs.timestamp < rhs.timestamp
         }
+    }
+
+    private static func merge(
+        _ existing: DiskActivityEvent,
+        with incoming: DiskActivityEvent
+    ) -> DiskActivityEvent? {
+        let kind: DiskActivityEventKind
+        switch (existing.kind, incoming.kind) {
+        case (.created, .created), (.created, .modified):
+            kind = .created
+        case (.modified, .modified):
+            kind = .modified
+        default:
+            return nil
+        }
+
+        return DiskActivityEvent(
+            kind: kind,
+            path: incoming.path,
+            rootPath: incoming.rootPath,
+            timestamp: incoming.timestamp,
+            byteDelta: incoming.byteDelta ?? existing.byteDelta,
+            confidence: incoming.byteDelta == nil ? existing.confidence : incoming.confidence,
+            previousPath: incoming.previousPath ?? existing.previousPath,
+            affectedItemCount: max(existing.affectedItemCount, incoming.affectedItemCount)
+        )
     }
 
     mutating func record(eventID: UInt64) {

@@ -13,6 +13,7 @@ struct ContentView: View {
 
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openWindow) private var openWindow
 
     @State private var splitViewVisibility: NavigationSplitViewVisibility = .all
     @State private var showsInspector = true
@@ -669,6 +670,7 @@ private extension ContentView {
             selectedFileActions: previewSelectedFileActions,
             bulkFileActions: bulkFileActions,
             startShortTermWatch: { appModel.startShortTermWatch(rootPath: $0, options: $1) },
+            showLiveMonitor: { openWindow(id: "live-monitor") },
             stopShortTermWatch: { appModel.stopShortTermWatch() },
             refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
             enableLongTermWatch: { appModel.enableLongTermWatch(rootPath: $0) },

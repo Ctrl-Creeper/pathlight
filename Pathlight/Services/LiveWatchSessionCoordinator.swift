@@ -41,7 +41,10 @@ struct LiveWatchSessionCoordinator: Sendable {
                         session.record(eventID: eventID)
                         let events = attributionService.process([change])
                         if !events.isEmpty {
-                            session.append(events)
+                            session.append(
+                                events,
+                                coalescingWindow: options.isDetailedFileTimeline ? 1 : 0
+                            )
                         }
                     case let .historyCaughtUp(eventID):
                         session.record(eventID: eventID)

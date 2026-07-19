@@ -36,15 +36,14 @@ struct ActivityTimelinePanel: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 44, alignment: .center)
             } else {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(presentation.rows) { row in
                             ActivityTimelineRow(row: row)
                         }
                     }
-                    .padding(.bottom, 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .scrollIndicators(.never)
             }
         }
         .padding(.horizontal, 16)
@@ -78,7 +77,7 @@ private struct ActivityTimelineRow: View {
         .help(row.path)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .frame(width: 180, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
     }
 }
