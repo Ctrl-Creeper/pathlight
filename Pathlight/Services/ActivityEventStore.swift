@@ -15,6 +15,8 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     private let lineCodec: ActivityStorageLineCodec
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var hasScannedJournal = false
+    private var oldestKnownEventTimestamp: Date?
 
     init(
         journalURL: URL,
@@ -79,6 +81,9 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         try handle.seekToEnd()
         try handle.write(contentsOf: payload)
         try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
+        if let minTimestamp = events.map(\.timestamp).min() {
+            oldestKnownEventTimestamp = min(oldestKnownEventTimestamp ?? .distantFuture, minTimestamp)
+        }
     }
 
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
@@ -120,6 +125,10 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             return
         }
 
+        if canSkipEnforcement(preferences: preferences, eventJournalLimitBytes: eventJournalLimitBytes, now: now) {
+            return
+        }
+
         let events = try readAllEvents()
         let retainedEvents = retainedEvents(
             from: events,
@@ -128,6 +137,34 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             now: now
         )
         try rewriteJournal(with: retainedEvents)
+        hasScannedJournal = true
+        oldestKnownEventTimestamp = retainedEvents.first?.timestamp
+    }
+
+    private func canSkipEnforcement(
+        preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) -> Bool {
+        // The cached oldest timestamp is only ever older-or-equal to the true oldest
+        // on disk, so skipping is conservative: at worst one unnecessary full pass,
+        // never a missed cleanup.
+        guard hasScannedJournal else {
+            return false
+        }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: journalURL.path)
+        guard let fileSize = (attributes?[.size] as? NSNumber)?.int64Value,
+              fileSize <= eventJournalLimitBytes else {
+            return false
+        }
+        guard let oldestKnownEventTimestamp else {
+            return true
+        }
+        return oldestKnownEventTimestamp >= Self.detailedCutoff(preferences: preferences, now: now)
+    }
+
+    nonisolated private static func detailedCutoff(preferences: ActivityStoragePreferences, now: Date) -> Date {
+        now.addingTimeInterval(-TimeInterval(preferences.detailedRetentionDays) * 86_400)
     }
 
     private func readAllEvents() throws -> [DiskActivityEvent] {
@@ -150,7 +187,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         eventJournalLimitBytes: Int64,
         now: Date
     ) -> [DiskActivityEvent] {
-        let detailedCutoff = now.addingTimeInterval(-TimeInterval(preferences.detailedRetentionDays) * 86_400)
+        let detailedCutoff = Self.detailedCutoff(preferences: preferences, now: now)
         let aggregateRetentionDays = max(
             preferences.detailedRetentionDays,
             preferences.aggregateRetentionDays
@@ -181,7 +218,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             }
             let lineBytes = Int64(line.utf8.count + 1)
             guard usedBytes + lineBytes <= eventJournalLimitBytes else {
-                continue
+                break
             }
             retained.append(event)
             usedBytes += lineBytes

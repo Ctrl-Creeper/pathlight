@@ -184,6 +184,73 @@ struct ActivityEventStoreTests {
         let finalSize = try journalURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         #expect(Int64(finalSize) <= newestLineBytes)
     }
+
+    @Test("byte budget keeps the newest events contiguous")
+    func byteBudgetKeepsNewestEventsContiguous() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let oldest = makeEvent(root: root, name: "old.bin", timestamp: Date(timeIntervalSince1970: 100), byteDelta: 1)
+        let middle = makeEvent(
+            root: root,
+            name: "middle-\(String(repeating: "x", count: 200)).bin",
+            timestamp: Date(timeIntervalSince1970: 200),
+            byteDelta: 2
+        )
+        let newest = makeEvent(root: root, name: "new.bin", timestamp: Date(timeIntervalSince1970: 300), byteDelta: 3)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        try await store.append([oldest, middle, newest])
+        let lines = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        let newestLineBytes = Int64(lines[2].utf8.count + 1)
+        let oldestLineBytes = Int64(lines[0].utf8.count + 1)
+
+        try await store.enforceStoragePolicy(
+            storagePreferences(detailedRetentionDays: 36_500, aggregateRetentionDays: 36_500),
+            eventJournalLimitBytes: newestLineBytes + oldestLineBytes,
+            now: Date(timeIntervalSince1970: 400)
+        )
+        let events = try await store.loadEvents(rootPath: root, limit: 10)
+
+        #expect(events == [newest])
+    }
+
+    @Test("skips journal rewrite when the policy has no effect")
+    func skipsJournalRewriteWhenPolicyHasNoEffect() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let event = makeEvent(root: root, name: "steady.bin", timestamp: Date(timeIntervalSince1970: 100), byteDelta: 1)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        let preferences = storagePreferences(detailedRetentionDays: 7, aggregateRetentionDays: 30)
+        try await store.append([event])
+        try await store.enforceStoragePolicy(
+            preferences,
+            eventJournalLimitBytes: 1_024 * 1_024,
+            now: Date(timeIntervalSince1970: 200)
+        )
+
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("not-json\n".utf8))
+        try handle.close()
+
+        try await store.enforceStoragePolicy(
+            preferences,
+            eventJournalLimitBytes: 1_024 * 1_024,
+            now: Date(timeIntervalSince1970: 300)
+        )
+        let skippedContents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
+        #expect(skippedContents.contains("not-json"))
+
+        try await store.enforceStoragePolicy(
+            preferences,
+            eventJournalLimitBytes: 1_024 * 1_024,
+            now: Date(timeIntervalSince1970: 100).addingTimeInterval(8 * 86_400)
+        )
+        let rewrittenContents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
+        #expect(!rewrittenContents.contains("not-json"))
+    }
 }
 
 private func storagePreferences(
