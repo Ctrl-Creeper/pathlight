@@ -119,7 +119,7 @@ private final class RecordingDiskActivityMonitor: DiskActivityMonitoring, @unche
         return sinceEventIDs.first ?? nil
     }
 
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
+    nonisolated func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         lock.lock()
         sinceEventIDs.append(eventID)
         lock.unlock()

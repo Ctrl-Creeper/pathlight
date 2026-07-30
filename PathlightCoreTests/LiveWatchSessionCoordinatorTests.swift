@@ -95,7 +95,7 @@ struct LiveWatchSessionCoordinatorTests {
 private struct StaticDiskActivityMonitor: DiskActivityMonitoring {
     let events: [DiskActivityStreamEvent]
 
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
+    nonisolated func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             for event in events {
                 continuation.yield(event)

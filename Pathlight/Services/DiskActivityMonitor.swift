@@ -2,7 +2,11 @@ import CoreServices
 import Foundation
 
 protocol DiskActivityMonitoring: Sendable {
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent>
+    nonisolated func events(
+        for root: URL,
+        since eventID: UInt64?,
+        latency: TimeInterval
+    ) -> AsyncStream<DiskActivityStreamEvent>
 }
 
 enum FSEventsChangeMapper {
@@ -67,12 +71,17 @@ enum FSEventsPathDecoder {
 }
 
 final class FSEventsDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
+    nonisolated func events(
+        for root: URL,
+        since eventID: UInt64?,
+        latency: TimeInterval
+    ) -> AsyncStream<DiskActivityStreamEvent> {
         let watchedRoot = root.standardizedFileURL
         return AsyncStream { continuation in
             let streamBox = FSEventsStreamBox(
                 root: watchedRoot,
                 sinceEventID: eventID,
+                latency: latency,
                 continuation: continuation
             )
             continuation.onTermination = { @Sendable [weak streamBox] _ in
@@ -86,6 +95,7 @@ final class FSEventsDiskActivityMonitor: DiskActivityMonitoring, @unchecked Send
 private final class FSEventsStreamBox: @unchecked Sendable {
     private let root: URL
     private let sinceEventID: UInt64?
+    private let latency: TimeInterval
     private let continuation: AsyncStream<DiskActivityStreamEvent>.Continuation
     private let queue: DispatchQueue
     private let lock = NSLock()
@@ -94,10 +104,12 @@ private final class FSEventsStreamBox: @unchecked Sendable {
     nonisolated init(
         root: URL,
         sinceEventID: UInt64?,
+        latency: TimeInterval,
         continuation: AsyncStream<DiskActivityStreamEvent>.Continuation
     ) {
         self.root = root
         self.sinceEventID = sinceEventID
+        self.latency = latency
         self.continuation = continuation
         queue = DispatchQueue(label: "app.pathlight.disk-activity.fsevents.\(root.path.hashValue)")
     }
@@ -117,9 +129,14 @@ private final class FSEventsStreamBox: @unchecked Sendable {
             release: Self.releaseContext,
             copyDescription: nil
         )
-        let flags = FSEventStreamCreateFlags(
-            kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
-        )
+        // NoDefer fires the first event immediately, which is what an interactive
+        // live monitor wants; relaxed background watches let the kernel batch the
+        // full latency window so the process wakes far less often.
+        var rawFlags = kFSEventStreamCreateFlagFileEvents
+        if latency < 1 {
+            rawFlags |= kFSEventStreamCreateFlagNoDefer
+        }
+        let flags = FSEventStreamCreateFlags(rawFlags)
 
         guard let createdStream = FSEventStreamCreate(
             nil,
@@ -127,7 +144,7 @@ private final class FSEventsStreamBox: @unchecked Sendable {
             &context,
             [root.path] as CFArray,
             sinceEventID.map { FSEventStreamEventId($0) } ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.25,
+            latency,
             flags
         ) else {
             continuation.finish()

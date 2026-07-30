@@ -27,13 +27,16 @@ struct ActivityBaselineService: Sendable {
 
     private let sizeProvider: StorageAttributionService.SizeProvider
     private let contentsProvider: ContentsProvider
+    private let isSystemUnderPressure: @Sendable () -> Bool
 
     init(
         sizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
-        contentsProvider: @escaping ContentsProvider = Self.liveContents(at:)
+        contentsProvider: @escaping ContentsProvider = Self.liveContents(at:),
+        isSystemUnderPressure: @escaping @Sendable () -> Bool = Self.liveSystemPressure
     ) {
         self.sizeProvider = sizeProvider
         self.contentsProvider = contentsProvider
+        self.isSystemUnderPressure = isSystemUnderPressure
     }
 
     func captureBaseline(
@@ -51,6 +54,11 @@ struct ActivityBaselineService: Sendable {
             // Callers discard the result on cancellation, so a partial walk is safe.
             guard !Task.isCancelled else {
                 break
+            }
+            // ponytail: crude pacing — back off in half-second steps while the
+            // machine is hot or on low power instead of racing through the walk.
+            if visitedPaths.count % 512 == 511, isSystemUnderPressure() {
+                try? await Task.sleep(for: .milliseconds(500))
             }
             let standardizedURL = url.standardizedFileURL
             guard visitedPaths.insert(standardizedURL.path).inserted else {
@@ -78,6 +86,19 @@ struct ActivityBaselineService: Sendable {
             measuredItemCount: measuredItemCount,
             unreadableItemCount: unreadableItemCount
         )
+    }
+
+    nonisolated static func liveSystemPressure() -> Bool {
+        let processInfo = ProcessInfo.processInfo
+        switch processInfo.thermalState {
+        case .serious, .critical:
+            return true
+        case .nominal, .fair:
+            break
+        @unknown default:
+            break
+        }
+        return processInfo.isLowPowerModeEnabled
     }
 
     private nonisolated static func liveContents(at url: URL) throws -> [URL] {

@@ -12,6 +12,7 @@ struct LiveWatchSessionCoordinator: Sendable {
         sinceEventID: UInt64? = nil,
         startedAt: Date = Date(),
         options: DiskActivityAggregationOptions = .default,
+        monitorLatency: TimeInterval = 0.25,
         sizeProvider: @escaping StorageAttributionService.SizeProvider,
         priorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
     ) -> AsyncStream<WatchSessionModel> {
@@ -31,7 +32,7 @@ struct LiveWatchSessionCoordinator: Sendable {
                     sizeProvider: sizeProvider,
                     priorSizeProvider: priorSizeProvider
                 )
-                for await streamEvent in monitor.events(for: standardizedRoot, since: sinceEventID) {
+                for await streamEvent in monitor.events(for: standardizedRoot, since: sinceEventID, latency: monitorLatency) {
                     guard !Task.isCancelled else {
                         break
                     }
