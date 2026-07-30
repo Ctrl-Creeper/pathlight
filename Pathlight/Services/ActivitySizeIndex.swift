@@ -2,6 +2,7 @@ import Foundation
 
 nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     private let lock = NSLock()
+    private let ioQueue = DispatchQueue(label: "com.pathlight.activity-size-index-journal")
     private let journalURL: URL?
     private let lineCodec: ActivityStorageLineCodec
     private let encoder: JSONEncoder
@@ -61,7 +62,7 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
 
         let key = key(for: url)
         sizesByPath[key] = size
-        append(
+        enqueueJournalWrite(
             JournalEntry(
                 kind: .record,
                 path: key,
@@ -90,7 +91,7 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         guard let size = sizesByPath.removeValue(forKey: key) else {
             return nil
         }
-        append(
+        enqueueJournalWrite(
             JournalEntry(
                 kind: .remove,
                 path: key,
@@ -102,18 +103,32 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     }
 
     func compactNow() {
-        lock.lock()
-        defer {
-            lock.unlock()
+        ioQueue.sync {
+            compact()
         }
-        compact()
+    }
+
+    func flushPendingJournalWrites() {
+        ioQueue.sync {}
     }
 
     private func key(for url: URL) -> String {
         url.standardizedFileURL.path
     }
 
-    private func append(_ entry: JournalEntry) {
+    // Enqueued while holding `lock`, so journal order matches dictionary mutation order.
+    // ponytail: pending writes drop on process exit; the journal is a rebuildable cache.
+    private func enqueueJournalWrite(_ entry: JournalEntry) {
+        guard journalURL != nil else {
+            return
+        }
+        ioQueue.async { [self] in
+            writeJournalEntry(entry)
+        }
+    }
+
+    // Runs on ioQueue only; `journalEntryCount` and compaction are ioQueue-confined.
+    private func writeJournalEntry(_ entry: JournalEntry) {
         guard let journalURL else {
             return
         }
@@ -152,12 +167,16 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
             return
         }
 
+        lock.lock()
+        let snapshot = sizesByPath
+        lock.unlock()
+
         do {
             try ActivityStorageFileProtection.createProtectedDirectory(
                 at: journalURL.deletingLastPathComponent()
             )
 
-            let entries = sizesByPath
+            let entries = snapshot
                 .sorted { lhs, rhs in lhs.key < rhs.key }
                 .map { path, size in
                     JournalEntry(

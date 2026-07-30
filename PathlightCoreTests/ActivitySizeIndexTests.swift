@@ -32,9 +32,11 @@ struct ActivitySizeIndexTests {
 
         let firstLaunchIndex = ActivitySizeIndex(journalURL: journalURL)
         firstLaunchIndex.recordKnownSize(8_192, for: file)
+        firstLaunchIndex.flushPendingJournalWrites()
 
         let secondLaunchIndex = ActivitySizeIndex(journalURL: journalURL)
         #expect(secondLaunchIndex.takeKnownSize(for: file) == 8_192)
+        secondLaunchIndex.flushPendingJournalWrites()
 
         let thirdLaunchIndex = ActivitySizeIndex(journalURL: journalURL)
         #expect(thirdLaunchIndex.takeKnownSize(for: file) == nil)
@@ -50,6 +52,7 @@ struct ActivitySizeIndexTests {
         index.recordKnownSize(1_024, for: oldFile)
         index.recordKnownSize(2_048, for: currentFile)
         #expect(index.takeKnownSize(for: oldFile) == 1_024)
+        index.flushPendingJournalWrites()
 
         let contents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
         let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
@@ -70,6 +73,7 @@ struct ActivitySizeIndexTests {
         )
 
         index.recordKnownSize(8_192, for: file)
+        index.flushPendingJournalWrites()
         let contents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
         let reloadedIndex = ActivitySizeIndex(
             journalURL: journalURL,
@@ -81,6 +85,33 @@ struct ActivitySizeIndexTests {
         #expect(reloadedIndex.takeKnownSize(for: file) == 8_192)
         #expect(try posixPermissions(at: journalURL.deletingLastPathComponent()) & 0o777 == 0o700)
         #expect(try posixPermissions(at: journalURL) & 0o777 == 0o600)
+    }
+
+    @Test("persists concurrent mutations")
+    func persistsConcurrentMutations() async {
+        let journalURL = makeTemporaryJournalURL()
+        let index = ActivitySizeIndex(journalURL: journalURL)
+
+        await withTaskGroup(of: Void.self) { group in
+            for taskIndex in 0..<8 {
+                group.addTask {
+                    let file = URL(filePath: "/Users/example/Downloads/file-\(taskIndex).bin")
+                    index.recordKnownSize(Int64(taskIndex + 1) * 100, for: file)
+                    _ = index.knownSize(for: file)
+                    if taskIndex.isMultiple(of: 2) {
+                        _ = index.takeKnownSize(for: file)
+                    }
+                }
+            }
+        }
+        index.flushPendingJournalWrites()
+
+        let reloaded = ActivitySizeIndex(journalURL: journalURL)
+        for taskIndex in 0..<8 {
+            let file = URL(filePath: "/Users/example/Downloads/file-\(taskIndex).bin")
+            let expected: Int64? = taskIndex.isMultiple(of: 2) ? nil : Int64(taskIndex + 1) * 100
+            #expect(reloaded.knownSize(for: file) == expected)
+        }
     }
 }
 

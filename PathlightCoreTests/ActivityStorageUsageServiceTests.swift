@@ -53,6 +53,7 @@ struct ActivityStorageUsageServiceTests {
         let file = URL(filePath: "/Users/example/Downloads/current.iso")
         let index = ActivitySizeIndex(journalURL: sizeIndexURL, lineCodec: lineCodec)
         index.recordKnownSize(4_096, for: file)
+        index.flushPendingJournalWrites()
         let service = ActivityStorageUsageService(
             eventJournalURL: eventsURL,
             sizeIndexJournalURL: sizeIndexURL,
