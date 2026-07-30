@@ -105,6 +105,54 @@ struct StorageAttributionServiceTests {
         #expect(events.first?.confidence == .unknown)
     }
 
+    @Test("records the departure side of a rename with the last known size")
+    func recordsRenameDepartureWithKnownPriorSize() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "trashed.zip")
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 10,
+                aggregationWindow: 300,
+                longTermRecordsFileNames: false
+            ),
+            sizeProvider: { _ in nil },
+            priorSizeProvider: { url in
+                url.path == file.path ? 700 : nil
+            }
+        )
+
+        let events = service.process([
+            DiskActivityChange(kind: .renamed(previousPath: nil), path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 200))
+        ])
+
+        #expect(events.first?.kind == .moved)
+        #expect(events.first?.byteDelta == -700)
+        #expect(events.first?.confidence == .estimated)
+    }
+
+    @Test("records the departure side of a rename with unknown prior size")
+    func recordsRenameDepartureWithUnknownPriorSize() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "vanished.zip")
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 10,
+                aggregationWindow: 300,
+                longTermRecordsFileNames: false
+            ),
+            sizeProvider: { _ in nil },
+            priorSizeProvider: { _ in nil }
+        )
+
+        let events = service.process([
+            DiskActivityChange(kind: .renamed(previousPath: nil), path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 200))
+        ])
+
+        #expect(events.first?.kind == .moved)
+        #expect(events.first?.byteDelta == nil)
+        #expect(events.first?.confidence == .unknown)
+    }
+
     @Test("aggregates many changes under the same parent inside the window")
     func aggregatesChangesByParentInsideWindow() {
         let root = URL(filePath: "/Users/example/Library/Caches", directoryHint: .isDirectory)

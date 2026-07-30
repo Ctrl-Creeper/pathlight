@@ -60,11 +60,38 @@ struct StorageAttributionService {
                 affectedItemCount: 1
             )
         case .renamed(let previousPath):
-            return sizedEvent(
+            if let event = sizedEvent(
                 kind: .moved,
                 change: change,
                 confidence: .confirmed,
                 previousPath: previousPath
+            ) {
+                return event
+            }
+            // The path vanished, so this is the departure side of a rename
+            // (e.g. into the Trash). Attribute it like a deletion so moved-away
+            // bytes are not silently dropped.
+            if let priorSize = priorSizeProvider(change.path) {
+                return DiskActivityEvent(
+                    kind: .moved,
+                    path: change.path,
+                    rootPath: change.rootPath,
+                    timestamp: change.timestamp,
+                    byteDelta: -priorSize,
+                    confidence: .estimated,
+                    previousPath: previousPath,
+                    affectedItemCount: 1
+                )
+            }
+            return DiskActivityEvent(
+                kind: .moved,
+                path: change.path,
+                rootPath: change.rootPath,
+                timestamp: change.timestamp,
+                byteDelta: nil,
+                confidence: .unknown,
+                previousPath: previousPath,
+                affectedItemCount: 1
             )
         }
     }
