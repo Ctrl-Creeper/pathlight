@@ -22,6 +22,7 @@ struct AppDependencies {
     var activityStoragePreferences: any ActivityStoragePreferencesPersisting
     var activityStorageUsageService: ActivityStorageUsageService
     var launchAtLoginService: any LaunchAtLoginControlling
+    var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
 
     init(
         preferences: any AppPreferencesPersisting,
@@ -40,7 +41,8 @@ struct AppDependencies {
         activityBaselineService: ActivityBaselineService = ActivityBaselineService(),
         activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
-        launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService()
+        launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService(),
+        activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil
     ) {
         self.preferences = preferences
         self.recentTargets = recentTargets
@@ -57,6 +59,7 @@ struct AppDependencies {
         self.activityStoragePreferences = activityStoragePreferences
         self.activityStorageUsageService = activityStorageUsageService
         self.launchAtLoginService = launchAtLoginService
+        self.activityGrowthAlertPoster = activityGrowthAlertPoster
     }
 
     static var live: AppDependencies {
@@ -91,7 +94,8 @@ struct AppDependencies {
             activityBaselineService: ActivityBaselineService(sizeProvider: activitySizeProvider),
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
-            launchAtLoginService: SystemLaunchAtLoginService()
+            launchAtLoginService: SystemLaunchAtLoginService(),
+            activityGrowthAlertPoster: UserNotificationGrowthAlertPoster()
         )
     }
 }

@@ -4,6 +4,20 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     let minimumRecordedByteDelta: Int64
     let aggregationWindow: TimeInterval
     let recordsFileNames: Bool
+    /// Daily net growth that triggers a notification; nil means alerts are off.
+    var growthAlertThresholdBytes: Int64?
+
+    init(
+        minimumRecordedByteDelta: Int64,
+        aggregationWindow: TimeInterval,
+        recordsFileNames: Bool,
+        growthAlertThresholdBytes: Int64? = nil
+    ) {
+        self.minimumRecordedByteDelta = minimumRecordedByteDelta
+        self.aggregationWindow = aggregationWindow
+        self.recordsFileNames = recordsFileNames
+        self.growthAlertThresholdBytes = growthAlertThresholdBytes
+    }
 
     static let `default` = LongTermWatchTargetOptions(
         minimumRecordedByteDelta: DiskActivityAggregationOptions.default.minimumRecordedByteDelta,
@@ -181,6 +195,25 @@ struct LongTermWatchTargetStore {
 
             var updatedTarget = target
             updatedTarget.checkpoint = checkpoint
+            return updatedTarget
+        }
+        persistence.saveTargets(updatedTargets)
+        return updatedTargets
+    }
+
+    func updateOptions(
+        _ options: LongTermWatchTargetOptions,
+        forRootPath rootPath: URL,
+        currentTargets: [LongTermWatchTarget]
+    ) -> [LongTermWatchTarget] {
+        let targetID = rootPath.standardizedFileURL.path
+        let updatedTargets = currentTargets.map { target in
+            guard target.id == targetID else {
+                return target
+            }
+
+            var updatedTarget = target
+            updatedTarget.options = options
             return updatedTarget
         }
         persistence.saveTargets(updatedTargets)
