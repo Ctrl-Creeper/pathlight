@@ -2789,7 +2789,7 @@ private final class ControlledAppModelScanService: ScanEventStreaming, @unchecke
 }
 
 private struct EmptyDiskActivityMonitor: DiskActivityMonitoring {
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
+    nonisolated func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             continuation.finish()
         }
@@ -2821,7 +2821,7 @@ private final class ControlledDiskActivityMonitor: DiskActivityMonitoring, @unch
         return sinceEventID
     }
 
-    nonisolated func events(for root: URL, since eventID: UInt64?) -> AsyncStream<DiskActivityStreamEvent> {
+    nonisolated func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             lock.lock()
             self.continuation = continuation

@@ -141,6 +141,82 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.targetRows.first?.statusText == "History Gap")
     }
 
+    @Test("aggregates top changes by immediate child of the watch root")
+    func aggregatesTopChangesByImmediateChild() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let history = historySnapshot(
+            rootPath: downloads,
+            totalNetByteDelta: 0,
+            eventCount: 4,
+            recentEvents: [
+                event(.created, root: downloads, name: "Movies/one.mov", timestamp: 100, byteDelta: 3_000),
+                event(.created, root: downloads, name: "Movies/two.mov", timestamp: 110, byteDelta: 2_000),
+                event(.deleted, root: downloads, name: "Archives/old.zip", timestamp: 120, byteDelta: -1_000),
+                event(.created, root: downloads, name: "loose.txt", timestamp: 130, byteDelta: 500)
+            ]
+        )
+
+        let presentation = ActivityDashboardPresentation(
+            targets: [LongTermWatchTarget(rootPath: downloads)],
+            selectedRootPath: downloads,
+            histories: [history]
+        )
+
+        #expect(presentation.topChanges.map(\.title) == ["Movies", "Archives", "loose.txt"])
+        #expect(presentation.topChanges.map(\.byteDelta) == [5_000, -1_000, 500])
+        #expect(presentation.topChanges.first?.eventText == "2 events")
+        #expect(presentation.topChanges.first?.magnitudeFraction == 1)
+        #expect(presentation.topChanges.first?.url == downloads.appending(path: "Movies"))
+    }
+
+    @Test("summarizes menu bar activity with today's net change")
+    func summarizesMenuBarActivity() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date(timeIntervalSince1970: 200_000)
+        let dayStart = calendar.startOfDay(for: now)
+        let history = historySnapshot(
+            rootPath: downloads,
+            totalNetByteDelta: 4_096,
+            eventCount: 2,
+            buckets: [
+                ActivityHistoryBucket(
+                    startDate: dayStart.addingTimeInterval(-7_200),
+                    endDate: dayStart.addingTimeInterval(-3_600),
+                    byteDelta: 1_000_000,
+                    eventCount: 1,
+                    unknownSizeEventCount: 0
+                ),
+                ActivityHistoryBucket(
+                    startDate: dayStart.addingTimeInterval(3_600),
+                    endDate: dayStart.addingTimeInterval(7_200),
+                    byteDelta: 2_048,
+                    eventCount: 1,
+                    unknownSizeEventCount: 0
+                )
+            ]
+        )
+
+        let presentation = MenuBarActivityPresentation(
+            targets: [LongTermWatchTarget(rootPath: downloads)],
+            histories: [history],
+            runtimeStatuses: [
+                downloads.standardizedFileURL.path: LongTermWatchRuntimeStatus(
+                    state: .watching,
+                    lastActivityAt: nil,
+                    retryCount: 0
+                )
+            ],
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(presentation.rows.map(\.title) == ["Downloads"])
+        #expect(presentation.rows.first?.statusText == "Watching")
+        #expect(presentation.rows.first?.todayChangeText == "+2 KB today")
+        #expect(presentation.summaryText == "1 watching • +2 KB today")
+    }
+
     @Test("shows empty state when there are no long-term targets")
     func showsEmptyState() {
         let presentation = ActivityDashboardPresentation(

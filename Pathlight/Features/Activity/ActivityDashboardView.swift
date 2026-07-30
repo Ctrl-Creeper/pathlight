@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 
 struct ActivityDashboardActions {
@@ -7,6 +8,8 @@ struct ActivityDashboardActions {
     let removeLongTermWatchTarget: (URL) -> Void
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
+    let locateInApp: (URL) -> Void
+    let setGrowthAlertThreshold: (Int64?, URL) -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -125,6 +128,9 @@ struct ActivityDashboardView: View {
                         },
                         onClearHistoryGap: {
                             actions.clearHistoryGap(row.rootPath)
+                        },
+                        onSetGrowthAlertThreshold: {
+                            actions.setGrowthAlertThreshold($0, row.rootPath)
                         }
                     )
                 }
@@ -140,7 +146,18 @@ struct ActivityDashboardView: View {
 
             Divider()
 
-            ActivityDashboardTimelineSection(rows: presentation.timelineRows)
+            ActivityDashboardTopChangesSection(
+                changes: presentation.topChanges,
+                onLocate: { actions.locateInApp($0) }
+            )
+
+            Divider()
+
+            ActivityDashboardTimelineSection(
+                rows: presentation.timelineRows,
+                onLocate: { actions.locateInApp(URL(filePath: $0)) },
+                onReveal: { actions.revealInFinder(URL(filePath: $0)) }
+            )
         }
     }
 
@@ -180,6 +197,13 @@ private struct ActivityDashboardTargetRow: View {
     let onReveal: () -> Void
     let onRemove: () -> Void
     let onClearHistoryGap: () -> Void
+    let onSetGrowthAlertThreshold: (Int64?) -> Void
+
+    private static let alertThresholdChoices: [(label: String, bytes: Int64)] = [
+        ("1 GB", 1_000_000_000),
+        ("5 GB", 5_000_000_000),
+        ("20 GB", 20_000_000_000)
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -229,6 +253,39 @@ private struct ActivityDashboardTargetRow: View {
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .help("Reveal in Finder")
+
+                Menu {
+                    Button {
+                        onSetGrowthAlertThreshold(nil)
+                    } label: {
+                        if row.growthAlertThresholdBytes == nil {
+                            Label("Off", systemImage: "checkmark")
+                        } else {
+                            Text("Off")
+                        }
+                    }
+                    ForEach(Self.alertThresholdChoices, id: \.bytes) { choice in
+                        Button {
+                            onSetGrowthAlertThreshold(choice.bytes)
+                        } label: {
+                            if row.growthAlertThresholdBytes == choice.bytes {
+                                Label(choice.label, systemImage: "checkmark")
+                            } else {
+                                Text(choice.label)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(
+                        "Growth Alerts",
+                        systemImage: row.growthAlertThresholdBytes == nil ? "bell.slash" : "bell.fill"
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .labelStyle(.iconOnly)
+                .fixedSize()
+                .help("Notify when this folder grows past a daily threshold")
 
                 if row.hasHistoryGap {
                     Button(action: onClearHistoryGap) {
@@ -315,25 +372,128 @@ private struct ActivityDashboardTrendSection: View {
 private struct ActivityDashboardTrendChart: View {
     let buckets: [ActivityHistoryPresentation.Bucket]
 
+    @State private var selectedDate: Date?
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            ForEach(buckets) { bucket in
-                Capsule(style: .continuous)
-                    .fill(color(for: bucket))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: max(10, 150 * bucket.magnitudeFraction))
-                    .help("\(bucket.label): \(bucket.detail), \(bucket.eventCount.formatted()) events")
+        VStack(alignment: .leading, spacing: 6) {
+            Chart(buckets) { bucket in
+                BarMark(
+                    x: .value("Time", bucket.startDate),
+                    y: .value("Change", bucket.byteDelta)
+                )
+                .foregroundStyle(bucket.byteDelta >= 0 ? Color.green.gradient : Color.orange.gradient)
+                .cornerRadius(3)
+
+                if let selectedBucket, selectedBucket.id == bucket.id {
+                    RuleMark(x: .value("Selected", selectedBucket.startDate))
+                        .foregroundStyle(.secondary.opacity(0.4))
+                }
             }
+            .chartYAxis {
+                AxisMarks(position: .trailing) { value in
+                    AxisGridLine()
+                    AxisValueLabel {
+                        if let bytes = value.as(Int64.self) {
+                            Text(ActivityDashboardPresentation.signedSize(bytes))
+                                .font(.caption2.monospacedDigit())
+                        }
+                    }
+                }
+            }
+            .chartXSelection(value: $selectedDate)
+
+            Text(selectionCaption)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .padding(.top, 12)
     }
 
-    private func color(for bucket: ActivityHistoryPresentation.Bucket) -> Color {
-        if bucket.byteDelta > 0 {
+    private var selectedBucket: ActivityHistoryPresentation.Bucket? {
+        guard let selectedDate else {
+            return nil
+        }
+        return buckets.min { lhs, rhs in
+            abs(lhs.startDate.timeIntervalSince(selectedDate)) < abs(rhs.startDate.timeIntervalSince(selectedDate))
+        }
+    }
+
+    private var selectionCaption: String {
+        guard let bucket = selectedBucket else {
+            return "Hover for details"
+        }
+        let eventLabel = bucket.eventCount == 1 ? "event" : "events"
+        return "\(bucket.label) • \(bucket.detail) • \(bucket.eventCount.formatted()) \(eventLabel)"
+    }
+}
+
+private struct ActivityDashboardTopChangesSection: View {
+    let changes: [ActivityDashboardPresentation.TopChange]
+    let onLocate: (URL) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Top Changes", systemImage: "arrow.up.arrow.down.circle")
+                .font(.headline)
+
+            if changes.isEmpty {
+                Text("No attributable changes yet")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(changes) { change in
+                    ActivityDashboardTopChangeRow(change: change, onLocate: onLocate)
+                }
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ActivityDashboardTopChangeRow: View {
+    let change: ActivityDashboardPresentation.TopChange
+    let onLocate: (URL) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(change.title)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(minWidth: 120, alignment: .leading)
+
+            GeometryReader { proxy in
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(barColor.opacity(0.35))
+                    .frame(width: max(4, proxy.size.width * change.magnitudeFraction))
+                    .frame(maxHeight: .infinity, alignment: .center)
+            }
+            .frame(height: 8)
+
+            Text(change.changeText)
+                .font(.subheadline.monospacedDigit().weight(.medium))
+                .foregroundStyle(barColor)
+                .lineLimit(1)
+
+            Text(change.eventText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 76, alignment: .trailing)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onLocate(change.url)
+        }
+        .help("Click to locate \(change.title) in Pathlight")
+    }
+
+    private var barColor: Color {
+        if change.byteDelta > 0 {
             return .green
         }
-        if bucket.byteDelta < 0 {
+        if change.byteDelta < 0 {
             return .orange
         }
         return .secondary
@@ -342,6 +502,8 @@ private struct ActivityDashboardTrendChart: View {
 
 private struct ActivityDashboardTimelineSection: View {
     let rows: [ActivityHistoryPresentation.Row]
+    let onLocate: (String) -> Void
+    let onReveal: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -357,7 +519,11 @@ private struct ActivityDashboardTimelineSection: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(rows) { row in
-                            ActivityDashboardTimelineRow(row: row)
+                            ActivityDashboardTimelineRow(
+                                row: row,
+                                onLocate: onLocate,
+                                onReveal: onReveal
+                            )
                         }
                     }
                 }
@@ -370,6 +536,8 @@ private struct ActivityDashboardTimelineSection: View {
 
 private struct ActivityDashboardTimelineRow: View {
     let row: ActivityHistoryPresentation.Row
+    let onLocate: (String) -> Void
+    let onReveal: (String) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -402,32 +570,48 @@ private struct ActivityDashboardTimelineRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            onLocate(row.path)
+        }
+        .contextMenu {
+            Button("Locate in Pathlight") {
+                onLocate(row.path)
+            }
+            Button("Reveal in Finder") {
+                onReveal(row.path)
+            }
+        }
     }
 
     private var iconName: String {
-        if row.title.hasPrefix("Created") {
+        switch row.kind {
+        case .created:
             return "plus.circle.fill"
-        }
-        if row.title.hasPrefix("Deleted") {
+        case .deleted:
             return "minus.circle.fill"
-        }
-        if row.title.hasPrefix("Moved") {
+        case .moved:
             return "arrow.right.circle.fill"
+        case .aggregate:
+            return "sum"
+        case .modified:
+            return "pencil.circle.fill"
         }
-        return "pencil.circle.fill"
     }
 
     private var iconColor: Color {
-        if row.title.hasPrefix("Created") {
+        switch row.kind {
+        case .created:
             return .green
-        }
-        if row.title.hasPrefix("Deleted") {
+        case .deleted:
             return .orange
-        }
-        if row.title.hasPrefix("Moved") {
+        case .moved:
             return .purple
+        case .aggregate:
+            return .secondary
+        case .modified:
+            return .blue
         }
-        return .blue
     }
 }
 

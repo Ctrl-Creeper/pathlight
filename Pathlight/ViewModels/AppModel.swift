@@ -239,6 +239,7 @@ final class AppModel: ObservableObject {
     private var activityHistoryTaskID: UUID?
     private var lastEventDrivenHistoryRefreshAt: [String: Date] = [:]
     private var pendingEventDrivenHistoryRefreshTasks: [String: Task<Void, Never>] = [:]
+    private var growthAlertLastPostedAt: [String: Date] = [:]
     private var activityDashboardHistoryTask: Task<Void, Never>?
     private var activityDashboardHistoryTaskID: UUID?
     private var activityStorageUsageTask: Task<Void, Never>?
@@ -308,6 +309,9 @@ final class AppModel: ObservableObject {
         observeActivityStoragePreferences()
         quickLookController.installKeyMonitor()
         startEnabledLongTermWatches()
+        // Preload histories so the menu bar shows today's numbers before the
+        // dashboard is ever opened.
+        refreshActivityDashboardHistories(rootPaths: longTermWatchTargets.map(\.rootPath))
         refreshActivityStorageUsage()
         applyActivityStoragePolicy()
     }
@@ -658,6 +662,7 @@ final class AppModel: ObservableObject {
                 }
                 self.activityHistory = history
                 self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
+                self.evaluateGrowthAlert(history: history)
             } catch {
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
@@ -720,6 +725,7 @@ final class AppModel: ObservableObject {
                         return
                     }
                     self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
+                    self.evaluateGrowthAlert(history: history)
                 } catch {
                     guard !Task.isCancelled, self.activityDashboardHistoryTaskID == taskID else {
                         return
@@ -818,6 +824,46 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func setGrowthAlertThreshold(_ thresholdBytes: Int64?, rootPath: URL) {
+        let targetID = rootPath.standardizedFileURL.path
+        guard let target = longTermWatchTargets.first(where: { $0.id == targetID }) else {
+            return
+        }
+
+        var options = target.options
+        options.growthAlertThresholdBytes = thresholdBytes
+        longTermWatchTargets = dependencies.longTermWatchTargets.updateOptions(
+            options,
+            forRootPath: target.rootPath,
+            currentTargets: longTermWatchTargets
+        )
+    }
+
+    private func evaluateGrowthAlert(history: ActivityHistorySnapshot) {
+        guard let poster = dependencies.activityGrowthAlertPoster else {
+            return
+        }
+        let targetID = history.rootPath.standardizedFileURL.path
+        guard let target = longTermWatchTargets.first(where: { $0.id == targetID }),
+              let growth = ActivityGrowthAlertEvaluator.alertworthyGrowth(
+                  target: target,
+                  history: history,
+                  lastAlertedAt: growthAlertLastPostedAt[targetID]
+              ),
+              let threshold = target.options.growthAlertThresholdBytes else {
+            return
+        }
+
+        growthAlertLastPostedAt[targetID] = Date()
+        Task {
+            await poster.postGrowthAlert(
+                rootPath: target.rootPath,
+                growthBytes: growth,
+                thresholdBytes: threshold
+            )
+        }
+    }
+
     func clearLongTermWatchHistoryGap(rootPath: URL) {
         let targetID = rootPath.standardizedFileURL.path
         guard let target = longTermWatchTargets.first(where: { $0.id == targetID }),
@@ -892,6 +938,9 @@ final class AppModel: ObservableObject {
                     rootPath: currentTarget.rootPath,
                     sinceEventID: currentTarget.checkpoint?.eventID,
                     options: currentTarget.options.diskActivityOptions,
+                    // Background watches don't need sub-second delivery; a wide
+                    // latency window lets the kernel coalesce and saves wakeups.
+                    monitorLatency: 30,
                     sizeProvider: sizeProvider,
                     priorSizeProvider: priorSizeProvider
                 )
@@ -1782,6 +1831,22 @@ final class AppModel: ObservableObject {
 
     func revealURLInFinder(_ url: URL) {
         dependencies.systemActions.reveal(url)
+    }
+
+    /// Jumps to the path inside the current scan snapshot; falls back to Finder
+    /// when the path was never scanned.
+    func locateActivityPath(_ url: URL) {
+        let nodeID = url.standardizedFileURL.path
+        guard let snapshot = scanCoordinator.snapshot,
+              snapshot.treeStore.node(id: nodeID) != nil else {
+            revealURLInFinder(url)
+            return
+        }
+
+        if isActivityDashboardSelected {
+            sidebarModel.setActiveTargetID(snapshot.target.id)
+        }
+        selectAndFocusAfterViewUpdate(nodeID: nodeID)
     }
 
     func openSelected() {

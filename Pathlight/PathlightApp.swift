@@ -87,6 +87,20 @@ struct PathlightApp: App {
             }
         }
 
+        // Menu bar presence only while folders are actually monitored, so the
+        // analyzer stays invisible for users who never enable watching.
+        MenuBarExtra(
+            "Pathlight Activity",
+            systemImage: "waveform.path.ecg",
+            isInserted: Binding(
+                get: { !appModel.longTermWatchTargets.isEmpty },
+                set: { _ in }
+            )
+        ) {
+            ActivityMenuBarView()
+                .environmentObject(appModel)
+        }
+
         Window("Live Monitor", id: "live-monitor") {
             LiveMonitorWindowView()
                 .environmentObject(appModel)

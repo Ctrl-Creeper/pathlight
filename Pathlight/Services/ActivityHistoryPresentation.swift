@@ -8,6 +8,7 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
         let byteDelta: Int64
         let eventCount: Int
         let magnitudeFraction: Double
+        let startDate: Date
     }
 
     struct Row: Equatable, Identifiable, Sendable {
@@ -16,6 +17,7 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
         let detail: String
         let path: String
         let timestamp: Date
+        let kind: DiskActivityEventKind
     }
 
     let title: String
@@ -78,7 +80,8 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             detail: bucket.detailText,
             byteDelta: bucket.byteDelta,
             eventCount: bucket.eventCount,
-            magnitudeFraction: fraction
+            magnitudeFraction: fraction,
+            startDate: bucket.startDate
         )
     }
 
@@ -92,7 +95,8 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             title: "\(event.kindTitle) \(event.path.lastPathComponent)",
             detail: event.byteDelta.map(signedSize) ?? "Unknown size",
             path: event.path.path,
-            timestamp: event.timestamp
+            timestamp: event.timestamp,
+            kind: event.kind
         )
     }
 

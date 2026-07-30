@@ -12,7 +12,18 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let lastActivityText: String
         let hasHistoryGap: Bool
         let isEnabled: Bool
+        let growthAlertThresholdBytes: Int64?
         let rootPath: URL
+    }
+
+    struct TopChange: Equatable, Identifiable, Sendable {
+        let id: String
+        let title: String
+        let changeText: String
+        let eventText: String
+        let byteDelta: Int64
+        let magnitudeFraction: Double
+        let url: URL
     }
 
     let title: String
@@ -22,6 +33,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
     let targetRows: [TargetRow]
     let trendBuckets: [ActivityHistoryPresentation.Bucket]
     let timelineRows: [ActivityHistoryPresentation.Row]
+    let topChanges: [TopChange]
 
     init(
         targets: [LongTermWatchTarget],
@@ -70,10 +82,63 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             )
             trendBuckets = historyPresentation.buckets
             timelineRows = historyPresentation.rows
+            topChanges = Self.topChanges(history: history)
         } else {
             trendBuckets = []
             timelineRows = []
+            topChanges = []
         }
+    }
+
+    /// Aggregates recent events by the immediate child of the watch root, so the
+    /// dashboard can answer "what inside this folder is growing".
+    private static func topChanges(
+        history: ActivityHistorySnapshot,
+        limit: Int = 6
+    ) -> [TopChange] {
+        struct Accumulator {
+            var byteDelta: Int64 = 0
+            var eventCount = 0
+        }
+
+        let root = history.rootPath.standardizedFileURL
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        var accumulators: [String: Accumulator] = [:]
+        for event in history.recentEvents where event.kind != .aggregate {
+            let path = event.path.standardizedFileURL.path
+            guard path.hasPrefix(rootPrefix) else {
+                continue
+            }
+            let relative = path.dropFirst(rootPrefix.count)
+            guard let childName = relative.split(separator: "/").first.map(String.init) else {
+                continue
+            }
+            accumulators[childName, default: Accumulator()].byteDelta += event.byteDelta ?? 0
+            accumulators[childName, default: Accumulator()].eventCount += 1
+        }
+
+        let maxMagnitude = accumulators.values.map { abs($0.byteDelta) }.max() ?? 0
+        return accumulators
+            .sorted { lhs, rhs in
+                if abs(lhs.value.byteDelta) == abs(rhs.value.byteDelta) {
+                    return lhs.key < rhs.key
+                }
+                return abs(lhs.value.byteDelta) > abs(rhs.value.byteDelta)
+            }
+            .prefix(limit)
+            .map { childName, accumulator in
+                TopChange(
+                    id: childName,
+                    title: childName,
+                    changeText: signedSize(accumulator.byteDelta),
+                    eventText: eventCountText(accumulator.eventCount),
+                    byteDelta: accumulator.byteDelta,
+                    magnitudeFraction: maxMagnitude > 0
+                        ? Double(abs(accumulator.byteDelta)) / Double(maxMagnitude)
+                        : 0,
+                    url: root.appending(path: childName)
+                )
+            }
     }
 
     private static func targetRow(
@@ -95,6 +160,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             lastActivityText: lastActivityText(for: status),
             hasHistoryGap: status.state == .historyGap,
             isEnabled: target.isEnabled,
+            growthAlertThresholdBytes: target.options.growthAlertThresholdBytes,
             rootPath: target.rootPath
         )
     }
@@ -108,7 +174,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         count == 1 ? "1 event" : "\(count.formatted()) events"
     }
 
-    private static func statusText(for status: LongTermWatchRuntimeStatus) -> String {
+    static func statusText(for status: LongTermWatchRuntimeStatus) -> String {
         switch status.state {
         case .starting:
             return "Starting"
@@ -132,7 +198,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         return "Last activity \(PathlightFormatters.date(lastActivityAt))"
     }
 
-    private static func signedSize(_ bytes: Int64) -> String {
+    static func signedSize(_ bytes: Int64) -> String {
         if bytes > 0 {
             return "+\(PathlightFormatters.size(bytes))"
         }
@@ -140,5 +206,66 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             return "-\(PathlightFormatters.size(abs(bytes)))"
         }
         return PathlightFormatters.size(0)
+    }
+}
+
+extension ActivityHistorySnapshot {
+    /// Net byte change across buckets that end after the cutoff (e.g. start of today).
+    func netByteDelta(onOrAfter cutoff: Date) -> Int64 {
+        buckets
+            .filter { $0.endDate > cutoff }
+            .reduce(Int64(0)) { $0 + $1.byteDelta }
+    }
+}
+
+struct MenuBarActivityPresentation: Equatable, Sendable {
+    struct Row: Equatable, Identifiable, Sendable {
+        let id: String
+        let title: String
+        let statusText: String
+        let todayChangeText: String
+        let isEnabled: Bool
+        let rootPath: URL
+    }
+
+    let rows: [Row]
+    let summaryText: String
+
+    init(
+        targets: [LongTermWatchTarget],
+        histories: [ActivityHistorySnapshot],
+        runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:],
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) {
+        let dayStart = calendar.startOfDay(for: now)
+        let historyByRoot = histories.reduce(into: [String: ActivityHistorySnapshot]()) { result, history in
+            result[history.rootPath.standardizedFileURL.path] = history
+        }
+
+        var todayTotal: Int64 = 0
+        rows = targets.map { target in
+            let todayDelta = historyByRoot[target.id]?.netByteDelta(onOrAfter: dayStart) ?? 0
+            todayTotal += todayDelta
+            let status = runtimeStatuses[target.id] ?? (target.isEnabled
+                ? LongTermWatchRuntimeStatus(state: .starting, lastActivityAt: nil, retryCount: 0)
+                : .paused)
+            let name = target.rootPath.lastPathComponent
+            return Row(
+                id: target.id,
+                title: name.isEmpty ? target.rootPath.path : name,
+                statusText: ActivityDashboardPresentation.statusText(for: status),
+                todayChangeText: "\(ActivityDashboardPresentation.signedSize(todayDelta)) today",
+                isEnabled: target.isEnabled,
+                rootPath: target.rootPath
+            )
+        }
+
+        if targets.isEmpty {
+            summaryText = "No folders monitored"
+        } else {
+            let watchingCount = targets.filter(\.isEnabled).count
+            summaryText = "\(watchingCount.formatted()) watching • \(ActivityDashboardPresentation.signedSize(todayTotal)) today"
+        }
     }
 }
