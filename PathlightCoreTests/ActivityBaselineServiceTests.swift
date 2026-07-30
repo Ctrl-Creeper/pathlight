@@ -68,4 +68,42 @@ struct ActivityBaselineServiceTests {
         #expect(baseline.measuredItemCount == 1)
         #expect(baseline.unreadableItemCount == 2)
     }
+
+    @Test("walks a real directory without counting files as unreadable")
+    func walksRealDirectory() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let subdirectory = root.appending(path: "Nested", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: subdirectory, withIntermediateDirectories: true)
+        try Data(repeating: 0, count: 4_096).write(to: root.appending(path: "top.bin"))
+        try Data(repeating: 0, count: 4_096).write(to: subdirectory.appending(path: "nested.bin"))
+
+        let baseline = await ActivityBaselineService().captureBaseline(rootPath: root)
+
+        #expect(baseline.unreadableItemCount == 0)
+        #expect(baseline.measuredItemCount == 4)
+        #expect(baseline.allocatedSize >= 8_192)
+    }
+
+    @Test("terminates on symlink cycles without following them")
+    func terminatesOnSymlinkCycles() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 0, count: 4_096).write(to: root.appending(path: "file.bin"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appending(path: "loop"),
+            withDestinationURL: root
+        )
+
+        let baseline = await ActivityBaselineService().captureBaseline(rootPath: root)
+
+        #expect(baseline.measuredItemCount + baseline.unreadableItemCount <= 3)
+    }
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appending(path: "PathlightBaselineTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
 }

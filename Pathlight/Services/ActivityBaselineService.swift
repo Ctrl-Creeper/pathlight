@@ -48,6 +48,10 @@ struct ActivityBaselineService: Sendable {
         var visitedPaths = Set<String>()
 
         while let url = pending.popLast() {
+            // Callers discard the result on cancellation, so a partial walk is safe.
+            guard !Task.isCancelled else {
+                break
+            }
             let standardizedURL = url.standardizedFileURL
             guard visitedPaths.insert(standardizedURL.path).inserted else {
                 continue
@@ -77,7 +81,13 @@ struct ActivityBaselineService: Sendable {
     }
 
     private nonisolated static func liveContents(at url: URL) throws -> [URL] {
-        try FileManager.default.contentsOfDirectory(
+        // Only real directories are enumerated: regular files would throw here and
+        // be miscounted as unreadable, and following symlinks double counts or loops.
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            return []
+        }
+        return try FileManager.default.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: [
                 .isDirectoryKey,

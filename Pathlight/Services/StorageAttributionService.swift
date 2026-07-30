@@ -181,7 +181,8 @@ enum FileAllocatedSizeProvider {
     nonisolated static func allocatedSize(for url: URL) -> Int64? {
         guard let values = try? url.resourceValues(forKeys: [
             .totalFileAllocatedSizeKey,
-            .fileAllocatedSizeKey
+            .fileAllocatedSizeKey,
+            .isDirectoryKey
         ]) else {
             return nil
         }
@@ -191,6 +192,11 @@ enum FileAllocatedSizeProvider {
         }
         if let fileAllocatedSize = values.fileAllocatedSize {
             return Int64(fileAllocatedSize)
+        }
+        // Directories report no allocated size of their own; nil here would make
+        // every readable folder count as unreadable in baselines.
+        if values.isDirectory == true {
+            return 0
         }
         return nil
     }
