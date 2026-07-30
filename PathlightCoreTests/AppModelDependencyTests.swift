@@ -139,6 +139,11 @@ final class AppModelDependencyTests: XCTestCase {
         }
 
         XCTAssertEqual(model.longTermWatchRuntimeStatuses[target.id]?.retryCount, 1)
+
+        // The initial session yield must not reset the count, or backoff never grows.
+        try await waitUntil("retry count keeps growing", timeout: 2) {
+            (model.longTermWatchRuntimeStatuses[target.id]?.retryCount ?? 0) >= 2
+        }
         model.cleanup()
     }
 

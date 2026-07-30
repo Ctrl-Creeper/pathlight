@@ -869,12 +869,20 @@ final class AppModel: ObservableObject {
                 )
                 var persistedEventCount = 0
                 var didCaptureGapBaseline = false
+                var isInitialSessionYield = true
                 for await session in stream {
                     guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
                         break
                     }
 
-                    retryCount = 0
+                    // The coordinator yields once before the monitor stream produces
+                    // anything, so only later yields prove the watch is alive; resetting
+                    // on the first would defeat the reconnect backoff for dead watches.
+                    if isInitialSessionYield {
+                        isInitialSessionYield = false
+                    } else {
+                        retryCount = 0
+                    }
                     let existingCheckpoint = self.longTermWatchTargets.first(where: { $0.id == target.id })?.checkpoint
                     if let eventID = session.lastObservedEventID,
                        eventID != existingCheckpoint?.eventID || session.historyState == .gapDetected {
