@@ -62,9 +62,11 @@ nonisolated struct AESGCMActivityStorageCryptor: ActivityStorageLineCrypting {
     let keyProvider: any ActivityStorageKeyProviding
 
     static let live = AESGCMActivityStorageCryptor(
-        keyProvider: KeychainActivityStorageKeyProvider(
-            service: "com.ctrlcreeper.Pathlight.activity-storage",
-            account: "pathlight-aes-gcm-v1"
+        keyProvider: CachingActivityStorageKeyProvider(
+            wrapping: KeychainActivityStorageKeyProvider(
+                service: "com.ctrlcreeper.Pathlight.activity-storage",
+                account: "pathlight-aes-gcm-v1"
+            )
         )
     )
 
@@ -84,6 +86,30 @@ nonisolated struct AESGCMActivityStorageCryptor: ActivityStorageLineCrypting {
     }
 }
 
+nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private let underlying: any ActivityStorageKeyProviding
+    private var cachedKey: Data?
+
+    init(wrapping underlying: any ActivityStorageKeyProviding) {
+        self.underlying = underlying
+    }
+
+    func loadOrCreateKey() throws -> Data {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        if let cachedKey {
+            return cachedKey
+        }
+        // Failures are never cached; the next call retries the underlying provider.
+        let key = try underlying.loadOrCreateKey()
+        cachedKey = key
+        return key
+    }
+}
+
 nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable, ActivityStorageKeyProviding {
     private let service: String
     private let account: String
@@ -99,8 +125,15 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
         }
 
         let key = try generateKey()
-        try saveKey(key)
-        return key
+        if try saveKey(key) {
+            return key
+        }
+        // Another writer stored a key between our load and save; ours was never
+        // persisted, so encrypting with it would make the data undecryptable.
+        guard let storedKey = try loadKey() else {
+            throw ActivityStorageLineCodecError.keychainReadFailed(errSecItemNotFound)
+        }
+        return storedKey
     }
 
     private func loadKey() throws -> Data? {
@@ -120,13 +153,18 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
         }
     }
 
-    private func saveKey(_ key: Data) throws {
+    private func saveKey(_ key: Data) throws -> Bool {
         var query = baseQuery()
         query[kSecValueData as String] = key
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
         let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem else {
+        switch status {
+        case errSecSuccess:
+            return true
+        case errSecDuplicateItem:
+            return false
+        default:
             throw ActivityStorageLineCodecError.keychainWriteFailed(status)
         }
     }
