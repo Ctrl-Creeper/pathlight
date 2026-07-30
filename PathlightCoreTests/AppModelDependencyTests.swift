@@ -416,12 +416,14 @@ final class AppModelDependencyTests: XCTestCase {
     func testShortTermWatchPersistsAttributedEvents() async throws {
         let root = URL(filePath: "/watched-downloads", directoryHint: .isDirectory)
         let file = root.appending(path: "new-video.mov")
+        let secondFile = root.appending(path: "second-video.mov")
         let monitor = ControlledDiskActivityMonitor()
         let eventStore = RecordingActivityEventStore()
+        let sizesByPath = [file.path: Int64(8_192), secondFile.path: Int64(4_096)]
         let model = AppModel(dependencies: makeDependencies(
             activityMonitor: monitor,
             activitySizeProvider: { url in
-                url.path == file.path ? 8_192 : nil
+                sizesByPath[url.path]
             },
             activityEventStore: eventStore
         ))
@@ -460,6 +462,21 @@ final class AppModelDependencyTests: XCTestCase {
             model.activityHistory?.eventCount == 1
         }
         XCTAssertEqual(model.activityHistory?.totalNetByteDelta, 8_192)
+
+        // A second batch inside the throttle window must still land via the
+        // trailing refresh, not be dropped.
+        monitor.yield(
+            DiskActivityChange(
+                kind: .created,
+                path: secondFile,
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: 241)
+            )
+        )
+        try await waitUntil("throttled history refresh catches up", timeout: 3) {
+            model.activityHistory?.eventCount == 2
+        }
+        model.stopShortTermWatch()
     }
 
     @MainActor

@@ -237,6 +237,8 @@ final class AppModel: ObservableObject {
     private var liveWatchBaselineTask: Task<Void, Never>?
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
+    private var lastEventDrivenHistoryRefreshAt: [String: Date] = [:]
+    private var pendingEventDrivenHistoryRefreshTasks: [String: Task<Void, Never>] = [:]
     private var activityDashboardHistoryTask: Task<Void, Never>?
     private var activityDashboardHistoryTaskID: UUID?
     private var activityStorageUsageTask: Task<Void, Never>?
@@ -574,7 +576,7 @@ final class AppModel: ObservableObject {
                         do {
                             try await activityEventStore.append(newEvents)
                             self.applyActivityStoragePolicy()
-                            self.refreshActivityHistory(rootPath: session.rootPath)
+                            self.scheduleEventDrivenHistoryRefresh(rootPath: session.rootPath)
                         } catch {
                             // A failed journal write should not interrupt the live watch session.
                         }
@@ -591,6 +593,32 @@ final class AppModel: ObservableObject {
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
         liveWatchSession = nil
+    }
+
+    // Reloading history reads the whole journal, so event-driven refreshes are
+    // throttled per root: the first fires immediately, later ones coalesce into
+    // one trailing refresh so sustained churn costs at most one reload per second.
+    private func scheduleEventDrivenHistoryRefresh(rootPath: URL) {
+        let throttleInterval: TimeInterval = 1
+        let key = rootPath.standardizedFileURL.path
+        let now = Date()
+        if let lastRefreshAt = lastEventDrivenHistoryRefreshAt[key],
+           now.timeIntervalSince(lastRefreshAt) < throttleInterval {
+            guard pendingEventDrivenHistoryRefreshTasks[key] == nil else {
+                return
+            }
+            let delay = throttleInterval - now.timeIntervalSince(lastRefreshAt)
+            pendingEventDrivenHistoryRefreshTasks[key] = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                self.pendingEventDrivenHistoryRefreshTasks[key] = nil
+                self.lastEventDrivenHistoryRefreshAt[key] = Date()
+                self.refreshActivityHistory(rootPath: rootPath)
+            }
+            return
+        }
+        lastEventDrivenHistoryRefreshAt[key] = now
+        refreshActivityHistory(rootPath: rootPath)
     }
 
     func refreshActivityHistory(
@@ -938,7 +966,7 @@ final class AppModel: ObservableObject {
                             do {
                                 try await eventStore.append(newEvents)
                                 self.applyActivityStoragePolicy()
-                                self.refreshActivityHistory(rootPath: session.rootPath)
+                                self.scheduleEventDrivenHistoryRefresh(rootPath: session.rootPath)
                             } catch {
                                 // A failed journal write should not interrupt long-term monitoring.
                             }
