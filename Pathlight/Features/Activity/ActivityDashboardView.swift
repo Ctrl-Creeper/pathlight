@@ -6,6 +6,7 @@ struct ActivityDashboardActions {
     let setLongTermWatchEnabled: (Bool, URL) -> Void
     let removeLongTermWatchTarget: (URL) -> Void
     let revealInFinder: (URL) -> Void
+    let clearHistoryGap: (URL) -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -121,6 +122,9 @@ struct ActivityDashboardView: View {
                         },
                         onRemove: {
                             actions.removeLongTermWatchTarget(row.rootPath)
+                        },
+                        onClearHistoryGap: {
+                            actions.clearHistoryGap(row.rootPath)
                         }
                     )
                 }
@@ -175,6 +179,7 @@ private struct ActivityDashboardTargetRow: View {
     let onSetEnabled: (Bool) -> Void
     let onReveal: () -> Void
     let onRemove: () -> Void
+    let onClearHistoryGap: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -224,6 +229,16 @@ private struct ActivityDashboardTargetRow: View {
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .help("Reveal in Finder")
+
+                if row.hasHistoryGap {
+                    Button(action: onClearHistoryGap) {
+                        Label("Clear History Gap", systemImage: "exclamationmark.triangle")
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.yellow)
+                    .help("History gap detected — click to acknowledge")
+                }
 
                 Spacer(minLength: 0)
 
@@ -396,6 +411,9 @@ private struct ActivityDashboardTimelineRow: View {
         if row.title.hasPrefix("Deleted") {
             return "minus.circle.fill"
         }
+        if row.title.hasPrefix("Moved") {
+            return "arrow.right.circle.fill"
+        }
         return "pencil.circle.fill"
     }
 
@@ -405,6 +423,9 @@ private struct ActivityDashboardTimelineRow: View {
         }
         if row.title.hasPrefix("Deleted") {
             return .orange
+        }
+        if row.title.hasPrefix("Moved") {
+            return .purple
         }
         return .blue
     }

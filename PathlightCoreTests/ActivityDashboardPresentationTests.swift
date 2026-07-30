@@ -111,6 +111,36 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.selectedTargetID == downloads.standardizedFileURL.path)
     }
 
+    @Test("flags rows with a history gap")
+    func flagsRowsWithHistoryGap() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let desktop = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
+
+        let presentation = ActivityDashboardPresentation(
+            targets: [
+                LongTermWatchTarget(rootPath: downloads),
+                LongTermWatchTarget(rootPath: desktop)
+            ],
+            selectedRootPath: downloads,
+            histories: [],
+            runtimeStatuses: [
+                downloads.standardizedFileURL.path: LongTermWatchRuntimeStatus(
+                    state: .historyGap,
+                    lastActivityAt: nil,
+                    retryCount: 0
+                ),
+                desktop.standardizedFileURL.path: LongTermWatchRuntimeStatus(
+                    state: .watching,
+                    lastActivityAt: nil,
+                    retryCount: 0
+                )
+            ]
+        )
+
+        #expect(presentation.targetRows.map(\.hasHistoryGap) == [true, false])
+        #expect(presentation.targetRows.first?.statusText == "History Gap")
+    }
+
     @Test("shows empty state when there are no long-term targets")
     func showsEmptyState() {
         let presentation = ActivityDashboardPresentation(

@@ -790,6 +790,32 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func clearLongTermWatchHistoryGap(rootPath: URL) {
+        let targetID = rootPath.standardizedFileURL.path
+        guard let target = longTermWatchTargets.first(where: { $0.id == targetID }),
+              let checkpoint = target.checkpoint,
+              checkpoint.hasHistoryGap else {
+            return
+        }
+
+        longTermWatchTargets = dependencies.longTermWatchTargets.updateCheckpoint(
+            LongTermWatchCheckpoint(
+                eventID: checkpoint.eventID,
+                recordedAt: checkpoint.recordedAt,
+                hasHistoryGap: false
+            ),
+            forRootPath: target.rootPath,
+            currentTargets: longTermWatchTargets
+        )
+        if let status = longTermWatchRuntimeStatuses[targetID], status.state == .historyGap {
+            updateLongTermWatchRuntimeStatus(
+                targetID: targetID,
+                state: .watching,
+                retryCount: status.retryCount
+            )
+        }
+    }
+
     private func cancelLongTermWatchBaseline() {
         longTermWatchBaselineTask?.cancel()
         longTermWatchBaselineTask = nil

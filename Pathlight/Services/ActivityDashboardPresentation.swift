@@ -10,6 +10,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let eventText: String
         let thresholdText: String
         let lastActivityText: String
+        let hasHistoryGap: Bool
         let isEnabled: Bool
         let rootPath: URL
     }
@@ -92,6 +93,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             eventText: history.map { eventCountText($0.eventCount) } ?? "0 events",
             thresholdText: "Records changes over \(PathlightFormatters.size(target.options.minimumRecordedByteDelta))",
             lastActivityText: lastActivityText(for: status),
+            hasHistoryGap: status.state == .historyGap,
             isEnabled: target.isEnabled,
             rootPath: target.rootPath
         )

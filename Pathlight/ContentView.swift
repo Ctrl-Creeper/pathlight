@@ -644,7 +644,8 @@ private extension ContentView {
             refreshActivityDashboardHistories: { appModel.refreshActivityDashboardHistories(rootPaths: $0) },
             setLongTermWatchEnabled: { appModel.setLongTermWatchEnabled($0, rootPath: $1) },
             removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0) },
-            revealInFinder: { appModel.revealURLInFinder($0) }
+            revealInFinder: { appModel.revealURLInFinder($0) },
+            clearHistoryGap: { appModel.clearLongTermWatchHistoryGap(rootPath: $0) }
         )
     }
 
