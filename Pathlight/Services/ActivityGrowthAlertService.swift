@@ -31,6 +31,7 @@ enum ActivityGrowthAlertEvaluator {
     }
 }
 
+@MainActor
 final class UserNotificationGrowthAlertPoster: ActivityGrowthAlertPosting, Sendable {
     func postGrowthAlert(rootPath: URL, growthBytes: Int64, thresholdBytes: Int64) async {
         let center = UNUserNotificationCenter.current()
@@ -40,9 +41,12 @@ final class UserNotificationGrowthAlertPoster: ActivityGrowthAlertPosting, Senda
         }
 
         let name = rootPath.lastPathComponent.isEmpty ? rootPath.path : rootPath.lastPathComponent
+        let (growthText, thresholdText) = await MainActor.run {
+            (PathlightFormatters.size(growthBytes), PathlightFormatters.size(thresholdBytes))
+        }
         let content = UNMutableNotificationContent()
         content.title = "\(name) is growing quickly"
-        content.body = "Up \(PathlightFormatters.size(growthBytes)) today — past your \(PathlightFormatters.size(thresholdBytes)) alert threshold."
+        content.body = "Up \(growthText) today — past your \(thresholdText) alert threshold."
         let request = UNNotificationRequest(
             identifier: "pathlight-growth-\(rootPath.standardizedFileURL.path)",
             content: content,

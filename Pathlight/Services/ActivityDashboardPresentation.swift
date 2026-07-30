@@ -211,7 +211,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
 
 extension ActivityHistorySnapshot {
     /// Net byte change across buckets that end after the cutoff (e.g. start of today).
-    func netByteDelta(onOrAfter cutoff: Date) -> Int64 {
+    nonisolated func netByteDelta(onOrAfter cutoff: Date) -> Int64 {
         buckets
             .filter { $0.endDate > cutoff }
             .reduce(Int64(0)) { $0 + $1.byteDelta }
