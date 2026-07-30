@@ -53,16 +53,15 @@ enum FSEventsChangeMapper {
 }
 
 enum FSEventsPathDecoder {
+    // Positions must stay aligned with the callback's flags/eventID arrays,
+    // so nil path pointers are preserved instead of compacted away.
     nonisolated static func paths(
         eventCount: Int,
         eventPaths: UnsafeMutableRawPointer
-    ) -> [String] {
+    ) -> [String?] {
         let pathPointers = eventPaths.assumingMemoryBound(to: UnsafePointer<CChar>?.self)
-        return (0..<eventCount).compactMap { index in
-            guard let pathPointer = pathPointers[index] else {
-                return nil
-            }
-            return String(cString: pathPointer)
+        return (0..<eventCount).map { index in
+            pathPointers[index].map { String(cString: $0) }
         }
     }
 }
@@ -174,9 +173,12 @@ private final class FSEventsStreamBox: @unchecked Sendable {
         )
 
         let timestamp = Date()
-        for index in 0..<min(eventCount, stringPaths.count) {
+        for index in 0..<eventCount {
+            guard let path = stringPaths[index] else {
+                continue
+            }
             let event = FSEventsChangeMapper.event(
-                path: stringPaths[index],
+                path: path,
                 root: root,
                 flags: eventFlags[index],
                 eventID: UInt64(eventIDs[index]),

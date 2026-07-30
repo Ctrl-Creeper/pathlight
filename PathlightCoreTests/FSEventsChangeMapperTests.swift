@@ -24,6 +24,22 @@ struct FSEventsChangeMapperTests {
         }
     }
 
+    @Test("keeps nil path pointers aligned with their positions")
+    func keepsNilPathPointersAligned() {
+        let second = Array("/Users/example/Downloads/second.txt".utf8CString)
+
+        second.withUnsafeBufferPointer { secondBuffer in
+            var pathPointers: [UnsafePointer<CChar>?] = [nil, secondBuffer.baseAddress]
+            pathPointers.withUnsafeMutableBufferPointer { pointerBuffer in
+                let eventPaths = UnsafeMutableRawPointer(pointerBuffer.baseAddress!)
+                #expect(FSEventsPathDecoder.paths(eventCount: 2, eventPaths: eventPaths) == [
+                    nil,
+                    "/Users/example/Downloads/second.txt"
+                ])
+            }
+        }
+    }
+
     @Test("maps item created flags")
     func mapsCreatedFlags() {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
