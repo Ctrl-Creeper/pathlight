@@ -5,7 +5,8 @@ struct ActivityTimelinePanel: View {
     let onStop: () -> Void
 
     private var presentation: ActivityTimelinePresentation {
-        ActivityTimelinePresentation(session: session, eventLimit: 12)
+        // ponytail: 200 rows is plenty of scrollback; raise if sessions outgrow it.
+        ActivityTimelinePresentation(session: session, eventLimit: 200)
     }
 
     var body: some View {
