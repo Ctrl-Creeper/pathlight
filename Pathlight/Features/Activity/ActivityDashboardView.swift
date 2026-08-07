@@ -10,6 +10,7 @@ struct ActivityDashboardActions {
     let clearHistoryGap: (URL) -> Void
     let locateInApp: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
+    let setExclusionPatterns: ([String], URL) -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -131,6 +132,9 @@ struct ActivityDashboardView: View {
                         },
                         onSetGrowthAlertThreshold: {
                             actions.setGrowthAlertThreshold($0, row.rootPath)
+                        },
+                        onSetExclusionPatterns: {
+                            actions.setExclusionPatterns($0, row.rootPath)
                         }
                     )
                 }
@@ -198,6 +202,9 @@ private struct ActivityDashboardTargetRow: View {
     let onRemove: () -> Void
     let onClearHistoryGap: () -> Void
     let onSetGrowthAlertThreshold: (Int64?) -> Void
+    let onSetExclusionPatterns: ([String]) -> Void
+
+    @State private var showsExclusionEditor = false
 
     private static let alertThresholdChoices: [(label: String, bytes: Int64)] = [
         ("1 GB", 1_000_000_000),
@@ -287,6 +294,26 @@ private struct ActivityDashboardTargetRow: View {
                 .fixedSize()
                 .help("Notify when this folder grows past a daily threshold")
 
+                Button {
+                    showsExclusionEditor = true
+                } label: {
+                    Label(
+                        "Ignored Patterns",
+                        systemImage: row.exclusionPatterns.isEmpty
+                            ? "line.3.horizontal.decrease.circle"
+                            : "line.3.horizontal.decrease.circle.fill"
+                    )
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .help("Edit ignored patterns")
+                .popover(isPresented: $showsExclusionEditor, arrowEdge: .bottom) {
+                    ActivityExclusionPatternEditor(
+                        patterns: row.exclusionPatterns,
+                        onApply: onSetExclusionPatterns
+                    )
+                }
+
                 if row.hasHistoryGap {
                     Button(action: onClearHistoryGap) {
                         Label("Clear History Gap", systemImage: "exclamationmark.triangle")
@@ -320,6 +347,61 @@ private struct ActivityDashboardTargetRow: View {
 
     private var rowBackground: Color {
         isSelected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor)
+    }
+}
+
+private struct ActivityExclusionPatternEditor: View {
+    let onApply: ([String]) -> Void
+
+    @State private var text: String
+    @Environment(\.dismiss) private var dismiss
+
+    init(patterns: [String], onApply: @escaping ([String]) -> Void) {
+        self.onApply = onApply
+        _text = State(initialValue: patterns.joined(separator: "\n"))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Ignored Patterns")
+                .font(.headline)
+
+            Text("One gitignore-style pattern per line. Matching files and folders are left out of monitoring. Leave empty to record everything.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextEditor(text: $text)
+                .font(.body.monospaced())
+                .frame(height: 180)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(.quaternary)
+                }
+
+            HStack {
+                Button("Restore Defaults") {
+                    text = ActivityExclusionFilter.defaultPatterns.joined(separator: "\n")
+                }
+
+                Spacer()
+
+                Button("Apply") {
+                    onApply(patternLines)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+
+    private var patternLines: [String] {
+        text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }
 

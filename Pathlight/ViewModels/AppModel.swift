@@ -839,6 +839,32 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
+        let targetID = rootPath.standardizedFileURL.path
+        guard let target = longTermWatchTargets.first(where: { $0.id == targetID }) else {
+            return
+        }
+
+        var options = target.options
+        let normalizedPatterns = ScanExclusionMatcher.normalizedPatterns(patterns)
+        guard normalizedPatterns != options.exclusionPatterns else {
+            return
+        }
+
+        options.exclusionPatterns = normalizedPatterns
+        longTermWatchTargets = dependencies.longTermWatchTargets.updateOptions(
+            options,
+            forRootPath: target.rootPath,
+            currentTargets: longTermWatchTargets
+        )
+        // Restart the watch so the running stream picks up the new filter now
+        // instead of on the next reconnect.
+        if let updatedTarget = longTermWatchTargets.first(where: { $0.id == targetID }),
+           updatedTarget.isEnabled {
+            startLongTermWatch(for: updatedTarget)
+        }
+    }
+
     private func evaluateGrowthAlert(history: ActivityHistorySnapshot) {
         guard let poster = dependencies.activityGrowthAlertPoster else {
             return
@@ -941,6 +967,10 @@ final class AppModel: ObservableObject {
                     // Background watches don't need sub-second delivery; a wide
                     // latency window lets the kernel coalesce and saves wakeups.
                     monitorLatency: 30,
+                    exclusionFilter: ActivityExclusionFilter(
+                        patterns: currentTarget.options.exclusionPatterns,
+                        rootPath: currentTarget.rootPath
+                    ),
                     sizeProvider: sizeProvider,
                     priorSizeProvider: priorSizeProvider
                 )

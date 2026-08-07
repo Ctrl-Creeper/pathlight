@@ -13,6 +13,7 @@ struct LiveWatchSessionCoordinator: Sendable {
         startedAt: Date = Date(),
         options: DiskActivityAggregationOptions = .default,
         monitorLatency: TimeInterval = 0.25,
+        exclusionFilter: ActivityExclusionFilter? = nil,
         sizeProvider: @escaping StorageAttributionService.SizeProvider,
         priorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
     ) -> AsyncStream<WatchSessionModel> {
@@ -39,13 +40,17 @@ struct LiveWatchSessionCoordinator: Sendable {
 
                     switch streamEvent {
                     case let .change(change, eventID):
+                        // Excluded changes still advance the cursor so
+                        // checkpoints move past them.
                         session.record(eventID: eventID)
-                        let events = attributionService.process([change])
-                        if !events.isEmpty {
-                            session.append(
-                                events,
-                                coalescingWindow: options.isDetailedFileTimeline ? 1 : 0
-                            )
+                        if exclusionFilter?.excludes(change.path) != true {
+                            let events = attributionService.process([change])
+                            if !events.isEmpty {
+                                session.append(
+                                    events,
+                                    coalescingWindow: options.isDetailedFileTimeline ? 1 : 0
+                                )
+                            }
                         }
                     case let .historyCaughtUp(eventID):
                         session.record(eventID: eventID)

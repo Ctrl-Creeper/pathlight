@@ -13,6 +13,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let hasHistoryGap: Bool
         let isEnabled: Bool
         let growthAlertThresholdBytes: Int64?
+        let exclusionPatterns: [String]
         let rootPath: URL
     }
 
@@ -161,6 +162,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             hasHistoryGap: status.state == .historyGap,
             isEnabled: target.isEnabled,
             growthAlertThresholdBytes: target.options.growthAlertThresholdBytes,
+            exclusionPatterns: target.options.exclusionPatterns,
             rootPath: target.rootPath
         )
     }

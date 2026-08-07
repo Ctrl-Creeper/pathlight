@@ -43,6 +43,7 @@ let package = Package(
                 "Services/ActivityBaselineService.swift",
                 "Services/ActivityDashboardPresentation.swift",
                 "Services/ActivityEventStore.swift",
+                "Services/ActivityExclusionFilter.swift",
                 "Services/ActivityGrowthAlertService.swift",
                 "Services/ActivityHistoryService.swift",
                 "Services/ActivityHistoryPresentation.swift",

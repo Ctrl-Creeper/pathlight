@@ -647,7 +647,8 @@ private extension ContentView {
             revealInFinder: { appModel.revealURLInFinder($0) },
             clearHistoryGap: { appModel.clearLongTermWatchHistoryGap(rootPath: $0) },
             locateInApp: { appModel.locateActivityPath($0) },
-            setGrowthAlertThreshold: { appModel.setGrowthAlertThreshold($0, rootPath: $1) }
+            setGrowthAlertThreshold: { appModel.setGrowthAlertThreshold($0, rootPath: $1) },
+            setExclusionPatterns: { appModel.setExclusionPatterns($0, rootPath: $1) }
         )
     }
 

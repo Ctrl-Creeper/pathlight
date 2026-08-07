@@ -6,17 +6,33 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     let recordsFileNames: Bool
     /// Daily net growth that triggers a notification; nil means alerts are off.
     var growthAlertThresholdBytes: Int64?
+    /// Gitignore-style patterns filtered out of this target's event stream.
+    /// Empty means record everything.
+    var exclusionPatterns: [String]
 
     init(
         minimumRecordedByteDelta: Int64,
         aggregationWindow: TimeInterval,
         recordsFileNames: Bool,
-        growthAlertThresholdBytes: Int64? = nil
+        growthAlertThresholdBytes: Int64? = nil,
+        exclusionPatterns: [String] = ActivityExclusionFilter.defaultPatterns
     ) {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindow = aggregationWindow
         self.recordsFileNames = recordsFileNames
         self.growthAlertThresholdBytes = growthAlertThresholdBytes
+        self.exclusionPatterns = exclusionPatterns
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        minimumRecordedByteDelta = try container.decode(Int64.self, forKey: .minimumRecordedByteDelta)
+        aggregationWindow = try container.decode(TimeInterval.self, forKey: .aggregationWindow)
+        recordsFileNames = try container.decode(Bool.self, forKey: .recordsFileNames)
+        growthAlertThresholdBytes = try container.decodeIfPresent(Int64.self, forKey: .growthAlertThresholdBytes)
+        // Targets persisted before exclusions existed adopt the defaults.
+        exclusionPatterns = try container.decodeIfPresent([String].self, forKey: .exclusionPatterns)
+            ?? ActivityExclusionFilter.defaultPatterns
     }
 
     static let `default` = LongTermWatchTargetOptions(

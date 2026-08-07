@@ -55,6 +55,41 @@ struct LiveWatchSessionCoordinatorTests {
         #expect(finishedSession == nil)
     }
 
+    @Test("excluded changes advance the cursor without producing events")
+    func excludedChangesAdvanceCursorWithoutEvents() async throws {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let noise = root.appending(path: ".DS_Store")
+        let change = DiskActivityChange(
+            kind: .modified,
+            path: noise,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 110)
+        )
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 305)])
+        )
+
+        var iterator = coordinator.sessions(
+            rootPath: root,
+            startedAt: Date(timeIntervalSince1970: 100),
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 1,
+                aggregationWindow: 0,
+                longTermRecordsFileNames: true
+            ),
+            exclusionFilter: try #require(ActivityExclusionFilter(
+                patterns: [".DS_Store"],
+                rootPath: root
+            )),
+            sizeProvider: { _ in 4_096 }
+        ).makeAsyncIterator()
+
+        _ = await iterator.next()
+        let updatedSession = await iterator.next()
+        #expect(updatedSession?.events.isEmpty == true)
+        #expect(updatedSession?.lastObservedEventID == 305)
+    }
+
     @Test("publishes the cursor after filtered changes")
     func publishesCursorAfterFilteredChanges() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
