@@ -40,6 +40,7 @@ struct ContentView: View {
                     targets: appModel.longTermWatchTargets,
                     histories: Array(appModel.activityDashboardHistories.values),
                     runtimeStatuses: appModel.longTermWatchRuntimeStatuses,
+                    showsLaunchAtLoginNudge: appModel.shouldShowLaunchAtLoginNudge,
                     actions: activityDashboardActions
                 )
             } else {
@@ -648,7 +649,9 @@ private extension ContentView {
             clearHistoryGap: { appModel.clearLongTermWatchHistoryGap(rootPath: $0) },
             locateInApp: { appModel.locateActivityPath($0) },
             setGrowthAlertThreshold: { appModel.setGrowthAlertThreshold($0, rootPath: $1) },
-            setExclusionPatterns: { appModel.setExclusionPatterns($0, rootPath: $1) }
+            setExclusionPatterns: { appModel.setExclusionPatterns($0, rootPath: $1) },
+            enableLaunchAtLogin: { appModel.setLaunchAtLoginEnabled(true) },
+            dismissLaunchAtLoginNudge: { appModel.dismissLaunchAtLoginNudge() }
         )
     }
 

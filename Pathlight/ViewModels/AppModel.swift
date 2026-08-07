@@ -201,7 +201,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
     @Published private(set) var longTermWatchRuntimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:]
     @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus = .disabled
+    @Published private(set) var launchAtLoginNudgeDismissed =
+        UserDefaults.standard.bool(forKey: AppModel.launchAtLoginNudgeDismissedKey)
     @Published private var optimisticTrashVisibility = OptimisticTrashVisibilityState()
+
+    private static let launchAtLoginNudgeDismissedKey = "launchAtLoginNudgeDismissed"
 
     private let dependencies: AppDependencies
     private let scanCoordinator: ScanCoordinator
@@ -1098,6 +1102,19 @@ final class AppModel: ObservableObject {
 
     func refreshLaunchAtLoginStatus() {
         launchAtLoginStatus = dependencies.launchAtLoginService.currentStatus()
+    }
+
+    /// Monitoring only runs while the app does, so nudge toward launch-at-login
+    /// once targets exist; the nudge disappears forever once dismissed or enabled.
+    var shouldShowLaunchAtLoginNudge: Bool {
+        !launchAtLoginNudgeDismissed
+            && launchAtLoginStatus == .disabled
+            && longTermWatchTargets.contains(where: \.isEnabled)
+    }
+
+    func dismissLaunchAtLoginNudge() {
+        launchAtLoginNudgeDismissed = true
+        UserDefaults.standard.set(true, forKey: Self.launchAtLoginNudgeDismissedKey)
     }
 
     func openLoginItemsSettings() {

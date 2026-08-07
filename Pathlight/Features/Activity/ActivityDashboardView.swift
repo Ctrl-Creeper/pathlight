@@ -11,12 +11,15 @@ struct ActivityDashboardActions {
     let locateInApp: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
     let setExclusionPatterns: ([String], URL) -> Void
+    let enableLaunchAtLogin: () -> Void
+    let dismissLaunchAtLoginNudge: () -> Void
 }
 
 struct ActivityDashboardView: View {
     let targets: [LongTermWatchTarget]
     let histories: [ActivityHistorySnapshot]
     let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
+    let showsLaunchAtLoginNudge: Bool
     let actions: ActivityDashboardActions
 
     @State private var selectedTargetID: String?
@@ -111,6 +114,13 @@ struct ActivityDashboardView: View {
     private var targetList: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
+                if showsLaunchAtLoginNudge {
+                    ActivityLaunchAtLoginNudge(
+                        onEnable: actions.enableLaunchAtLogin,
+                        onDismiss: actions.dismissLaunchAtLoginNudge
+                    )
+                }
+
                 ForEach(presentation.targetRows) { row in
                     ActivityDashboardTargetRow(
                         row: row,
@@ -347,6 +357,39 @@ private struct ActivityDashboardTargetRow: View {
 
     private var rowBackground: Color {
         isSelected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor)
+    }
+}
+
+private struct ActivityLaunchAtLoginNudge: View {
+    let onEnable: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Monitoring stops when Pathlight quits", systemImage: "power")
+                .font(.subheadline.weight(.semibold))
+
+            Text("Start Pathlight at login so monitoring resumes automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button("Start at Login", action: onEnable)
+                    .controlSize(.small)
+
+                Button("Not Now", action: onDismiss)
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1)
+        }
     }
 }
 
