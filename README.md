@@ -1,6 +1,4 @@
-<p align="center">
-    <img src="./icon.png" alt="Pathlight" width="220">
-</p>
+
 
 # Pathlight
 
