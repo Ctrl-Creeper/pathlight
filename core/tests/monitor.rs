@@ -5,13 +5,18 @@
 //! an event ID means. These tests perform real filesystem operations and
 //! assert the *normalized* contract every backend has to honour, so "Pathlight
 //! supports this OS" means "this file passes on this OS". Anything a single
-//! platform guarantees more strongly gets its own `cfg`-gated test below.
+//! platform guarantees more strongly declares it in `Capabilities`, and the
+//! tests at the bottom hold it to that declaration — a backend may differ, but
+//! it may not be wrong about how it differs.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pathlight_core::{ActivityListener, Change, ChangeKind, StreamEvent, Watcher};
+use pathlight_core::paths;
+use pathlight_core::{
+    watcher_capabilities, ActivityListener, Change, ChangeKind, StreamEvent, Watcher,
+};
 
 #[derive(Default)]
 struct Collector(Mutex<Vec<StreamEvent>>);
@@ -95,17 +100,13 @@ impl Drop for Harness {
     }
 }
 
-/// `canonicalize` is needed on macOS (FSEvents reports `/private/var`, never the
-/// `/var` symlink) but returns a `\\?\` verbatim path on Windows that no backend
-/// echoes back. Strip it so path comparison means the same thing everywhere.
+/// `canonicalize` is needed on macOS (FSEvents reports `/private/var`, never
+/// the `/var` symlink); `normalize` then undoes the `\\?\` prefix it adds on
+/// Windows, which is the same job the crate does to every path it emits.
 fn canonical_root(path: &Path) -> PathBuf {
-    let canonical = path.canonicalize().unwrap();
-    if cfg!(windows) {
-        let text = canonical.to_string_lossy().into_owned();
-        PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned())
-    } else {
-        canonical
-    }
+    PathBuf::from(paths::normalize(
+        &path.canonicalize().unwrap().to_string_lossy(),
+    ))
 }
 
 fn named<'a>(changes: &'a [Change], name: &str) -> Vec<&'a Change> {
@@ -224,11 +225,15 @@ fn event_ids_never_go_backwards() {
     );
 }
 
-/// Stricter than the portable contract: FSEvents carries the inode, so one
-/// user-visible rename must produce exactly one row with both paths.
-#[cfg(target_os = "macos")]
+/// Holds a backend to its own `pairs_renames` claim: one user-visible rename
+/// must produce exactly one row carrying both paths, with no loose half left
+/// for the host to pair. Backends that don't claim it are covered by the
+/// weaker portable test above.
 #[test]
-fn macos_pairs_rename_halves_by_inode() {
+fn a_backend_claiming_to_pair_renames_really_does() {
+    if !watcher_capabilities().pairs_renames {
+        return;
+    }
     let harness = Harness::start(|root| std::fs::write(root.join("draft.txt"), b"draft").unwrap());
     std::fs::rename(
         harness.root.join("draft.txt"),
@@ -250,11 +255,14 @@ fn macos_pairs_rename_halves_by_inode() {
     );
 }
 
-/// Stricter than the portable contract: FSEvents IDs come from the kernel and
-/// are globally unique, so they survive a relaunch as a resume cursor.
-#[cfg(target_os = "macos")]
+/// Holds a backend to its own `resumable_cursor` claim. A process-local
+/// counter restarts at 1 every launch, so passing it back as `since_event_id`
+/// would replay history the host already has; only kernel-issued IDs resume.
 #[test]
-fn macos_event_ids_come_from_the_kernel() {
+fn a_resumable_cursor_is_not_a_process_local_counter() {
+    if !watcher_capabilities().resumable_cursor {
+        return;
+    }
     let harness = Harness::start(|_| {});
     std::fs::write(harness.root.join("cursor.txt"), b"x").unwrap();
 
@@ -270,5 +278,18 @@ fn macos_event_ids_come_from_the_kernel() {
     assert!(
         id > 1_000,
         "a process-local counter cannot resume across launches; got {id} for {changes:#?}"
+    );
+}
+
+/// The declaration itself has to stay meaningful: a backend that can silently
+/// lose events and does not admit it would let the host trust an under-count.
+#[test]
+fn a_backend_that_cannot_lose_events_is_the_only_one_allowed_to_say_so() {
+    let capabilities = watcher_capabilities();
+    // ponytail: forcing a real kernel queue overflow is not worth the test
+    // time, so this checks the honest default rather than the overflow path.
+    assert!(
+        capabilities.may_drop_events,
+        "no shipping backend has a lossless queue; {capabilities:#?} claims one"
     );
 }

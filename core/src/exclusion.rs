@@ -50,7 +50,7 @@ impl ExclusionFilter {
         if patterns.is_empty() {
             return Ok(None);
         }
-        let root = root.trim_end_matches('/').to_owned();
+        let root = crate::paths::normalize(root);
         let mut builder = GitignoreBuilder::new(&root);
         for pattern in &patterns {
             builder
@@ -66,7 +66,7 @@ impl ExclusionFilter {
     }
 
     pub fn excludes(&self, path: &str) -> bool {
-        let path = path.trim_end_matches('/');
+        let path = crate::paths::normalize(path);
         let Some(relative) = path.strip_prefix(self.root.as_str()) else {
             return false;
         };
@@ -76,7 +76,7 @@ impl ExclusionFilter {
         // Deleted paths cannot be stat'ed, so the leaf is tried both as a file and
         // as a directory; over-matching is fine for noise filtering. Ancestors are
         // covered by `matched_path_or_any_parents`.
-        let candidate = Path::new(path);
+        let candidate = Path::new(&path);
         self.matcher
             .matched_path_or_any_parents(candidate, false)
             .is_ignore()

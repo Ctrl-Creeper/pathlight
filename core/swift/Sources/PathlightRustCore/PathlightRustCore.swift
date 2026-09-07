@@ -1308,6 +1308,110 @@ public func FfiConverterTypeAggregationOptions_lower(_ value: AggregationOptions
 }
 
 
+/**
+ * What a platform's watcher backend actually guarantees.
+ *
+ * Backends are not equal, and papering over that costs accuracy: an
+ * intersection of features would throw away FSEvents' resumable IDs just to
+ * match inotify. So each backend declares what it can do, the host adapts to
+ * the declaration, and `tests/monitor.rs` checks the declaration against
+ * observed behavior. A platform is allowed to differ; it is not allowed to be
+ * wrong about how it differs.
+ */
+public struct Capabilities: Equatable, Hashable {
+    /**
+     * Event IDs come from the kernel, so `since_event_id` really resumes a
+     * previous session instead of silently starting over.
+     */
+    public var resumableCursor: Bool
+    /**
+     * One user-visible rename arrives as one event carrying both paths. When
+     * false the host sees two halves and must pair them itself.
+     */
+    public var pairsRenames: Bool
+    /**
+     * Changes name the process responsible. When false the host should show
+     * nothing rather than a guess.
+     */
+    public var reportsProcess: Bool
+    /**
+     * Events can be lost under load. The backend reports it with
+     * `RequiresRescan`, so the host re-baselines rather than under-count.
+     */
+    public var mayDropEvents: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Event IDs come from the kernel, so `since_event_id` really resumes a
+         * previous session instead of silently starting over.
+         */resumableCursor: Bool, 
+        /**
+         * One user-visible rename arrives as one event carrying both paths. When
+         * false the host sees two halves and must pair them itself.
+         */pairsRenames: Bool, 
+        /**
+         * Changes name the process responsible. When false the host should show
+         * nothing rather than a guess.
+         */reportsProcess: Bool, 
+        /**
+         * Events can be lost under load. The backend reports it with
+         * `RequiresRescan`, so the host re-baselines rather than under-count.
+         */mayDropEvents: Bool) {
+        self.resumableCursor = resumableCursor
+        self.pairsRenames = pairsRenames
+        self.reportsProcess = reportsProcess
+        self.mayDropEvents = mayDropEvents
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Capabilities: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapabilities: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Capabilities {
+        return
+            try Capabilities(
+                resumableCursor: FfiConverterBool.read(from: &buf), 
+                pairsRenames: FfiConverterBool.read(from: &buf), 
+                reportsProcess: FfiConverterBool.read(from: &buf), 
+                mayDropEvents: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Capabilities, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.resumableCursor, into: &buf)
+        FfiConverterBool.write(value.pairsRenames, into: &buf)
+        FfiConverterBool.write(value.reportsProcess, into: &buf)
+        FfiConverterBool.write(value.mayDropEvents, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapabilities_lift(_ buf: RustBuffer) throws -> Capabilities {
+    return try FfiConverterTypeCapabilities.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapabilities_lower(_ value: Capabilities) -> RustBuffer {
+    return FfiConverterTypeCapabilities.lower(value)
+}
+
+
 public struct Change: Equatable, Hashable {
     public var kind: ChangeKind
     public var path: String
@@ -2067,6 +2171,18 @@ public func coreVersion() -> String  {
     )
 })
 }
+/**
+ * What this platform's watcher guarantees. Safe to call before starting a
+ * watch, which is the point: the host needs it to decide whether a stored
+ * cursor is worth trusting.
+ */
+public func watcherCapabilities() -> Capabilities  {
+    return try!  FfiConverterTypeCapabilities_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_watcher_capabilities(uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -2084,6 +2200,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_pathlight_core_checksum_func_core_version() != 16517) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_watcher_capabilities() != 30058) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_journal_append() != 25315) {

@@ -62,9 +62,23 @@ private struct GeneralSettingsPane: View {
 
             Section("About") {
                 LabeledContent("Monitoring core", value: "Rust \(coreVersion())")
+                LabeledContent("Watcher guarantees", value: Self.watcherGuarantees)
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// What this platform's watcher promises. The guarantees differ per OS by
+    /// design, so a report of "it missed something" is only readable if the
+    /// user can see which promises were in force.
+    private static var watcherGuarantees: String {
+        let capabilities = watcherCapabilities()
+        let granted = [
+            (capabilities.resumableCursor, "resumes after relaunch"),
+            (capabilities.pairsRenames, "pairs renames"),
+            (capabilities.reportsProcess, "names processes"),
+        ].filter(\.0).map(\.1)
+        return granted.isEmpty ? "Live changes only" : granted.joined(separator: ", ")
     }
 }
 

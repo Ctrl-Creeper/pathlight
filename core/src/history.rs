@@ -62,7 +62,7 @@ pub fn build_history(
         .collect();
 
     HistorySnapshot {
-        root_path: root_path.trim_end_matches('/').to_owned(),
+        root_path: crate::paths::normalize(root_path),
         generated_at,
         total_net_byte_delta: events.iter().filter_map(|e| e.byte_delta).sum(),
         event_count: events.len() as u32,

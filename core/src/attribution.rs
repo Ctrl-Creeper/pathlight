@@ -165,10 +165,9 @@ impl<'a> Attributor<'a> {
             // is the departure side (e.g. into the Trash); attribute it like a deletion.
             ChangeKind::Renamed { previous_path } => {
                 let previous_known = previous_path.as_deref().and_then(|p| (self.prior_size)(p));
-                let root_prefix = format!("{}/", change.root_path.trim_end_matches('/'));
                 let within_root = previous_path
                     .as_deref()
-                    .is_some_and(|p| p.starts_with(&root_prefix));
+                    .is_some_and(|p| crate::paths::is_inside(&change.root_path, p));
                 match (self.size)(&change.path) {
                     Some(size) => {
                         let delta = if within_root {

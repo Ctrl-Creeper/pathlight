@@ -39,6 +39,38 @@ pub trait ActivityListener: Send + Sync {
     fn on_event(&self, event: StreamEvent);
 }
 
+/// What a platform's watcher backend actually guarantees.
+///
+/// Backends are not equal, and papering over that costs accuracy: an
+/// intersection of features would throw away FSEvents' resumable IDs just to
+/// match inotify. So each backend declares what it can do, the host adapts to
+/// the declaration, and `tests/monitor.rs` checks the declaration against
+/// observed behavior. A platform is allowed to differ; it is not allowed to be
+/// wrong about how it differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct Capabilities {
+    /// Event IDs come from the kernel, so `since_event_id` really resumes a
+    /// previous session instead of silently starting over.
+    pub resumable_cursor: bool,
+    /// One user-visible rename arrives as one event carrying both paths. When
+    /// false the host sees two halves and must pair them itself.
+    pub pairs_renames: bool,
+    /// Changes name the process responsible. When false the host should show
+    /// nothing rather than a guess.
+    pub reports_process: bool,
+    /// Events can be lost under load. The backend reports it with
+    /// `RequiresRescan`, so the host re-baselines rather than under-count.
+    pub may_drop_events: bool,
+}
+
+/// What this platform's watcher guarantees. Safe to call before starting a
+/// watch, which is the point: the host needs it to decide whether a stored
+/// cursor is worth trusting.
+#[uniffi::export]
+pub fn watcher_capabilities() -> Capabilities {
+    platform::CAPABILITIES
+}
+
 pub(crate) trait Backend: Send {
     fn stop(&mut self);
 }
@@ -58,7 +90,7 @@ impl Emitter {
         self.emit(StreamEvent::Change {
             change: Change {
                 kind,
-                path,
+                path: crate::paths::normalize(&path),
                 root_path: self.root.clone(),
                 timestamp: SystemTime::now(),
             },
@@ -86,7 +118,7 @@ impl Watcher {
         latency_ms: u64,
         listener: Arc<dyn ActivityListener>,
     ) -> Result<Arc<Self>, CoreError> {
-        let root = root_path.trim_end_matches('/').to_owned();
+        let root = crate::paths::normalize(&root_path);
         let emitter = Arc::new(Emitter { root, listener });
         let latency = Duration::from_millis(latency_ms.max(1));
         let backend = platform::start(emitter, since_event_id, latency)?;
@@ -113,6 +145,16 @@ impl Drop for Watcher {
 #[cfg(target_os = "macos")]
 mod platform {
     pub(crate) use crate::fsevents::start;
+
+    /// FSEvents hands out kernel event IDs and `fsevents.rs` pairs rename halves
+    /// by inode. It never names a process, and it drops events when its queue
+    /// overflows (reported as `MustScanSubDirs`).
+    pub(crate) const CAPABILITIES: super::Capabilities = super::Capabilities {
+        resumable_cursor: true,
+        pairs_renames: true,
+        reports_process: false,
+        may_drop_events: true,
+    };
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -129,6 +171,17 @@ mod platform {
 
     use super::{Backend, ChangeKind, Emitter, StreamEvent};
     use crate::CoreError;
+
+    /// inotify and ReadDirectoryChangesW both give a process-local counter, not a
+    /// cursor that survives a restart, and neither pairs rename halves for us
+    /// (the `RenameMode::Both` arm below is opportunistic). Queue overflow is
+    /// reported, so `RequiresRescan` is reachable.
+    pub(crate) const CAPABILITIES: super::Capabilities = super::Capabilities {
+        resumable_cursor: false,
+        pairs_renames: false,
+        reports_process: false,
+        may_drop_events: true,
+    };
 
     struct NotifyBackend(Option<RecommendedWatcher>);
 

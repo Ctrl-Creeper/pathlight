@@ -58,13 +58,13 @@ impl Journal {
             return Ok(Vec::new());
         }
 
-        let root = root_path.trim_end_matches('/');
+        let root = crate::paths::normalize(&root_path);
         let contents = fs::read_to_string(&self.path)?;
         let mut events: Vec<ActivityEvent> = contents
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with(ENCRYPTED_PREFIX))
             .filter_map(|line| ActivityEvent::from_json_line(line).ok())
-            .filter(|event| event.root_path.trim_end_matches('/') == root)
+            .filter(|event| crate::paths::normalize(&event.root_path) == root)
             .collect();
 
         events.sort_by(|lhs, rhs| {

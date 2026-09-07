@@ -24,7 +24,7 @@ Pathlight is a native macOS folder-change monitor built in Swift and SwiftUI. Th
 - macOS target: macOS 14.0+
 - App UI framework: SwiftUI (always preferred over UIKit/AppKit)
 - Tests: `PathlightCoreTests/`
-- Rust core: `core/` (cargo crate `pathlight-core`, UniFFI bindings; run `cargo test` inside `core/`). It is the future shared engine for Linux/Windows; the Swift app does not link it yet.
+- Rust core: `core/` (cargo crate `pathlight-core`, UniFFI bindings; run `cargo test` inside `core/`). The macOS app links it for file watching (`Pathlight/App/RustDiskActivityMonitor.swift`); `cargo test` inside `core/` runs it, and `core/tests/monitor.rs` is the cross-platform watcher contract. Each backend declares what it guarantees via `monitor::Capabilities` rather than every platform being forced to behave alike.
 
 ## Project Structure
 

@@ -14,13 +14,16 @@ mod fsevents;
 pub mod history;
 pub mod journal;
 pub mod monitor;
+pub mod paths;
 
 pub use attribution::{AggregationOptions, Attributor, SizeIndex};
 pub use event::{ActivityEvent, Confidence, EventKind};
 pub use exclusion::ExclusionFilter;
 pub use history::{HistoryBucket, HistorySnapshot};
 pub use journal::Journal;
-pub use monitor::{ActivityListener, Change, ChangeKind, StreamEvent, Watcher};
+pub use monitor::{
+    watcher_capabilities, ActivityListener, Capabilities, Change, ChangeKind, StreamEvent, Watcher,
+};
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
