@@ -47,7 +47,9 @@ struct CheckForUpdatesView: View {
 @main
 struct PathlightApp: App {
     @NSApplicationDelegateAdaptor(PathlightAppDelegate.self) private var appDelegate
-    @StateObject private var appModel = AppModel()
+    @StateObject private var appModel = AppModel(
+        dependencies: .live(activityMonitor: RustDiskActivityMonitor())
+    )
     private let updaterController: SPUStandardUpdaterController
     private let issueReportURL = URL(string: "https://github.com/Ctrl-Creeper/pathlight/issues/new/choose")
 

@@ -47,7 +47,11 @@ struct AppDependencies {
         self.activityGrowthAlertPoster = activityGrowthAlertPoster
     }
 
-    static var live: AppDependencies {
+    /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
+    /// passes the Rust-backed monitor instead.
+    static func live(
+        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor()
+    ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
         let activityStorageLineCodec = ActivityStorageLineCodec(
             preferencesStore: activityStoragePreferences
@@ -61,6 +65,7 @@ struct AppDependencies {
         }
         return AppDependencies(
             systemActions: .live,
+            activityMonitor: activityMonitor,
             activitySizeProvider: activitySizeProvider,
             activityPriorSizeProvider: { url in
                 activitySizeIndex.takeKnownSize(for: url)

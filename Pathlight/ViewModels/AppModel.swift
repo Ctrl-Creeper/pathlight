@@ -52,7 +52,7 @@ final class AppModel: ObservableObject {
     private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
     private var longTermWatchTaskIDs: [LongTermWatchTarget.ID: UUID] = [:]
 
-    init(dependencies: AppDependencies = .live) {
+    init(dependencies: AppDependencies = .live()) {
         self.dependencies = dependencies
 
         let activityStoragePreferences = dependencies.activityStoragePreferences.loadPreferences()
