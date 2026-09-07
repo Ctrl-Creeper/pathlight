@@ -57,3 +57,54 @@ fn reports_created_file_with_increasing_event_ids() {
     assert_eq!(seen.0.root_path, root.to_string_lossy());
     assert!(seen.1 >= 1);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pairs_rename_halves_by_inode() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let source = root.join("draft.txt");
+    std::fs::write(&source, b"draft").unwrap();
+    let collector = Arc::new(Collector::default());
+    let watcher = Watcher::start(
+        root.to_string_lossy().into_owned(),
+        None,
+        100,
+        collector.clone(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let target = root.join("final.txt");
+    std::fs::rename(&source, &target).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let previous = loop {
+        let events = collector.0.lock().unwrap().clone();
+        let arrival = events.iter().find_map(|event| match event {
+            StreamEvent::Change { change, .. } if change.path.ends_with("final.txt") => {
+                match &change.kind {
+                    ChangeKind::Renamed { previous_path } => Some(previous_path.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
+        if let Some(found) = arrival {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no arrival reported; events: {events:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    watcher.stop();
+
+    assert!(
+        previous
+            .as_deref()
+            .is_some_and(|p| p.ends_with("draft.txt")),
+        "previous_path was {previous:?}"
+    );
+}

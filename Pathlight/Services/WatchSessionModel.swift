@@ -13,6 +13,12 @@ struct WatchSessionModel: Equatable, Sendable {
     private(set) var events: [DiskActivityEvent]
     private(set) var lastObservedEventID: UInt64?
     private(set) var historyState: WatchSessionHistoryState
+    /// Oldest events dropped once `maxRetainedEvents` is exceeded, so a storm
+    /// cannot grow memory without bound.
+    private(set) var droppedEventCount = 0
+
+    // ponytail: fixed cap; make it an option if someone needs longer live scrollback.
+    static let maxRetainedEvents = 5_000
 
     init(
         id: UUID = UUID(),
@@ -53,6 +59,11 @@ struct WatchSessionModel: Equatable, Sendable {
                 return lhs.path.path < rhs.path.path
             }
             return lhs.timestamp < rhs.timestamp
+        }
+        let overflow = events.count - Self.maxRetainedEvents
+        if overflow > 0 {
+            events.removeFirst(overflow)
+            droppedEventCount += overflow
         }
     }
 

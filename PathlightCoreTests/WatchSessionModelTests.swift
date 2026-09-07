@@ -76,3 +76,29 @@ struct WatchSessionModelTests {
         #expect(session.events.map(\.kind) == [.modified, .deleted])
     }
 }
+
+@Suite("Watch session model storm cap")
+struct WatchSessionModelStormTests {
+    @Test("drops the oldest events past the retention cap")
+    func dropsOldestEventsPastCap() {
+        let root = URL(filePath: "/Users/example", directoryHint: .isDirectory)
+        var session = WatchSessionModel(rootPath: root)
+        let events = (0..<(WatchSessionModel.maxRetainedEvents + 10)).map { index in
+            DiskActivityEvent(
+                kind: .modified,
+                path: root.appending(path: "file\(index)"),
+                rootPath: root,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                byteDelta: 1,
+                confidence: .confirmed,
+                previousPath: nil,
+                affectedItemCount: 1
+            )
+        }
+        session.append(events)
+
+        #expect(session.events.count == WatchSessionModel.maxRetainedEvents)
+        #expect(session.droppedEventCount == 10)
+        #expect(session.events.first?.path.lastPathComponent == "file10")
+    }
+}

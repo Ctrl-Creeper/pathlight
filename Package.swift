@@ -35,6 +35,7 @@ let package = Package(
                 "Services/ActivityGrowthAlertService.swift",
                 "Services/ActivityHistoryService.swift",
                 "Services/ActivityHistoryPresentation.swift",
+                "Services/ActivityNoiseAdvisor.swift",
                 "Services/ActivitySizeIndex.swift",
                 "Services/ActivityStoragePreferencesStore.swift",
                 "Services/ActivityStorageFileProtection.swift",

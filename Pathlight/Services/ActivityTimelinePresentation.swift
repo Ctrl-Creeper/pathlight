@@ -45,7 +45,7 @@ struct ActivityTimelinePresentation: Equatable, Sendable {
                 event.kindDescription,
                 event.path.path
             ].joined(separator: "|"),
-            title: "\(event.kindTitle) \(event.path.lastPathComponent)",
+            title: event.rowTitle,
             detail: event.byteDelta.map(signedSize) ?? "Unknown size",
             path: event.path.path,
             timestamp: event.timestamp,
@@ -65,6 +65,13 @@ struct ActivityTimelinePresentation: Equatable, Sendable {
 }
 
 private extension DiskActivityEvent {
+    var rowTitle: String {
+        if kind == .moved, let previousPath, previousPath.lastPathComponent != path.lastPathComponent {
+            return "Moved \(previousPath.lastPathComponent) → \(path.lastPathComponent)"
+        }
+        return "\(kindTitle) \(path.lastPathComponent)"
+    }
+
     var kindTitle: String {
         switch kind {
         case .created:

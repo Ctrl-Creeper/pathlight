@@ -8,9 +8,16 @@ struct LiveMonitorWindowView: View {
     var body: some View {
         Group {
             if let session = appModel.liveWatchSession {
+                let suggestion = ActivityNoiseAdvisor.suggestion(for: session.events, rootPath: session.rootPath)
                 ActivityTimelinePanel(
                     session: session,
-                    onStop: appModel.stopShortTermWatch
+                    onStop: appModel.stopShortTermWatch,
+                    noiseSuggestion: suggestion,
+                    onExcludeNoise: suggestion.flatMap { suggestion in
+                        appModel.isLongTermWatchTarget(session.rootPath)
+                            ? { appModel.excludeNoise(suggestion, rootPath: session.rootPath) }
+                            : nil
+                    }
                 )
             } else {
                 ContentUnavailableView(

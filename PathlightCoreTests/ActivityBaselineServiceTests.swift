@@ -107,3 +107,23 @@ private func makeTemporaryDirectory() throws -> URL {
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
+
+@Suite("Activity baseline reconciler")
+struct ActivityBaselineReconcilerTests {
+    @Test("emits one estimated aggregate for the delta between baselines")
+    func emitsAggregateForBaselineDelta() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let previous = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 0), allocatedSize: 1_000, measuredItemCount: 10, unreadableItemCount: 0)
+        let current = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 60), allocatedSize: 4_000, measuredItemCount: 13, unreadableItemCount: 0)
+
+        let event = ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: current, at: Date(timeIntervalSince1970: 60))
+
+        #expect(event?.kind == .aggregate)
+        #expect(event?.byteDelta == 3_000)
+        #expect(event?.affectedItemCount == 3)
+        #expect(event?.confidence == .estimated)
+        #expect(event?.path == root)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: nil, current: current) == nil)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: current, current: current) == nil)
+    }
+}

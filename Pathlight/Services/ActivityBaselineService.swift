@@ -121,3 +121,33 @@ struct ActivityBaselineService: Sendable {
         )
     }
 }
+
+/// After a history gap the baseline is re-captured; the difference between the
+/// old and new baseline is written back as one estimated aggregate row so totals
+/// stay honest even though the individual events were lost.
+enum ActivityBaselineReconciler {
+    nonisolated static func reconciliationEvent(
+        previous: ActivityBaselineSnapshot?,
+        current: ActivityBaselineSnapshot,
+        at timestamp: Date = Date()
+    ) -> DiskActivityEvent? {
+        guard let previous, previous.rootPath == current.rootPath else {
+            return nil
+        }
+        let byteDelta = current.allocatedSize - previous.allocatedSize
+        let itemDelta = abs(current.measuredItemCount - previous.measuredItemCount)
+        guard byteDelta != 0 || itemDelta != 0 else {
+            return nil
+        }
+        return DiskActivityEvent(
+            kind: .aggregate,
+            path: current.rootPath,
+            rootPath: current.rootPath,
+            timestamp: timestamp,
+            byteDelta: byteDelta,
+            confidence: .estimated,
+            previousPath: nil,
+            affectedItemCount: max(itemDelta, 1)
+        )
+    }
+}

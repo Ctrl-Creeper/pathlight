@@ -490,6 +490,20 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Adds the advisor's pattern to the tracked target's exclusions, if the
+    /// live-monitored folder is also a long-term watch.
+    func excludeNoise(_ suggestion: ActivityNoiseSuggestion, rootPath: URL) {
+        let targetID = rootPath.standardizedFileURL.path
+        guard let target = longTermWatchTargets.first(where: { $0.id == targetID }) else {
+            return
+        }
+        setExclusionPatterns(target.options.exclusionPatterns + [suggestion.pattern], rootPath: rootPath)
+    }
+
+    func isLongTermWatchTarget(_ rootPath: URL) -> Bool {
+        longTermWatchTargets.contains { $0.id == rootPath.standardizedFileURL.path }
+    }
+
     func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
         let targetID = rootPath.standardizedFileURL.path
         guard let target = longTermWatchTargets.first(where: { $0.id == targetID }) else {
@@ -677,11 +691,20 @@ final class AppModel: ObservableObject {
                         guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
                             break
                         }
+                        let previousBaseline = self.longTermWatchTargets.first(where: { $0.id == target.id })?.baseline
                         self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateBaseline(
                             baseline,
                             forRootPath: target.rootPath,
                             currentTargets: self.longTermWatchTargets
                         )
+                        if let eventStore,
+                           let reconciliation = ActivityBaselineReconciler.reconciliationEvent(
+                               previous: previousBaseline,
+                               current: baseline
+                           ) {
+                            try? await eventStore.append([reconciliation])
+                            self.scheduleEventDrivenHistoryRefresh(rootPath: target.rootPath)
+                        }
                     }
                     if session.events.count > persistedEventCount {
                         let newEvents = Array(session.events[persistedEventCount...])

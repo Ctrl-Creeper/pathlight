@@ -3,6 +3,8 @@ import SwiftUI
 struct ActivityTimelinePanel: View {
     let session: WatchSessionModel
     let onStop: () -> Void
+    var noiseSuggestion: ActivityNoiseSuggestion? = nil
+    var onExcludeNoise: (() -> Void)? = nil
 
     private var presentation: ActivityTimelinePresentation {
         // ponytail: 200 rows is plenty of scrollback; raise if sessions outgrow it.
@@ -28,6 +30,35 @@ struct ActivityTimelinePanel: View {
                 }
                 .labelStyle(.iconOnly)
                 .help("Stop Watching")
+            }
+
+            if let noiseSuggestion {
+                HStack(spacing: 8) {
+                    Image(systemName: "speaker.slash")
+                        .foregroundStyle(.secondary)
+                    Text("\(noiseSuggestion.eventCount.formatted()) of these events are under \(noiseSuggestion.pattern)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    if let onExcludeNoise {
+                        Button("Exclude") {
+                            onExcludeNoise()
+                        }
+                        .controlSize(.small)
+                        .help("Add this folder to the long-term watch's exclusion patterns")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            if session.droppedEventCount > 0 {
+                Text("Showing the latest \(WatchSessionModel.maxRetainedEvents.formatted()) events; \(session.droppedEventCount.formatted()) older events were dropped.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             if presentation.rows.isEmpty {
