@@ -6,7 +6,7 @@
 
 A native macOS app that watches folders and tells you what changed on disk, when, and by how much. Pick a folder, and Pathlight records every create, modify, delete, and move inside it — live in a floating monitor, or long-term in the background with history, trends, and growth alerts.
 
-This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathlight) that keeps only the file-change monitoring feature. The disk space analyzer (scanning, sunburst chart, file browser, trash actions) has been removed.
+This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathlight) that keeps only the file-change monitoring feature. The disk space analyzer (scanning, sunburst chart, file browser, trash actions) has been removed. The monitoring engine is being moved into a Rust core (`core/`) so the same journal, attribution, and history logic can back Linux and Windows builds later; the macOS app already sources its FSEvents stream from it.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-6.0-orange)
@@ -40,6 +40,7 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 
 - **macOS Sonoma 14** or later
 - **Xcode 26+** with Swift 6.0 toolchain (for building from source)
+- **Rust stable** (`rustup` recommended; add `x86_64-apple-darwin` for universal builds)
 
 ## Building from Source
 
@@ -47,40 +48,55 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 git clone <this fork>
 cd pathlight
 
-# Build and run package tests
+# 1. Rust core: tests, then the xcframework the app links against
+(cd core && cargo test)
+core/scripts/build-xcframework.sh        # -> core/swift/PathlightRustCoreFFI.xcframework
+
+# 2. Swift package tests (pure Swift, no Rust needed)
 swift test
 
-# Open in Xcode for the full app
-open Pathlight.xcodeproj
-```
-
-The `Package.swift` file contains the **PathlightCore** library (monitoring engine, history, presentation models) and has no external package dependencies. The full SwiftUI app is built through the Xcode project, which integrates Sparkle through Xcode's Swift Package Manager support.
-
-```bash
-swift test
+# 3. The app
 xcodebuild -project Pathlight.xcodeproj -scheme Pathlight -configuration Debug -destination 'platform=macOS' build
+# or: open Pathlight.xcodeproj
 ```
+
+Step 1 must run once before the Xcode build; the project depends on the local Swift package in `core/swift`, and the xcframework is not checked in. The script produces a universal library when both Apple Rust targets are installed, otherwise a host-only one.
+
+`Package.swift` contains the **PathlightCore** Swift library (session model, journal, history, presentation) with no external dependencies. The Rust crate in `core/` is documented in [`core/README.md`](core/README.md). CI (`.github/workflows/ci.yml`) builds the Rust core on Linux, macOS and Windows, runs the Swift package tests, and builds the app with a universal xcframework.
 
 ### Project Structure
 
 ```
-Pathlight/
-├── App/                  # App delegate (menu bar survival) and menu commands
-├── Services/             # FSEvents monitor, attribution, journals, history, presentation
+core/                     # Rust crate `pathlight-core` (UniFFI)
+├── src/
+│   ├── fsevents.rs       #   macOS FSEvents backend with real event IDs
+│   ├── monitor.rs        #   Watcher + notify backend for Linux/Windows
+│   ├── attribution.rs    #   byte-delta attribution, aggregation, size index
+│   ├── exclusion.rs      #   gitignore-style noise filter
+│   ├── journal.rs        #   JSONL journal shared with the Swift app
+│   └── history.rs        #   dashboard buckets and totals
+├── swift/                # Local SwiftPM package wrapping the xcframework
+└── scripts/              # build-xcframework.sh
+Pathlight/                # macOS app (SwiftUI)
+├── App/                  # App delegate, menu commands, Rust monitor adapter
+├── Services/             # Session model, journal, history, presentation
 ├── ViewModels/           # AppModel — central monitoring state
 ├── Features/
 │   ├── Activity/         # Dashboard, Live Monitor window, menu bar extra
 │   └── Settings/
 └── Shared/               # Small presentation helpers
+PathlightCoreTests/       # Swift package tests
 ```
 
 ## Architecture Notes
 
-- **FSEventsDiskActivityMonitor** wraps FSEvents and yields typed changes with event IDs so watches can resume from a checkpoint.
-- **StorageAttributionService** turns raw path changes into events with byte deltas, using an on-disk size index to attribute deletions.
-- **JSONLActivityEventStore** is an append-only journal; **ActivityHistoryService** folds it into buckets, top changes, and timelines.
+- **Shared core, native shells.** Event sources are per platform because that is where low power comes from: FSEvents on macOS, inotify on Linux, `ReadDirectoryChangesW` on Windows, all kernel-driven with no polling. Everything above the event source (attribution, exclusion, journal, history) is platform-neutral Rust.
+- **Rust `Watcher`** yields typed changes tagged with event IDs. On macOS the IDs are FSEvents' own, so long-term watches resume from a stored checkpoint after a relaunch; other platforms get a counter and ask the host to re-baseline.
+- **Journal format is shared.** Rust writes the same JSONL rows as Swift's `JSONLActivityEventStore` (fixture-tested against `JSONEncoder` output), so any shell can read any other shell's history.
+- **The macOS app today** uses the Rust event source via `RustDiskActivityMonitor` and still runs attribution and exclusion in Swift; moving those to the Rust side is the next step.
 - **AppModel** is the single `@MainActor` source of truth: it runs live and long-term watches, persists checkpoints, and enforces the storage policy.
-- **PathlightCore** has no external Swift package dependencies; the Xcode app target adds Sparkle for automatic updates.
+- **Mobile** is not a monitoring target: iOS and Android sandboxes cannot watch user folders in the background. If they get an app, it will be a viewer of a desktop journal.
+- The Swift package has no external dependencies; the Xcode app target adds Sparkle for updates and the local `PathlightRustCore` package.
 
 ## License
 
