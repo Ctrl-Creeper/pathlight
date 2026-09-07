@@ -269,3 +269,40 @@ private func event(
         affectedItemCount: 1
     )
 }
+
+@Suite("Activity dashboard recent deletions")
+struct ActivityDashboardRecentDeletionsTests {
+    @Test("lists the largest removals with a trash hint")
+    func listsLargestRemovals() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let target = LongTermWatchTarget(rootPath: root)
+        func event(_ name: String, kind: DiskActivityEventKind, delta: Int64?) -> DiskActivityEvent {
+            DiskActivityEvent(kind: kind, path: root.appending(path: name), rootPath: root, timestamp: Date(timeIntervalSince1970: 100), byteDelta: delta, confidence: .confirmed, previousPath: nil, affectedItemCount: 1)
+        }
+        let history = ActivityHistorySnapshot(
+            rootPath: root,
+            generatedAt: Date(timeIntervalSince1970: 200),
+            totalNetByteDelta: 0,
+            eventCount: 4,
+            unknownSizeEventCount: 1,
+            buckets: [],
+            recentEvents: [
+                event("small.txt", kind: .deleted, delta: -10),
+                event("movie.mov", kind: .deleted, delta: -5_000_000),
+                event("kept.txt", kind: .created, delta: 500),
+                event("archive.zip", kind: .moved, delta: -2_000)
+            ]
+        )
+
+        let presentation = ActivityDashboardPresentation(
+            targets: [target],
+            selectedRootPath: root,
+            histories: [history],
+            trashContains: { $0 == "movie.mov" }
+        )
+
+        #expect(presentation.recentDeletions.map(\.title) == ["movie.mov", "archive.zip", "small.txt"])
+        #expect(presentation.recentDeletions.map(\.isInTrash) == [true, false, false])
+        #expect(presentation.recentDeletions.first?.sizeText == "5 MB")
+    }
+}

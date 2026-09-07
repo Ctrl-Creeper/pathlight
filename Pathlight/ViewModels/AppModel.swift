@@ -41,6 +41,8 @@ final class AppModel: ObservableObject {
     private var lastEventDrivenHistoryRefreshAt: [String: Date] = [:]
     private var pendingEventDrivenHistoryRefreshTasks: [String: Task<Void, Never>] = [:]
     private var growthAlertLastPostedAt: [String: Date] = [:]
+    private var anomalyAlertLastPostedAt: [String: Date] = [:]
+    private static let anomalyAlertInterval: TimeInterval = 60 * 60
     private var activityDashboardHistoryTask: Task<Void, Never>?
     private var activityDashboardHistoryTaskID: UUID?
     private var activityStorageUsageTask: Task<Void, Never>?
@@ -122,6 +124,63 @@ final class AppModel: ObservableObject {
 
     func revealURLInFinder(_ url: URL) {
         dependencies.systemActions.reveal(url)
+    }
+
+    func addPreset(_ preset: MonitoringPreset) {
+        guard !isLongTermWatchTarget(preset.rootPath) else {
+            return
+        }
+        enableLongTermWatch(rootPath: preset.rootPath, options: preset.options)
+    }
+
+    // MARK: - Export
+
+    func exportLiveSessionReport() {
+        guard let session = liveWatchSession else {
+            return
+        }
+        let name = session.rootPath.lastPathComponent.isEmpty ? "root" : session.rootPath.lastPathComponent
+        guard let destination = dependencies.systemActions.presentSavePanel(
+            "Pathlight Session \(name) \(Self.fileNameDate(session.startedAt)).md"
+        ) else {
+            return
+        }
+        write(ActivityExportService.sessionReport(session), to: destination)
+    }
+
+    func exportHistoryCSV(rootPath: URL) {
+        guard let activityEventStore = dependencies.activityEventStore else {
+            return
+        }
+        let name = rootPath.lastPathComponent.isEmpty ? "root" : rootPath.lastPathComponent
+        guard let destination = dependencies.systemActions.presentSavePanel(
+            "Pathlight History \(name) \(Self.fileNameDate(Date())).csv"
+        ) else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            do {
+                let events = try await activityEventStore.loadEvents(rootPath: rootPath, limit: 200_000)
+                self?.write(ActivityExportService.csv(events), to: destination)
+            } catch {
+                self?.lastErrorMessage = "Pathlight could not read the activity history."
+            }
+        }
+    }
+
+    private func write(_ text: String, to destination: URL) {
+        do {
+            try Data(text.utf8).write(to: destination, options: .atomic)
+            dependencies.systemActions.reveal(destination)
+        } catch {
+            lastErrorMessage = "Pathlight could not write \(destination.lastPathComponent)."
+        }
+    }
+
+    private static func fileNameDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HHmm"
+        return formatter.string(from: date)
     }
 
     // MARK: - Full Disk Access
@@ -538,6 +597,7 @@ final class AppModel: ObservableObject {
             return
         }
         let targetID = history.rootPath.standardizedFileURL.path
+        evaluateAnomalies(history: history, targetID: targetID, poster: poster)
         guard let target = longTermWatchTargets.first(where: { $0.id == targetID }),
               let growth = ActivityGrowthAlertEvaluator.alertworthyGrowth(
                   target: target,
@@ -555,6 +615,32 @@ final class AppModel: ObservableObject {
                 growthBytes: growth,
                 thresholdBytes: threshold
             )
+        }
+    }
+
+    private func evaluateAnomalies(
+        history: ActivityHistorySnapshot,
+        targetID: String,
+        poster: any ActivityGrowthAlertPosting
+    ) {
+        guard longTermWatchTargets.contains(where: { $0.id == targetID && $0.isEnabled }) else {
+            return
+        }
+        let now = Date()
+        for anomaly in ActivityAnomalyDetector.anomalies(in: history, now: now) {
+            let key = anomaly.identifier
+            if let last = anomalyAlertLastPostedAt[key], now.timeIntervalSince(last) < Self.anomalyAlertInterval {
+                continue
+            }
+            anomalyAlertLastPostedAt[key] = now
+            Task {
+                await poster.postActivityAlert(
+                    rootPath: anomaly.rootPath,
+                    identifier: key,
+                    title: anomaly.title,
+                    body: anomaly.body
+                )
+            }
         }
     }
 

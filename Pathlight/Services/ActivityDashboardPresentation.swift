@@ -27,6 +27,15 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let url: URL
     }
 
+    struct RecentDeletion: Equatable, Identifiable, Sendable {
+        let id: String
+        let title: String
+        let path: String
+        let sizeText: String
+        let timestampText: String
+        let isInTrash: Bool
+    }
+
     let title: String
     let summaryText: String
     let emptyStateTitle: String?
@@ -35,6 +44,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
     let trendBuckets: [ActivityHistoryPresentation.Bucket]
     let timelineRows: [ActivityHistoryPresentation.Row]
     let topChanges: [TopChange]
+    let recentDeletions: [RecentDeletion]
 
     init(
         targets: [LongTermWatchTarget],
@@ -42,7 +52,9 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         histories: [ActivityHistorySnapshot],
         runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:],
         eventLimit: Int = 16,
-        bucketLimit: Int = 32
+        bucketLimit: Int = 32,
+        deletionLimit: Int = 6,
+        trashContains: (String) -> Bool = TrashLocator.contains(itemNamed:)
     ) {
         title = "Activity"
         emptyStateTitle = targets.isEmpty ? "No Long-Term Watches" : nil
@@ -84,11 +96,42 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             trendBuckets = historyPresentation.buckets
             timelineRows = historyPresentation.rows
             topChanges = Self.topChanges(history: history)
+            recentDeletions = Self.recentDeletions(history: history, limit: deletionLimit, trashContains: trashContains)
         } else {
             trendBuckets = []
             timelineRows = []
             topChanges = []
+            recentDeletions = []
         }
+    }
+
+    /// Largest recent removals with a hint about where they went.
+    private static func recentDeletions(
+        history: ActivityHistorySnapshot,
+        limit: Int,
+        trashContains: (String) -> Bool
+    ) -> [RecentDeletion] {
+        history.recentEvents
+            .filter { $0.kind == .deleted || ($0.kind == .moved && ($0.byteDelta ?? 0) < 0) }
+            .sorted { lhs, rhs in
+                let lhsBytes = abs(lhs.byteDelta ?? 0)
+                let rhsBytes = abs(rhs.byteDelta ?? 0)
+                if lhsBytes == rhsBytes {
+                    return lhs.timestamp > rhs.timestamp
+                }
+                return lhsBytes > rhsBytes
+            }
+            .prefix(limit)
+            .map { event in
+                RecentDeletion(
+                    id: "\(event.timestamp.timeIntervalSince1970)|\(event.path.path)",
+                    title: event.path.lastPathComponent,
+                    path: event.path.path,
+                    sizeText: event.byteDelta.map { PathlightFormatters.size(abs($0)) } ?? "Unknown size",
+                    timestampText: PathlightFormatters.date(event.timestamp),
+                    isInTrash: trashContains(event.path.lastPathComponent)
+                )
+            }
     }
 
     /// Aggregates recent events by the immediate child of the watch root, so the
@@ -232,6 +275,8 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
 
     let rows: [Row]
     let summaryText: String
+    /// Compact "+1.2 GB" for the menu bar label; empty when nothing is monitored.
+    let todayTotalText: String
 
     init(
         targets: [LongTermWatchTarget],
@@ -265,9 +310,11 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
 
         if targets.isEmpty {
             summaryText = "No folders monitored"
+            todayTotalText = ""
         } else {
             let watchingCount = targets.filter(\.isEnabled).count
             summaryText = "\(watchingCount.formatted()) watching • \(ActivityDashboardPresentation.signedSize(todayTotal)) today"
+            todayTotalText = ActivityDashboardPresentation.signedSize(todayTotal)
         }
     }
 }

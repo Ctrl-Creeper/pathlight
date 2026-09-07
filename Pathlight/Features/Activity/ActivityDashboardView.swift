@@ -13,6 +13,8 @@ struct ActivityDashboardActions {
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
     let addFolder: () -> Void
+    let addPreset: (MonitoringPreset) -> Void
+    let exportHistory: (URL) -> Void
     let startLiveMonitor: (DiskActivityAggregationOptions) -> Void
     let stopLiveMonitor: () -> Void
 }
@@ -26,6 +28,12 @@ struct ActivityDashboardView: View {
     let actions: ActivityDashboardActions
 
     @State private var selectedTargetID: String?
+    @State private var presets = MonitoringPreset.available()
+
+    private var untrackedPresets: [MonitoringPreset] {
+        let tracked = Set(targets.map(\.id))
+        return presets.filter { !tracked.contains($0.rootPath.standardizedFileURL.path) }
+    }
 
     private var selectedRootPath: URL? {
         guard let selectedTargetID else {
@@ -54,8 +62,18 @@ struct ActivityDashboardView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
-                Button {
-                    actions.addFolder()
+                Menu {
+                    Button("Choose Folder…") {
+                        actions.addFolder()
+                    }
+                    if !untrackedPresets.isEmpty {
+                        Divider()
+                        ForEach(untrackedPresets) { preset in
+                            Button(preset.title) {
+                                actions.addPreset(preset)
+                            }
+                        }
+                    }
                 } label: {
                     Label("Monitor Folder", systemImage: "folder.badge.plus")
                 }
@@ -99,6 +117,13 @@ struct ActivityDashboardView: View {
                         Label("Reveal", systemImage: "folder")
                     }
                     .help("Reveal in Finder")
+
+                    Button {
+                        actions.exportHistory(selectedRootPath)
+                    } label: {
+                        Label("Export CSV", systemImage: "square.and.arrow.up")
+                    }
+                    .help("Export this folder's activity history as CSV")
                 }
             }
         }
@@ -201,6 +226,15 @@ struct ActivityDashboardView: View {
                 changes: presentation.topChanges,
                 onLocate: { actions.revealInFinder($0) }
             )
+
+            if !presentation.recentDeletions.isEmpty {
+                Divider()
+
+                ActivityDashboardDeletionsSection(
+                    deletions: presentation.recentDeletions,
+                    onReveal: { actions.revealInFinder(URL(filePath: $0)) }
+                )
+            }
 
             Divider()
 
@@ -659,6 +693,50 @@ private struct ActivityDashboardTopChangeRow: View {
             return .orange
         }
         return .secondary
+    }
+}
+
+private struct ActivityDashboardDeletionsSection: View {
+    let deletions: [ActivityDashboardPresentation.RecentDeletion]
+    let onReveal: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Recently Deleted", systemImage: "trash")
+                .font(.headline)
+
+            ForEach(deletions) { deletion in
+                HStack(spacing: 10) {
+                    Image(systemName: deletion.isInTrash ? "trash.circle.fill" : "minus.circle.fill")
+                        .foregroundStyle(deletion.isInTrash ? Color.orange : Color.secondary)
+                    Text(deletion.title)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(deletion.isInTrash ? "In Trash" : "Not in Trash")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                    Spacer(minLength: 8)
+                    Text(deletion.sizeText)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text(deletion.timestampText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .help(deletion.path)
+                .contextMenu {
+                    Button("Reveal Folder in Finder") {
+                        onReveal((deletion.path as NSString).deletingLastPathComponent)
+                    }
+                }
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

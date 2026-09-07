@@ -6,7 +6,7 @@ nonisolated enum WatchSessionHistoryState: Equatable, Sendable {
     case gapDetected
 }
 
-struct WatchSessionModel: Equatable, Sendable {
+nonisolated struct WatchSessionModel: Equatable, Sendable {
     let id: UUID
     let rootPath: URL
     let startedAt: Date

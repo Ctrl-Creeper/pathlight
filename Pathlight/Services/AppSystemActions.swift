@@ -12,6 +12,7 @@ import Foundation
 struct AppSystemActions {
     var reveal: (URL) -> Void
     var presentFolderPanel: (_ prompt: String, _ message: String) -> URL?
+    var presentSavePanel: (_ suggestedFileName: String) -> URL?
     var prepareAndOpenFullDiskAccessSettings: () -> Bool
     var fullDiskAccessStatus: @Sendable () async -> FullDiskAccessStatus
 
@@ -21,6 +22,9 @@ struct AppSystemActions {
         },
         presentFolderPanel: { prompt, message in
             SystemIntegration.presentFolderPanel(prompt: prompt, message: message)
+        },
+        presentSavePanel: { suggestedFileName in
+            SystemIntegration.presentSavePanel(suggestedFileName: suggestedFileName)
         },
         prepareAndOpenFullDiskAccessSettings: {
             SystemIntegration.prepareAndOpenFullDiskAccessSettings()
@@ -36,6 +40,7 @@ struct AppSystemActions {
     static let inert = AppSystemActions(
         reveal: { _ in },
         presentFolderPanel: { _, _ in nil },
+        presentSavePanel: { _ in nil },
         prepareAndOpenFullDiskAccessSettings: { true },
         fullDiskAccessStatus: { .unknown }
     )

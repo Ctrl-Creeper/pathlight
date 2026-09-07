@@ -49,6 +49,18 @@ enum SystemIntegration {
         return url.standardizedFileURL
     }
 
+    @MainActor
+    static func presentSavePanel(suggestedFileName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedFileName
+        panel.prompt = "Export"
+        guard panel.runModal() == .OK else {
+            return nil
+        }
+        return panel.url
+    }
+
     static func reveal(_ url: URL, workspace: SystemWorkspace = NSWorkspace.shared) {
         reveal([url], workspace: workspace)
     }

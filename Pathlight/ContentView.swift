@@ -55,6 +55,8 @@ struct ContentView: View {
             enableLaunchAtLogin: { appModel.setLaunchAtLoginEnabled(true) },
             dismissLaunchAtLoginNudge: { appModel.dismissLaunchAtLoginNudge() },
             addFolder: { appModel.addLongTermWatchFromOpenPanel() },
+            addPreset: { appModel.addPreset($0) },
+            exportHistory: { appModel.exportHistoryCSV(rootPath: $0) },
             startLiveMonitor: { options in
                 if appModel.startShortTermWatchFromOpenPanel(options: options) {
                     openWindow(id: "live-monitor")

@@ -88,8 +88,6 @@ struct PathlightApp: App {
 
         // Menu bar presence only while folders are actually monitored.
         MenuBarExtra(
-            "Pathlight Activity",
-            systemImage: "waveform.path.ecg",
             isInserted: Binding(
                 get: { !appModel.longTermWatchTargets.isEmpty },
                 set: { _ in }
@@ -97,6 +95,23 @@ struct PathlightApp: App {
         ) {
             ActivityMenuBarView()
                 .environmentObject(appModel)
+        } label: {
+            let todayText = MenuBarActivityPresentation(
+                targets: appModel.longTermWatchTargets,
+                histories: Array(appModel.activityDashboardHistories.values),
+                runtimeStatuses: appModel.longTermWatchRuntimeStatuses
+            ).todayTotalText
+            if todayText.isEmpty {
+                Image(systemName: "waveform.path.ecg")
+            } else {
+                Label {
+                    Text(todayText)
+                        .monospacedDigit()
+                } icon: {
+                    Image(systemName: "waveform.path.ecg")
+                }
+                .labelStyle(.titleAndIcon)
+            }
         }
 
         Window("Live Monitor", id: "live-monitor") {

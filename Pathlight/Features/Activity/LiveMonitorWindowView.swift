@@ -31,6 +31,15 @@ struct LiveMonitorWindowView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button {
+                    appModel.exportLiveSessionReport()
+                } label: {
+                    Label("Export Report", systemImage: "square.and.arrow.up")
+                }
+                .disabled(appModel.liveWatchSession == nil)
+                .help("Save this session as a Markdown report")
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
                     keepsOnTop.toggle()
                 } label: {
                     Label(
