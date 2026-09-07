@@ -6,3 +6,7 @@ Sparkle-*/
 releases/
 
 .DS_Store
+
+# Rust core
+core/target/
+core/bindings/

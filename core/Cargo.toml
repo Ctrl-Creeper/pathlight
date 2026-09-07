@@ -1,0 +1,30 @@
+[package]
+name = "pathlight-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Cross-platform folder-change monitoring core for Pathlight"
+
+[lib]
+name = "pathlight_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+notify = "8"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "serde-well-known"] }
+uniffi = "0.32"
+
+[dev-dependencies]
+tempfile = "3"

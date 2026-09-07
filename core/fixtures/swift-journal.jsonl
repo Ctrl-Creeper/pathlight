@@ -1,0 +1,2 @@
+{"rootPath":"file:\/\/\/Users\/example\/Downloads\/","previousPath":"file:\/\/\/Users\/example\/Downloads\/a.dmg","timestamp":"2025-09-07T06:20:00Z","affectedItemCount":1,"byteDelta":-4096,"confidence":{"estimated":{}},"path":"file:\/\/\/Users\/example\/Downloads\/b.dmg","kind":{"moved":{}}}
+{"path":"file:\/\/\/Users\/example\/Downloads\/","timestamp":"2025-09-07T00:00:00Z","confidence":{"unknown":{}},"affectedItemCount":12,"rootPath":"file:\/\/\/Users\/example\/Downloads\/","kind":{"aggregate":{}}}
