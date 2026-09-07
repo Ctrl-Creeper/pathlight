@@ -19,6 +19,7 @@ fn event(name: &str, seconds: u64, delta: Option<i64>) -> ActivityEvent {
         },
         previous_path: None,
         affected_item_count: 1,
+        process_name: None,
     }
 }
 

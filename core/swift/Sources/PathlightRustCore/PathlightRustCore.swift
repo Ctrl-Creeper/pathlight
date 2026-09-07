@@ -1153,10 +1153,17 @@ public struct ActivityEvent: Equatable, Hashable {
     public var confidence: Confidence
     public var previousPath: String?
     public var affectedItemCount: UInt32
+    /**
+     * Best-effort owning process; absent from rows written before the field existed.
+     */
+    public var processName: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: EventKind, path: String, rootPath: String, timestamp: Date, byteDelta: Int64?, confidence: Confidence, previousPath: String?, affectedItemCount: UInt32) {
+    public init(kind: EventKind, path: String, rootPath: String, timestamp: Date, byteDelta: Int64?, confidence: Confidence, previousPath: String?, affectedItemCount: UInt32, 
+        /**
+         * Best-effort owning process; absent from rows written before the field existed.
+         */processName: String?) {
         self.kind = kind
         self.path = path
         self.rootPath = rootPath
@@ -1165,6 +1172,7 @@ public struct ActivityEvent: Equatable, Hashable {
         self.confidence = confidence
         self.previousPath = previousPath
         self.affectedItemCount = affectedItemCount
+        self.processName = processName
     }
 
     
@@ -1190,7 +1198,8 @@ public struct FfiConverterTypeActivityEvent: FfiConverterRustBuffer {
                 byteDelta: FfiConverterOptionInt64.read(from: &buf), 
                 confidence: FfiConverterTypeConfidence.read(from: &buf), 
                 previousPath: FfiConverterOptionString.read(from: &buf), 
-                affectedItemCount: FfiConverterUInt32.read(from: &buf)
+                affectedItemCount: FfiConverterUInt32.read(from: &buf), 
+                processName: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1203,6 +1212,7 @@ public struct FfiConverterTypeActivityEvent: FfiConverterRustBuffer {
         FfiConverterTypeConfidence.write(value.confidence, into: &buf)
         FfiConverterOptionString.write(value.previousPath, into: &buf)
         FfiConverterUInt32.write(value.affectedItemCount, into: &buf)
+        FfiConverterOptionString.write(value.processName, into: &buf)
     }
 }
 

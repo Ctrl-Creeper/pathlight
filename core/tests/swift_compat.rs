@@ -61,6 +61,7 @@ fn encodes_spaces_like_swift_urls() {
         confidence: Confidence::Confirmed,
         previous_path: None,
         affected_item_count: 1,
+        process_name: None,
     };
     let json: Value = serde_json::from_str(&event.to_json_line().unwrap()).unwrap();
     assert_eq!(
@@ -92,6 +93,7 @@ fn journal_round_trips_and_orders_newest_first() {
         confidence: Confidence::Confirmed,
         previous_path: None,
         affected_item_count: 1,
+        process_name: None,
     };
     journal
         .append(vec![make("old.txt", 100), make("new.txt", 200)])

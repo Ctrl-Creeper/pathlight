@@ -93,7 +93,7 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
                 event.path.path
             ].joined(separator: "|"),
             title: event.rowTitle,
-            detail: event.byteDelta.map(signedSize) ?? "Unknown size",
+            detail: event.rowDetail(sizeText: event.byteDelta.map(signedSize) ?? "Unknown size"),
             path: event.path.path,
             timestamp: event.timestamp,
             kind: event.kind
@@ -127,6 +127,13 @@ private extension ActivityHistoryBucket {
 }
 
 private extension DiskActivityEvent {
+    func rowDetail(sizeText: String) -> String {
+        guard let processName, !processName.isEmpty else {
+            return sizeText
+        }
+        return "\(sizeText) • \(processName)"
+    }
+
     var rowTitle: String {
         if kind == .moved, let previousPath, previousPath.lastPathComponent != path.lastPathComponent {
             return "Moved \(previousPath.lastPathComponent) → \(path.lastPathComponent)"

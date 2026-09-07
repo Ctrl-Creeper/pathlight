@@ -119,6 +119,7 @@ impl<'a> Attributor<'a> {
             confidence,
             previous_path,
             affected_item_count: 1,
+            process_name: None,
         };
         let sized = |kind, previous_path: Option<String>| {
             (self.size)(&change.path)
@@ -200,6 +201,7 @@ fn aggregate_group(mut events: Vec<ActivityEvent>) -> ActivityEvent {
         confidence,
         previous_path: None,
         affected_item_count: events.iter().map(|event| event.affected_item_count).sum(),
+        process_name: None,
     }
 }
 

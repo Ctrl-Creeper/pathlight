@@ -194,7 +194,10 @@ final class AppModel: ObservableObject {
 
         let taskID = UUID()
         liveWatchTaskID = taskID
-        let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: dependencies.activityMonitor,
+            processHints: dependencies.processHints
+        )
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
         let baselineService = dependencies.activityBaselineService
@@ -608,7 +611,10 @@ final class AppModel: ObservableObject {
             state: .starting,
             retryCount: 0
         )
-        let coordinator = LiveWatchSessionCoordinator(monitor: dependencies.activityMonitor)
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: dependencies.activityMonitor,
+            processHints: dependencies.processHints
+        )
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
         let eventStore = dependencies.activityEventStore

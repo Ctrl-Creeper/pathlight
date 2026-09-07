@@ -89,7 +89,8 @@ struct WatchSessionModel: Equatable, Sendable {
             byteDelta: incoming.byteDelta ?? existing.byteDelta,
             confidence: incoming.byteDelta == nil ? existing.confidence : incoming.confidence,
             previousPath: incoming.previousPath ?? existing.previousPath,
-            affectedItemCount: max(existing.affectedItemCount, incoming.affectedItemCount)
+            affectedItemCount: max(existing.affectedItemCount, incoming.affectedItemCount),
+            processName: incoming.processName ?? existing.processName
         )
     }
 

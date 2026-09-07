@@ -67,6 +67,9 @@ pub struct ActivityEvent {
     )]
     pub previous_path: Option<String>,
     pub affected_item_count: u32,
+    /// Best-effort owning process; absent from rows written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name: Option<String>,
 }
 
 impl ActivityEvent {
