@@ -126,15 +126,29 @@ struct ActivityBaselineService: Sendable {
 /// old and new baseline is written back as one estimated aggregate row so totals
 /// stay honest even though the individual events were lost.
 enum ActivityBaselineReconciler {
+    /// Rows that fall strictly between two baseline captures.
+    nonisolated static func recordedByteDelta(
+        in events: [DiskActivityEvent],
+        after previous: ActivityBaselineSnapshot,
+        before current: ActivityBaselineSnapshot
+    ) -> Int64 {
+        events
+            .filter { $0.timestamp > previous.capturedAt && $0.timestamp < current.capturedAt }
+            .compactMap(\.byteDelta)
+            .reduce(Int64(0), +)
+    }
+
+    /// `recordedByteDeltaSincePrevious` is the sum of rows already in the journal
+    /// between the two baselines; without it those changes would count twice.
     nonisolated static func reconciliationEvent(
         previous: ActivityBaselineSnapshot?,
         current: ActivityBaselineSnapshot,
-        at timestamp: Date = Date()
+        recordedByteDeltaSincePrevious: Int64 = 0
     ) -> DiskActivityEvent? {
         guard let previous, previous.rootPath == current.rootPath else {
             return nil
         }
-        let byteDelta = current.allocatedSize - previous.allocatedSize
+        let byteDelta = current.allocatedSize - previous.allocatedSize - recordedByteDeltaSincePrevious
         let itemDelta = abs(current.measuredItemCount - previous.measuredItemCount)
         guard byteDelta != 0 || itemDelta != 0 else {
             return nil
@@ -143,7 +157,9 @@ enum ActivityBaselineReconciler {
             kind: .aggregate,
             path: current.rootPath,
             rootPath: current.rootPath,
-            timestamp: timestamp,
+            // Stamped at the new baseline so a later reconciliation's window
+            // (strictly after the previous capture) does not include this row.
+            timestamp: current.capturedAt,
             byteDelta: byteDelta,
             confidence: .estimated,
             previousPath: nil,

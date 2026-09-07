@@ -217,7 +217,7 @@ struct StorageAttributionIncrementTests {
             DiskActivityChange(kind: .renamed(previousPath: previousOutside), path: destination, rootPath: root, timestamp: Date(timeIntervalSince1970: 11)),
             DiskActivityChange(kind: .renamed(previousPath: root.appending(path: "unknown.mov")), path: destination, rootPath: root, timestamp: Date(timeIntervalSince1970: 12))
         ])
-        #expect(events.map(\.byteDelta) == [0, 9_000, 0])
+        #expect(events.map(\.byteDelta) == [0, 9_000, 9_000])
         #expect(events.map(\.confidence) == [.confirmed, .confirmed, .estimated])
     }
 }

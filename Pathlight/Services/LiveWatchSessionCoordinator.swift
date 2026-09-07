@@ -8,6 +8,8 @@ struct LiveWatchSessionCoordinator: Sendable {
     nonisolated static let processHintInterval: TimeInterval = 5
     /// Long-term watches only pay for a snapshot when a change is at least this big.
     nonisolated static let processHintMinimumByteDelta: Int64 = 1_024 * 1_024
+    /// A snapshot older than this no longer annotates events.
+    nonisolated static let processHintValidity: TimeInterval = 30
 
     init(
         monitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
@@ -70,7 +72,10 @@ struct LiveWatchSessionCoordinator: Sendable {
                                     lastHintSnapshotAt = Date()
                                     hintCache = await processHints.openPaths(under: standardizedRoot)
                                 }
-                                events = ProcessHintMatcher.annotate(events, hints: hintCache, rootPath: standardizedRoot)
+                                if let lastHintSnapshotAt,
+                                   Date().timeIntervalSince(lastHintSnapshotAt) <= Self.processHintValidity {
+                                    events = ProcessHintMatcher.annotate(events, hints: hintCache, rootPath: standardizedRoot)
+                                }
                                 session.append(
                                     events,
                                     coalescingWindow: options.isDetailedFileTimeline ? 1 : 0

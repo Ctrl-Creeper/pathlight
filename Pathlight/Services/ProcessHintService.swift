@@ -21,8 +21,8 @@ nonisolated struct LsofProcessHintService: ProcessHinting {
     private static func snapshot(rootPrefix: String) -> [String: String] {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/sbin/lsof")
-        // -F: machine-readable fields (pid, command, name); -n -l -P skip name lookups; -w drops warnings.
-        process.arguments = ["-Fpcn", "-n", "-l", "-P", "-w"]
+        // -F: machine-readable fields (pid, command, fd, name); -n -l -P skip name lookups; -w drops warnings.
+        process.arguments = ["-Fpcfn", "-n", "-l", "-P", "-w"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -36,9 +36,12 @@ nonisolated struct LsofProcessHintService: ProcessHinting {
         return parse(String(decoding: data, as: UTF8.self), rootPrefix: rootPrefix)
     }
 
-    /// Parses `lsof -F` output: `p<pid>`, `c<command>`, then `n<path>` lines.
+    /// Parses `lsof -F` output: `p<pid>`, `c<command>`, then `f<fd>`/`n<path>`
+    /// pairs. Only numeric descriptors count: `cwd`, `txt`, and `mem` entries mean
+    /// a process merely sits in or maps the folder, not that it writes there.
     nonisolated static func parse(_ output: String, rootPrefix: String) -> [String: String] {
         var command = ""
+        var isDataDescriptor = true
         var result: [String: String] = [:]
         for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let tag = line.first else { continue }
@@ -46,8 +49,10 @@ nonisolated struct LsofProcessHintService: ProcessHinting {
             switch tag {
             case "c":
                 command = value
+            case "f":
+                isDataDescriptor = value.allSatisfy(\.isNumber)
             case "n":
-                if value.hasPrefix(rootPrefix), !command.isEmpty {
+                if isDataDescriptor, value.hasPrefix(rootPrefix), !command.isEmpty {
                     result[value] = command
                 }
             default:

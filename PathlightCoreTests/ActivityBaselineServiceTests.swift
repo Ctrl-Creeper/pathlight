@@ -116,10 +116,19 @@ struct ActivityBaselineReconcilerTests {
         let previous = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 0), allocatedSize: 1_000, measuredItemCount: 10, unreadableItemCount: 0)
         let current = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 60), allocatedSize: 4_000, measuredItemCount: 13, unreadableItemCount: 0)
 
-        let event = ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: current, at: Date(timeIntervalSince1970: 60))
+        let event = ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: current)
 
         #expect(event?.kind == .aggregate)
         #expect(event?.byteDelta == 3_000)
+        #expect(event?.timestamp == current.capturedAt)
+
+        let recorded = [
+            DiskActivityEvent(kind: .created, path: root.appending(path: "a"), rootPath: root, timestamp: Date(timeIntervalSince1970: 30), byteDelta: 1_000, confidence: .confirmed, previousPath: nil, affectedItemCount: 1),
+            DiskActivityEvent(kind: .aggregate, path: root, rootPath: root, timestamp: Date(timeIntervalSince1970: 0), byteDelta: 999, confidence: .estimated, previousPath: nil, affectedItemCount: 1)
+        ]
+        let alreadyRecorded = ActivityBaselineReconciler.recordedByteDelta(in: recorded, after: previous, before: current)
+        #expect(alreadyRecorded == 1_000)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: current, recordedByteDeltaSincePrevious: alreadyRecorded)?.byteDelta == 2_000)
         #expect(event?.affectedItemCount == 3)
         #expect(event?.confidence == .estimated)
         #expect(event?.path == root)

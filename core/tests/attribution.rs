@@ -142,7 +142,7 @@ fn modifications_report_growth_and_moves_inside_root_net_out() {
     let deltas: Vec<Option<i64>> = events.iter().map(|e| e.byte_delta).collect();
     assert_eq!(
         deltas,
-        [Some(2_000), Some(5_000), Some(0), Some(5_000), Some(0)]
+        [Some(2_000), Some(5_000), Some(0), Some(5_000), Some(5_000)]
     );
     assert_eq!(events[4].confidence, Confidence::Estimated);
     assert_eq!(events[2].confidence, Confidence::Confirmed);

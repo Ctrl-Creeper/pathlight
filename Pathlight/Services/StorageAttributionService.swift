@@ -78,7 +78,7 @@ struct StorageAttributionService {
                     path: change.path,
                     rootPath: change.rootPath,
                     timestamp: change.timestamp,
-                    byteDelta: movedWithinRoot ? size - (previousKnownSize ?? size) : size,
+                    byteDelta: movedWithinRoot ? size - (previousKnownSize ?? 0) : size,
                     confidence: movedWithinRoot && previousKnownSize == nil ? .estimated : .confirmed,
                     previousPath: previousPath,
                     affectedItemCount: 1

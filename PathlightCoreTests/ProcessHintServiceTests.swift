@@ -11,11 +11,20 @@ struct ProcessHintServiceTests {
         let output = """
         p123
         cSafari
+        f12
         n/Users/example/Downloads/movie.mp4
+        ftxt
         n/Applications/Safari.app/Contents/MacOS/Safari
         p456
         cFinder
+        fcwd
+        n/Users/example/Downloads
+        f7
         n/Users/example/Downloads/Archive
+        p789
+        cTerminal
+        fcwd
+        n/Users/example/Downloads/project
         """
         let hints = LsofProcessHintService.parse(output, rootPrefix: "/Users/example/Downloads/")
 

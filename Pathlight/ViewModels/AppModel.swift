@@ -858,13 +858,23 @@ final class AppModel: ObservableObject {
                             forRootPath: target.rootPath,
                             currentTargets: self.longTermWatchTargets
                         )
-                        if let eventStore,
-                           let reconciliation = ActivityBaselineReconciler.reconciliationEvent(
-                               previous: previousBaseline,
-                               current: baseline
-                           ) {
-                            try? await eventStore.append([reconciliation])
-                            self.scheduleEventDrivenHistoryRefresh(rootPath: target.rootPath)
+                        if let eventStore, let previousBaseline {
+                            // Flush first so the rows we subtract are all on disk.
+                            await self.flushJournal()
+                            let recorded = (try? await eventStore.loadEvents(rootPath: target.rootPath, limit: 200_000)) ?? []
+                            let alreadyRecorded = ActivityBaselineReconciler.recordedByteDelta(
+                                in: recorded,
+                                after: previousBaseline,
+                                before: baseline
+                            )
+                            if let reconciliation = ActivityBaselineReconciler.reconciliationEvent(
+                                previous: previousBaseline,
+                                current: baseline,
+                                recordedByteDeltaSincePrevious: alreadyRecorded
+                            ) {
+                                try? await eventStore.append([reconciliation])
+                                self.scheduleEventDrivenHistoryRefresh(rootPath: target.rootPath)
+                            }
                         }
                     }
                     if !session.latestChanges.isEmpty {

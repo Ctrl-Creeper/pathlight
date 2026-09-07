@@ -160,7 +160,7 @@ impl<'a> Attributor<'a> {
                 match (self.size)(&change.path) {
                     Some(size) => {
                         let delta = if within_root {
-                            size - previous_known.unwrap_or(size)
+                            size - previous_known.unwrap_or(0)
                         } else {
                             size
                         };
