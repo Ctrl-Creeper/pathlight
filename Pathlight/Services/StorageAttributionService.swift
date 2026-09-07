@@ -4,17 +4,24 @@ struct StorageAttributionService {
     typealias SizeProvider = @Sendable (URL) -> Int64?
 
     private let options: DiskActivityAggregationOptions
+    /// Current allocated size; the live provider also records it for later lookups.
     private let sizeProvider: SizeProvider
+    /// Last known size of a path that just vanished; consumed on use.
     private let priorSizeProvider: SizeProvider
+    /// Last known size of a path that still exists, read before `sizeProvider`
+    /// so a modification reports growth instead of the whole file again.
+    private let knownSizeProvider: SizeProvider
 
     init(
         options: DiskActivityAggregationOptions = .default,
         sizeProvider: @escaping SizeProvider,
-        priorSizeProvider: @escaping SizeProvider = { _ in nil }
+        priorSizeProvider: @escaping SizeProvider = { _ in nil },
+        knownSizeProvider: @escaping SizeProvider = { _ in nil }
     ) {
         self.options = options
         self.sizeProvider = sizeProvider
         self.priorSizeProvider = priorSizeProvider
+        self.knownSizeProvider = knownSizeProvider
     }
 
     func process(_ changes: [DiskActivityChange]) -> [DiskActivityEvent] {
@@ -60,13 +67,22 @@ struct StorageAttributionService {
                 affectedItemCount: 1
             )
         case .renamed(let previousPath):
-            if let event = sizedEvent(
-                kind: .moved,
-                change: change,
-                confidence: .confirmed,
-                previousPath: previousPath
-            ) {
-                return event
+            // Consume the departed path's size first so a move inside the root
+            // nets to its real growth (usually zero) instead of the whole file.
+            let previousKnownSize = previousPath.flatMap(priorSizeProvider)
+            let rootPrefix = change.rootPath.standardizedFileURL.path + "/"
+            let movedWithinRoot = previousPath?.standardizedFileURL.path.hasPrefix(rootPrefix) == true
+            if let size = sizeProvider(change.path) {
+                return DiskActivityEvent(
+                    kind: .moved,
+                    path: change.path,
+                    rootPath: change.rootPath,
+                    timestamp: change.timestamp,
+                    byteDelta: movedWithinRoot ? size - (previousKnownSize ?? size) : size,
+                    confidence: movedWithinRoot && previousKnownSize == nil ? .estimated : .confirmed,
+                    previousPath: previousPath,
+                    affectedItemCount: 1
+                )
             }
             // The path vanished, so this is the departure side of a rename
             // (e.g. into the Trash). Attribute it like a deletion so moved-away
@@ -102,6 +118,7 @@ struct StorageAttributionService {
         confidence: DiskActivityEventConfidence,
         previousPath: URL? = nil
     ) -> DiskActivityEvent? {
+        let knownSize = knownSizeProvider(change.path) ?? 0
         guard let size = sizeProvider(change.path) else {
             return nil
         }
@@ -110,7 +127,7 @@ struct StorageAttributionService {
             path: change.path,
             rootPath: change.rootPath,
             timestamp: change.timestamp,
-            byteDelta: size,
+            byteDelta: size - knownSize,
             confidence: confidence,
             previousPath: previousPath,
             affectedItemCount: 1

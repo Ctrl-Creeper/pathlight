@@ -11,6 +11,7 @@ struct AppDependencies {
     var activityMonitor: any DiskActivityMonitoring
     var activitySizeProvider: StorageAttributionService.SizeProvider
     var activityPriorSizeProvider: StorageAttributionService.SizeProvider
+    var activityKnownSizeProvider: StorageAttributionService.SizeProvider
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
@@ -25,6 +26,7 @@ struct AppDependencies {
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
         activitySizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
         activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
+        activityKnownSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
         activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live(),
         longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence()
@@ -40,6 +42,7 @@ struct AppDependencies {
         self.activityMonitor = activityMonitor
         self.activitySizeProvider = activitySizeProvider
         self.activityPriorSizeProvider = activityPriorSizeProvider
+        self.activityKnownSizeProvider = activityKnownSizeProvider
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
@@ -72,6 +75,9 @@ struct AppDependencies {
             activitySizeProvider: activitySizeProvider,
             activityPriorSizeProvider: { url in
                 activitySizeIndex.takeKnownSize(for: url)
+            },
+            activityKnownSizeProvider: { url in
+                activitySizeIndex.knownSize(for: url)
             },
             activityEventStore: JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec),
             activityBaselineService: ActivityBaselineService(sizeProvider: activitySizeProvider),

@@ -25,7 +25,8 @@ struct LiveWatchSessionCoordinator: Sendable {
         monitorLatency: TimeInterval = 0.25,
         exclusionFilter: ActivityExclusionFilter? = nil,
         sizeProvider: @escaping StorageAttributionService.SizeProvider,
-        priorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
+        priorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
+        knownSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
     ) -> AsyncStream<WatchSessionModel> {
         let standardizedRoot = rootPath.standardizedFileURL
         return AsyncStream { continuation in
@@ -41,7 +42,8 @@ struct LiveWatchSessionCoordinator: Sendable {
                 let attributionService = StorageAttributionService(
                     options: options,
                     sizeProvider: sizeProvider,
-                    priorSizeProvider: priorSizeProvider
+                    priorSizeProvider: priorSizeProvider,
+                    knownSizeProvider: knownSizeProvider
                 )
                 var hintCache: [String: String] = [:]
                 var lastHintSnapshotAt: Date?
@@ -49,6 +51,7 @@ struct LiveWatchSessionCoordinator: Sendable {
                     guard !Task.isCancelled else {
                         break
                     }
+                    session.clearLatestChanges()
 
                     switch streamEvent {
                     case let .change(change, eventID):

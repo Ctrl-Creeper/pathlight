@@ -102,3 +102,49 @@ struct WatchSessionModelStormTests {
         #expect(session.events.first?.path.lastPathComponent == "file10")
     }
 }
+
+@Suite("Watch session model change tracking")
+struct WatchSessionModelChangeTrackingTests {
+    private let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+
+    private func event(_ name: String, kind: DiskActivityEventKind, at seconds: TimeInterval, delta: Int64?) -> DiskActivityEvent {
+        DiskActivityEvent(kind: kind, path: root.appending(path: name), rootPath: root, timestamp: Date(timeIntervalSince1970: seconds), byteDelta: delta, confidence: .confirmed, previousPath: nil, affectedItemCount: 1)
+    }
+
+    @Test("a merged burst keeps one identity and sums incremental deltas")
+    func mergedBurstKeepsIdentity() {
+        var session = WatchSessionModel(rootPath: root)
+        session.append([event("copy.txt", kind: .created, at: 100, delta: 100)], coalescingWindow: 1)
+        let firstID = session.latestChanges.first?.id
+        #expect(session.latestChanges.count == 1)
+
+        session.clearLatestChanges()
+        session.append([
+            event("copy.txt", kind: .modified, at: 100.5, delta: 400),
+            event("other.txt", kind: .created, at: 100.4, delta: 7)
+        ], coalescingWindow: 1)
+
+        #expect(session.events.count == 2)
+        #expect(session.latestChanges.count == 2)
+        let merged = session.latestChanges.first { $0.event.path.lastPathComponent == "copy.txt" }
+        #expect(merged?.id == firstID)
+        #expect(merged?.event.kind == .created)
+        #expect(merged?.event.byteDelta == 500)
+        #expect(session.latestChanges.contains { $0.event.path.lastPathComponent == "other.txt" && $0.id != firstID })
+
+        session.clearLatestChanges()
+        #expect(session.latestChanges.isEmpty)
+    }
+
+    @Test("an unknown-size side makes the merged delta unknown")
+    func unknownSidePoisonsMerge() {
+        var session = WatchSessionModel(rootPath: root)
+        session.append([
+            event("blob.bin", kind: .created, at: 100, delta: 10),
+            event("blob.bin", kind: .modified, at: 100.2, delta: nil)
+        ], coalescingWindow: 1)
+        #expect(session.events.count == 1)
+        #expect(session.events.first?.byteDelta == nil)
+        #expect(session.events.first?.confidence == .unknown)
+    }
+}

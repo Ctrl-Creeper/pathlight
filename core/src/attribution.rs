@@ -80,8 +80,13 @@ pub type SizeProvider<'a> = dyn Fn(&str) -> Option<i64> + Send + Sync + 'a;
 
 pub struct Attributor<'a> {
     options: AggregationOptions,
+    /// Current allocated size; the live provider also records it for later lookups.
     size: &'a SizeProvider<'a>,
+    /// Last known size of a path that just vanished; consumed on use.
     prior_size: &'a SizeProvider<'a>,
+    /// Last known size of a path that still exists, read before `size` so a
+    /// modification reports growth instead of the whole file again.
+    known_size: &'a SizeProvider<'a>,
 }
 
 impl<'a> Attributor<'a> {
@@ -89,11 +94,13 @@ impl<'a> Attributor<'a> {
         options: AggregationOptions,
         size: &'a SizeProvider<'a>,
         prior_size: &'a SizeProvider<'a>,
+        known_size: &'a SizeProvider<'a>,
     ) -> Self {
         Self {
             options,
             size,
             prior_size,
+            known_size,
         }
     }
 
@@ -122,8 +129,15 @@ impl<'a> Attributor<'a> {
             process_name: None,
         };
         let sized = |kind, previous_path: Option<String>| {
-            (self.size)(&change.path)
-                .map(|size| base(kind, Some(size), Confidence::Confirmed, previous_path))
+            let known = (self.known_size)(&change.path).unwrap_or(0);
+            (self.size)(&change.path).map(|size| {
+                base(
+                    kind,
+                    Some(size - known),
+                    Confidence::Confirmed,
+                    previous_path,
+                )
+            })
         };
         let vanished = |kind, previous_path: Option<String>| match (self.prior_size)(&change.path) {
             Some(prior) => base(kind, Some(-prior), Confidence::Estimated, previous_path),
@@ -134,10 +148,37 @@ impl<'a> Attributor<'a> {
             ChangeKind::Created => sized(EventKind::Created, None),
             ChangeKind::Modified => sized(EventKind::Modified, None),
             ChangeKind::Deleted => Some(vanished(EventKind::Deleted, None)),
-            // A rename whose destination is gone is the departure side (e.g. into
-            // the Trash); attribute it like a deletion so the bytes are not lost.
-            ChangeKind::Renamed { previous_path } => sized(EventKind::Moved, previous_path.clone())
-                .or_else(|| Some(vanished(EventKind::Moved, previous_path.clone()))),
+            // Consume the departed path's size first so a move inside the root nets
+            // to its real growth (usually zero). A rename whose destination is gone
+            // is the departure side (e.g. into the Trash); attribute it like a deletion.
+            ChangeKind::Renamed { previous_path } => {
+                let previous_known = previous_path.as_deref().and_then(|p| (self.prior_size)(p));
+                let root_prefix = format!("{}/", change.root_path.trim_end_matches('/'));
+                let within_root = previous_path
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with(&root_prefix));
+                match (self.size)(&change.path) {
+                    Some(size) => {
+                        let delta = if within_root {
+                            size - previous_known.unwrap_or(size)
+                        } else {
+                            size
+                        };
+                        let confidence = if within_root && previous_known.is_none() {
+                            Confidence::Estimated
+                        } else {
+                            Confidence::Confirmed
+                        };
+                        Some(base(
+                            EventKind::Moved,
+                            Some(delta),
+                            confidence,
+                            previous_path.clone(),
+                        ))
+                    }
+                    None => Some(vanished(EventKind::Moved, previous_path.clone())),
+                }
+            }
         }
     }
 

@@ -31,6 +31,7 @@ fn records_created_file_and_filters_below_threshold() {
         },
         &size,
         &none,
+        &none,
     );
     let events = attributor.process(&[
         change(ChangeKind::Created, "big.dmg", 1),
@@ -49,7 +50,8 @@ fn deletions_and_departed_renames_use_prior_size() {
     index.record(&format!("{ROOT}/moved.mov"), Some(99));
     let size = |_: &str| None;
     let prior = |path: &str| index.take(path);
-    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &prior);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &prior, &none);
 
     let events = attributor.process(&[
         change(ChangeKind::Deleted, "gone.zip", 1),
@@ -79,7 +81,7 @@ fn deletions_and_departed_renames_use_prior_size() {
 fn aggregates_same_parent_inside_window() {
     let size = |_: &str| Some(1024 * 1024 * 20);
     let none = |_: &str| None;
-    let attributor = Attributor::new(AggregationOptions::LONG_TERM, &size, &none);
+    let attributor = Attributor::new(AggregationOptions::LONG_TERM, &size, &none, &none);
     let events = attributor.process(&[
         change(ChangeKind::Created, "a/1.bin", 10),
         change(ChangeKind::Created, "a/2.bin", 20),
@@ -91,4 +93,57 @@ fn aggregates_same_parent_inside_window() {
     assert_eq!(events[0].affected_item_count, 2);
     assert_eq!(events[0].byte_delta, Some(2 * 1024 * 1024 * 20));
     assert_eq!(events[1].kind, EventKind::Created);
+}
+
+#[test]
+fn modifications_report_growth_and_moves_inside_root_net_out() {
+    let size = |_: &str| Some(5_000);
+    let known = |path: &str| {
+        if path.ends_with("report.pdf") {
+            Some(3_000)
+        } else {
+            None
+        }
+    };
+    let prior = |path: &str| {
+        if path.ends_with("draft.mov") {
+            Some(5_000)
+        } else {
+            None
+        }
+    };
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &prior, &known);
+
+    let events = attributor.process(&[
+        change(ChangeKind::Modified, "report.pdf", 1),
+        change(ChangeKind::Created, "fresh.txt", 2),
+        change(
+            ChangeKind::Renamed {
+                previous_path: Some(format!("{ROOT}/draft.mov")),
+            },
+            "final.mov",
+            3,
+        ),
+        change(
+            ChangeKind::Renamed {
+                previous_path: Some("/Users/example/Desktop/clip.mov".into()),
+            },
+            "clip.mov",
+            4,
+        ),
+        change(
+            ChangeKind::Renamed {
+                previous_path: Some(format!("{ROOT}/mystery.mov")),
+            },
+            "solved.mov",
+            5,
+        ),
+    ]);
+    let deltas: Vec<Option<i64>> = events.iter().map(|e| e.byte_delta).collect();
+    assert_eq!(
+        deltas,
+        [Some(2_000), Some(5_000), Some(0), Some(5_000), Some(0)]
+    );
+    assert_eq!(events[4].confidence, Confidence::Estimated);
+    assert_eq!(events[2].confidence, Confidence::Confirmed);
 }

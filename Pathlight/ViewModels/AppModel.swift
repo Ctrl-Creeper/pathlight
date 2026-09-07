@@ -53,6 +53,16 @@ final class AppModel: ObservableObject {
     private var longTermWatchBaselineTaskID: UUID?
     private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
     private var longTermWatchTaskIDs: [LongTermWatchTarget.ID: UUID] = [:]
+    private var pendingJournalEvents: [UUID: DiskActivityEvent] = [:]
+    private var pendingJournalOrder: [UUID] = []
+    private var pendingJournalRoots: Set<String> = []
+    private var pendingJournalSince: Date?
+    private var journalFlushTask: Task<Void, Never>?
+    /// Rows wait until the live-monitor coalescing window (1 s) has closed so a
+    /// created+modified burst lands in the journal as one final row.
+    private static let journalFlushDelay: TimeInterval = 1.2
+    /// A never-quiet file still gets persisted at least this often.
+    private static let journalFlushMaxWait: TimeInterval = 5
 
     init(dependencies: AppDependencies = .live()) {
         self.dependencies = dependencies
@@ -84,6 +94,7 @@ final class AppModel: ObservableObject {
 
     func cleanup() {
         persistActivityStoragePreferences(currentActivityStoragePreferences)
+        flushJournalNow()
         fullDiskAccessRefreshTask?.cancel()
         fullDiskAccessRefreshTask = nil
         stopShortTermWatch()
@@ -259,6 +270,7 @@ final class AppModel: ObservableObject {
         )
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
+        let knownSizeProvider = dependencies.activityKnownSizeProvider
         let baselineService = dependencies.activityBaselineService
 
         liveWatchBaselineTask = Task.detached {
@@ -278,38 +290,95 @@ final class AppModel: ObservableObject {
                 rootPath: rootPath,
                 options: options,
                 sizeProvider: sizeProvider,
-                priorSizeProvider: priorSizeProvider
+                priorSizeProvider: priorSizeProvider,
+                knownSizeProvider: knownSizeProvider
             )
-            var persistedEventCount = 0
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
                     break
                 }
                 self.liveWatchSession = session
-                if session.events.count > persistedEventCount {
-                    let newEvents = Array(session.events[persistedEventCount...])
-                    persistedEventCount = session.events.count
-                    if let activityEventStore = self.dependencies.activityEventStore {
-                        do {
-                            try await activityEventStore.append(newEvents)
-                            self.applyActivityStoragePolicy()
-                            self.scheduleEventDrivenHistoryRefresh(rootPath: session.rootPath)
-                        } catch {
-                            // A failed journal write should not interrupt the live watch session.
-                        }
-                    }
-                }
+                self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
             }
         }
     }
 
     func stopShortTermWatch() {
+        flushJournalNow()
         liveWatchTask?.cancel()
         liveWatchTask = nil
         liveWatchTaskID = nil
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
         liveWatchSession = nil
+    }
+
+    // MARK: - Journal persistence
+
+    /// Buffers changed events by their session identity and flushes once the
+    /// coalescing window has closed, so merged bursts are written once, as the
+    /// final merged row, and never re-written after a later merge.
+    private func enqueueForJournal(_ changes: [WatchSessionModel.ChangedEvent], rootPath: URL) {
+        guard dependencies.activityEventStore != nil, !changes.isEmpty else {
+            return
+        }
+        let now = Date()
+        for change in changes {
+            if pendingJournalEvents[change.id] == nil {
+                pendingJournalOrder.append(change.id)
+            }
+            pendingJournalEvents[change.id] = change.event
+        }
+        pendingJournalRoots.insert(rootPath.standardizedFileURL.path)
+        let since = pendingJournalSince ?? now
+        pendingJournalSince = since
+        let remainingMaxWait = max(0, Self.journalFlushMaxWait - now.timeIntervalSince(since))
+        let delay = min(Self.journalFlushDelay, remainingMaxWait)
+
+        journalFlushTask?.cancel()
+        journalFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay * 1_000)))
+            guard let self, !Task.isCancelled else { return }
+            self.journalFlushTask = nil
+            await self.flushJournal()
+        }
+    }
+
+    private func takePendingJournalBatch() -> (events: [DiskActivityEvent], roots: Set<String>) {
+        journalFlushTask?.cancel()
+        journalFlushTask = nil
+        let events = pendingJournalOrder.compactMap { pendingJournalEvents[$0] }
+        let roots = pendingJournalRoots
+        pendingJournalEvents.removeAll()
+        pendingJournalOrder.removeAll()
+        pendingJournalRoots.removeAll()
+        pendingJournalSince = nil
+        return (events, roots)
+    }
+
+    private func flushJournal() async {
+        guard let store = dependencies.activityEventStore else { return }
+        let batch = takePendingJournalBatch()
+        guard !batch.events.isEmpty else { return }
+        do {
+            try await store.append(batch.events)
+            applyActivityStoragePolicy()
+            for root in batch.roots {
+                scheduleEventDrivenHistoryRefresh(rootPath: URL(filePath: root, directoryHint: .isDirectory))
+            }
+        } catch {
+            // A failed journal write should not interrupt monitoring.
+        }
+    }
+
+    /// Fire-and-forget flush for stop paths and deinit, where awaiting is not possible.
+    private func flushJournalNow() {
+        guard let store = dependencies.activityEventStore else { return }
+        let batch = takePendingJournalBatch()
+        guard !batch.events.isEmpty else { return }
+        Task {
+            try? await store.append(batch.events)
+        }
     }
 
     // Reloading history reads the whole journal, so event-driven refreshes are
@@ -729,9 +798,9 @@ final class AppModel: ObservableObject {
                         rootPath: currentTarget.rootPath
                     ),
                     sizeProvider: sizeProvider,
-                    priorSizeProvider: priorSizeProvider
+                    priorSizeProvider: priorSizeProvider,
+                    knownSizeProvider: self.dependencies.activityKnownSizeProvider
                 )
-                var persistedEventCount = 0
                 var didCaptureGapBaseline = false
                 var isInitialSessionYield = true
                 for await session in stream {
@@ -798,24 +867,14 @@ final class AppModel: ObservableObject {
                             self.scheduleEventDrivenHistoryRefresh(rootPath: target.rootPath)
                         }
                     }
-                    if session.events.count > persistedEventCount {
-                        let newEvents = Array(session.events[persistedEventCount...])
-                        persistedEventCount = session.events.count
+                    if !session.latestChanges.isEmpty {
                         self.updateLongTermWatchRuntimeStatus(
                             targetID: target.id,
                             state: runtimeState,
-                            lastActivityAt: newEvents.map(\.timestamp).max(),
+                            lastActivityAt: session.latestChanges.map(\.event.timestamp).max(),
                             retryCount: retryCount
                         )
-                        if let eventStore {
-                            do {
-                                try await eventStore.append(newEvents)
-                                self.applyActivityStoragePolicy()
-                                self.scheduleEventDrivenHistoryRefresh(rootPath: session.rootPath)
-                            } catch {
-                                // A failed journal write should not interrupt long-term monitoring.
-                            }
-                        }
+                        self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
                     }
                 }
 
@@ -836,6 +895,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopLongTermWatch(targetID: LongTermWatchTarget.ID) {
+        flushJournalNow()
         longTermWatchTasks[targetID]?.cancel()
         longTermWatchTasks[targetID] = nil
         longTermWatchTaskIDs[targetID] = nil

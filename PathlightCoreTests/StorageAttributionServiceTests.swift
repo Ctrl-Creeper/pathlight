@@ -180,3 +180,44 @@ struct StorageAttributionServiceTests {
         #expect(events.first?.affectedItemCount == 3)
     }
 }
+
+@Suite("Storage attribution increments")
+struct StorageAttributionIncrementTests {
+    private let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+
+    @Test("a modification reports growth since the last known size")
+    func modificationReportsGrowth() {
+        let file = root.appending(path: "report.pdf")
+        let service = StorageAttributionService(
+            options: .shortTermDefault,
+            sizeProvider: { _ in 5_000 },
+            knownSizeProvider: { url in url.path == file.path ? 3_000 : nil }
+        )
+        let events = service.process([
+            DiskActivityChange(kind: .modified, path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 10)),
+            DiskActivityChange(kind: .created, path: root.appending(path: "fresh.txt"), rootPath: root, timestamp: Date(timeIntervalSince1970: 11))
+        ])
+        #expect(events.map(\.byteDelta) == [2_000, 5_000])
+    }
+
+    @Test("a move inside the root nets to growth, a move in from outside counts fully")
+    func movesInsideAndIntoRoot() {
+        let destination = root.appending(path: "final.mov")
+        let previousInside = root.appending(path: "draft.mov")
+        let previousOutside = URL(filePath: "/Users/example/Desktop/clip.mov")
+        let service = StorageAttributionService(
+            options: .shortTermDefault,
+            sizeProvider: { _ in 9_000 },
+            priorSizeProvider: { url in
+                url.path == previousInside.path ? 9_000 : nil
+            }
+        )
+        let events = service.process([
+            DiskActivityChange(kind: .renamed(previousPath: previousInside), path: destination, rootPath: root, timestamp: Date(timeIntervalSince1970: 10)),
+            DiskActivityChange(kind: .renamed(previousPath: previousOutside), path: destination, rootPath: root, timestamp: Date(timeIntervalSince1970: 11)),
+            DiskActivityChange(kind: .renamed(previousPath: root.appending(path: "unknown.mov")), path: destination, rootPath: root, timestamp: Date(timeIntervalSince1970: 12))
+        ])
+        #expect(events.map(\.byteDelta) == [0, 9_000, 0])
+        #expect(events.map(\.confidence) == [.confirmed, .confirmed, .estimated])
+    }
+}

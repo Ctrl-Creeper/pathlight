@@ -2,7 +2,7 @@
 //! are the kernel's own and `since_event_id` resumes across relaunches.
 //! Flag mapping mirrors Swift's `FSEventsChangeMapper`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
 use std::ptr;
@@ -384,14 +384,16 @@ impl FsState {
     fn handle(&self, batch: Vec<RawEvent>) {
         let now = Instant::now();
         let mut departures: HashMap<u64, String> = HashMap::new();
+        let mut arrivals: HashSet<u64> = HashSet::new();
         for event in &batch {
-            if let (true, Some(inode)) = (
-                is_rename(event.flags) && !Path::new(&event.path).exists(),
-                event.inode,
-            ) {
-                departures
-                    .entry(inode)
-                    .or_insert_with(|| event.path.clone());
+            if let (true, Some(inode)) = (is_rename(event.flags), event.inode) {
+                if Path::new(&event.path).exists() {
+                    arrivals.insert(inode);
+                } else {
+                    departures
+                        .entry(inode)
+                        .or_insert_with(|| event.path.clone());
+                }
             }
         }
 
@@ -426,6 +428,9 @@ impl FsState {
                             .cloned()
                             .or_else(|| pending.remove(&inode).map(|(path, _)| path)),
                     },
+                    // The arrival in this batch carries `previous_path`, so one
+                    // user-visible rename produces one row instead of two.
+                    (false, Some(inode)) if arrivals.contains(&inode) => continue,
                     (false, Some(inode)) => {
                         pending.insert(inode, (event.path.clone(), now));
                         ChangeKind::Renamed {

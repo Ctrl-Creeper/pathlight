@@ -7,15 +7,26 @@ nonisolated enum WatchSessionHistoryState: Equatable, Sendable {
 }
 
 nonisolated struct WatchSessionModel: Equatable, Sendable {
+    /// An event plus a session-local identity that survives coalescing, so a
+    /// consumer can persist the final merged version exactly once.
+    struct ChangedEvent: Equatable, Sendable {
+        let id: UUID
+        let event: DiskActivityEvent
+    }
+
     let id: UUID
     let rootPath: URL
     let startedAt: Date
     private(set) var events: [DiskActivityEvent]
+    private var eventIDs: [UUID]
     private(set) var lastObservedEventID: UInt64?
     private(set) var historyState: WatchSessionHistoryState
     /// Oldest events dropped once `maxRetainedEvents` is exceeded, so a storm
     /// cannot grow memory without bound.
     private(set) var droppedEventCount = 0
+    /// Events appended or merged by the most recent `append`; cleared by the
+    /// coordinator before each stream event so consumers only see real changes.
+    private(set) var latestChanges: [ChangedEvent] = []
 
     // ponytail: fixed cap; make it an option if someone needs longer live scrollback.
     static let maxRetainedEvents = 5_000
@@ -32,6 +43,7 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
         self.rootPath = rootPath
         self.startedAt = startedAt
         self.events = events
+        self.eventIDs = events.map { _ in UUID() }
         self.lastObservedEventID = lastObservedEventID
         self.historyState = historyState
     }
@@ -40,33 +52,57 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
         _ newEvents: [DiskActivityEvent],
         coalescingWindow: TimeInterval = 0
     ) {
+        var changed: [UUID: DiskActivityEvent] = [:]
+        var order: [UUID] = []
         for event in newEvents {
-            guard coalescingWindow > 0,
-                  let index = events.lastIndex(where: { existing in
-                      existing.rootPath.standardizedFileURL == event.rootPath.standardizedFileURL &&
-                          existing.path.standardizedFileURL == event.path.standardizedFileURL &&
-                          event.timestamp.timeIntervalSince(existing.timestamp) <= coalescingWindow &&
-                          event.timestamp >= existing.timestamp
-                  }),
-                  let mergedEvent = Self.merge(events[index], with: event) else {
+            if coalescingWindow > 0,
+               let index = events.lastIndex(where: { existing in
+                   existing.rootPath.standardizedFileURL == event.rootPath.standardizedFileURL &&
+                       existing.path.standardizedFileURL == event.path.standardizedFileURL &&
+                       event.timestamp.timeIntervalSince(existing.timestamp) <= coalescingWindow &&
+                       event.timestamp >= existing.timestamp
+               }),
+               let mergedEvent = Self.merge(events[index], with: event) {
+                events[index] = mergedEvent
+                let id = eventIDs[index]
+                if changed[id] == nil {
+                    order.append(id)
+                }
+                changed[id] = mergedEvent
+            } else {
+                let id = UUID()
                 events.append(event)
-                continue
+                eventIDs.append(id)
+                order.append(id)
+                changed[id] = event
             }
-            events[index] = mergedEvent
         }
-        events.sort { lhs, rhs in
-            if lhs.timestamp == rhs.timestamp {
-                return lhs.path.path < rhs.path.path
+
+        var pairs = Array(zip(events, eventIDs))
+        pairs.sort { lhs, rhs in
+            if lhs.0.timestamp == rhs.0.timestamp {
+                return lhs.0.path.path < rhs.0.path.path
             }
-            return lhs.timestamp < rhs.timestamp
+            return lhs.0.timestamp < rhs.0.timestamp
         }
-        let overflow = events.count - Self.maxRetainedEvents
+        let overflow = pairs.count - Self.maxRetainedEvents
         if overflow > 0 {
-            events.removeFirst(overflow)
+            pairs.removeFirst(overflow)
             droppedEventCount += overflow
+        }
+        events = pairs.map(\.0)
+        eventIDs = pairs.map(\.1)
+        latestChanges = order.compactMap { id in
+            changed[id].map { ChangedEvent(id: id, event: $0) }
         }
     }
 
+    mutating func clearLatestChanges() {
+        latestChanges = []
+    }
+
+    /// Deltas are incremental (a modification reports growth since the last
+    /// known size), so a merged burst sums them; an unknown side poisons the sum.
     private static func merge(
         _ existing: DiskActivityEvent,
         with incoming: DiskActivityEvent
@@ -81,13 +117,28 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
             return nil
         }
 
+        let byteDelta: Int64?
+        if let existingDelta = existing.byteDelta, let incomingDelta = incoming.byteDelta {
+            byteDelta = existingDelta + incomingDelta
+        } else {
+            byteDelta = nil
+        }
+        let confidence: DiskActivityEventConfidence
+        if byteDelta == nil {
+            confidence = .unknown
+        } else if existing.confidence == .confirmed, incoming.confidence == .confirmed {
+            confidence = .confirmed
+        } else {
+            confidence = .estimated
+        }
+
         return DiskActivityEvent(
             kind: kind,
             path: incoming.path,
             rootPath: incoming.rootPath,
             timestamp: incoming.timestamp,
-            byteDelta: incoming.byteDelta ?? existing.byteDelta,
-            confidence: incoming.byteDelta == nil ? existing.confidence : incoming.confidence,
+            byteDelta: byteDelta,
+            confidence: confidence,
             previousPath: incoming.previousPath ?? existing.previousPath,
             affectedItemCount: max(existing.affectedItemCount, incoming.affectedItemCount),
             processName: incoming.processName ?? existing.processName
