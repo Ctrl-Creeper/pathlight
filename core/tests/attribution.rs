@@ -147,3 +147,52 @@ fn modifications_report_growth_and_moves_inside_root_net_out() {
     assert_eq!(events[4].confidence, Confidence::Estimated);
     assert_eq!(events[2].confidence, Confidence::Confirmed);
 }
+
+#[test]
+fn small_deletions_survive_the_size_threshold() {
+    // A long-term watch filters small *writes* as noise, but a hundred tiny
+    // files vanishing is the exact event the threshold exists to surface.
+    let prior = |_: &str| Some(4_096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 10 * 1024 * 1024,
+            ..AggregationOptions::SHORT_TERM
+        },
+        &none,
+        &prior,
+        &none,
+    );
+    let events = attributor.process(&[
+        change(ChangeKind::Deleted, "a.txt", 1),
+        change(ChangeKind::Deleted, "b.txt", 2),
+    ]);
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|e| e.byte_delta == Some(-4_096)));
+}
+
+#[test]
+fn aggregated_small_writes_are_judged_as_one_change() {
+    // Individually each write is under the threshold; together they are not,
+    // so filtering after aggregation keeps the folder-level total.
+    let size = |_: &str| Some(600);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 1_000,
+            aggregation_window_secs: 300,
+            records_file_names: false,
+        },
+        &size,
+        &none,
+        &none,
+    );
+    let events = attributor.process(&[
+        change(ChangeKind::Created, "a.txt", 1),
+        change(ChangeKind::Created, "b.txt", 2),
+    ]);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Aggregate);
+    assert_eq!(events[0].byte_delta, Some(1_200));
+    assert_eq!(events[0].affected_item_count, 2);
+}

@@ -220,4 +220,52 @@ struct StorageAttributionIncrementTests {
         #expect(events.map(\.byteDelta) == [0, 9_000, 9_000])
         #expect(events.map(\.confidence) == [.confirmed, .confirmed, .estimated])
     }
+
+    @Test("keeps small deletions despite the size threshold")
+    func keepsSmallDeletionsDespiteThreshold() {
+        // A long-term watch filters small *writes* as noise, but a hundred tiny
+        // files vanishing is the exact event the threshold exists to surface.
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 10 * 1_024 * 1_024,
+                aggregationWindow: 0,
+                longTermRecordsFileNames: true
+            ),
+            sizeProvider: { _ in nil },
+            priorSizeProvider: { _ in 4_096 }
+        )
+
+        let events = service.process([
+            DiskActivityChange(kind: .deleted, path: root.appending(path: "a.txt"), rootPath: root, timestamp: Date(timeIntervalSince1970: 100)),
+            DiskActivityChange(kind: .deleted, path: root.appending(path: "b.txt"), rootPath: root, timestamp: Date(timeIntervalSince1970: 101))
+        ])
+
+        #expect(events.map(\.byteDelta) == [-4_096, -4_096])
+    }
+
+    @Test("judges aggregated small writes as one change")
+    func judgesAggregatedSmallWritesAsOneChange() {
+        // Each write alone is under the threshold; together they are not, so
+        // filtering after aggregation keeps the folder-level total.
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 1_000,
+                aggregationWindow: 300,
+                longTermRecordsFileNames: false
+            ),
+            sizeProvider: { _ in 600 }
+        )
+
+        let events = service.process([
+            DiskActivityChange(kind: .created, path: root.appending(path: "a.txt"), rootPath: root, timestamp: Date(timeIntervalSince1970: 100)),
+            DiskActivityChange(kind: .created, path: root.appending(path: "b.txt"), rootPath: root, timestamp: Date(timeIntervalSince1970: 101))
+        ])
+
+        #expect(events.count == 1)
+        #expect(events.first?.kind == .aggregate)
+        #expect(events.first?.byteDelta == 1_200)
+        #expect(events.first?.affectedItemCount == 2)
+    }
 }

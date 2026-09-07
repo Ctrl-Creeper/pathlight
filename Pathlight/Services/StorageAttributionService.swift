@@ -25,16 +25,17 @@ struct StorageAttributionService {
     }
 
     func process(_ changes: [DiskActivityChange]) -> [DiskActivityEvent] {
-        let events: [DiskActivityEvent] = changes.compactMap { change in
-            guard let event = event(for: change) else {
-                return nil
-            }
-            guard let byteDelta = event.byteDelta else {
-                return event
-            }
-            return abs(byteDelta) >= options.minimumRecordedByteDelta ? event : nil
+        return aggregate(changes.compactMap(event(for:))).filter(isRecordable)
+    }
+
+    /// The size filter runs *after* aggregation so a folder's worth of small
+    /// changes is judged as one change, and removals skip it entirely: wiping a
+    /// thousand tiny files is the thing a threshold should surface, not hide.
+    private func isRecordable(_ event: DiskActivityEvent) -> Bool {
+        guard let byteDelta = event.byteDelta else {
+            return true
         }
-        return aggregate(events)
+        return byteDelta < 0 || event.kind == .deleted || byteDelta >= options.minimumRecordedByteDelta
     }
 
     private func event(for change: DiskActivityChange) -> DiskActivityEvent? {

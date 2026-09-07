@@ -108,12 +108,24 @@ impl<'a> Attributor<'a> {
         let events: Vec<ActivityEvent> = changes
             .iter()
             .filter_map(|change| self.event_for(change))
-            .filter(|event| match event.byte_delta {
-                Some(delta) => delta.abs() >= self.options.minimum_recorded_byte_delta,
-                None => true,
-            })
             .collect();
-        self.aggregate(events)
+        let mut events = self.aggregate(events);
+        events.retain(|event| self.is_recordable(event));
+        events
+    }
+
+    /// The size filter runs *after* aggregation so a folder's worth of small
+    /// changes is judged as one change, and removals skip it entirely: wiping a
+    /// thousand tiny files is the thing a threshold should surface, not hide.
+    fn is_recordable(&self, event: &ActivityEvent) -> bool {
+        match event.byte_delta {
+            Some(delta) => {
+                delta < 0
+                    || matches!(event.kind, EventKind::Deleted)
+                    || delta >= self.options.minimum_recorded_byte_delta
+            }
+            None => true,
+        }
     }
 
     fn event_for(&self, change: &Change) -> Option<ActivityEvent> {
