@@ -519,6 +519,30 @@ fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -824,6 +848,11 @@ public protocol JournalProtocol: AnyObject, Sendable {
      */
     func load(rootPath: String, limit: UInt32) throws  -> [ActivityEvent]
     
+    /**
+     * Dashboard history for one root: buckets, totals, and the newest rows.
+     */
+    func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64) throws  -> HistorySnapshot
+    
 }
 open class Journal: JournalProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -909,6 +938,21 @@ open func load(rootPath: String, limit: UInt32)throws  -> [ActivityEvent]  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(rootPath),
         FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Dashboard history for one root: buckets, totals, and the newest rows.
+     */
+open func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64)throws  -> HistorySnapshot  {
+    return try  FfiConverterTypeHistorySnapshot_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_journal_load_history(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(rootPath),
+        FfiConverterUInt32.lower(limit),
+        FfiConverterUInt64.lower(bucketIntervalSecs),uniffiCallStatus
     )
 })
 }
@@ -1020,14 +1064,18 @@ open class Watcher: WatcherProtocol, @unchecked Sendable {
 
     
     /**
-     * Starts watching `root_path` recursively. `latency_ms` is the coalescing
-     * window handed to the kernel backend where supported (FSEvents).
+     * Starts watching `root_path` recursively.
+     *
+     * `since_event_id` resumes from a previous cursor where the platform supports
+     * it (FSEvents); elsewhere a `RequiresRescan` is emitted so the host
+     * re-baselines. `latency_ms` is the coalescing window handed to the kernel.
      */
-public static func start(rootPath: String, latencyMs: UInt64, listener: ActivityListener)throws  -> Watcher  {
+public static func start(rootPath: String, sinceEventId: UInt64?, latencyMs: UInt64, listener: ActivityListener)throws  -> Watcher  {
     return try  FfiConverterTypeWatcher_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
     uniffi_pathlight_core_fn_constructor_watcher_start(
         FfiConverterString.lower(rootPath),
+        FfiConverterOptionUInt64.lower(sinceEventId),
         FfiConverterUInt64.lower(latencyMs),
         FfiConverterTypeActivityListener_lower(listener),uniffiCallStatus
     )
@@ -1174,6 +1222,82 @@ public func FfiConverterTypeActivityEvent_lower(_ value: ActivityEvent) -> RustB
 }
 
 
+public struct AggregationOptions: Equatable, Hashable {
+    /**
+     * Events whose |delta| is below this are dropped (unknown-size events pass).
+     */
+    public var minimumRecordedByteDelta: Int64
+    /**
+     * Seconds; 0 disables grouping into `Aggregate` rows.
+     */
+    public var aggregationWindowSecs: UInt64
+    /**
+     * When true, individual file rows are kept (no aggregation).
+     */
+    public var recordsFileNames: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Events whose |delta| is below this are dropped (unknown-size events pass).
+         */minimumRecordedByteDelta: Int64, 
+        /**
+         * Seconds; 0 disables grouping into `Aggregate` rows.
+         */aggregationWindowSecs: UInt64, 
+        /**
+         * When true, individual file rows are kept (no aggregation).
+         */recordsFileNames: Bool) {
+        self.minimumRecordedByteDelta = minimumRecordedByteDelta
+        self.aggregationWindowSecs = aggregationWindowSecs
+        self.recordsFileNames = recordsFileNames
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AggregationOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAggregationOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AggregationOptions {
+        return
+            try AggregationOptions(
+                minimumRecordedByteDelta: FfiConverterInt64.read(from: &buf), 
+                aggregationWindowSecs: FfiConverterUInt64.read(from: &buf), 
+                recordsFileNames: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AggregationOptions, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.minimumRecordedByteDelta, into: &buf)
+        FfiConverterUInt64.write(value.aggregationWindowSecs, into: &buf)
+        FfiConverterBool.write(value.recordsFileNames, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAggregationOptions_lift(_ buf: RustBuffer) throws -> AggregationOptions {
+    return try FfiConverterTypeAggregationOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAggregationOptions_lower(_ value: AggregationOptions) -> RustBuffer {
+    return FfiConverterTypeAggregationOptions.lower(value)
+}
+
+
 public struct Change: Equatable, Hashable {
     public var kind: ChangeKind
     public var path: String
@@ -1233,6 +1357,152 @@ public func FfiConverterTypeChange_lift(_ buf: RustBuffer) throws -> Change {
 #endif
 public func FfiConverterTypeChange_lower(_ value: Change) -> RustBuffer {
     return FfiConverterTypeChange.lower(value)
+}
+
+
+public struct HistoryBucket: Equatable, Hashable {
+    public var start: Date
+    public var end: Date
+    public var byteDelta: Int64
+    public var eventCount: UInt32
+    public var unknownSizeEventCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(start: Date, end: Date, byteDelta: Int64, eventCount: UInt32, unknownSizeEventCount: UInt32) {
+        self.start = start
+        self.end = end
+        self.byteDelta = byteDelta
+        self.eventCount = eventCount
+        self.unknownSizeEventCount = unknownSizeEventCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HistoryBucket: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoryBucket: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoryBucket {
+        return
+            try HistoryBucket(
+                start: FfiConverterTimestamp.read(from: &buf), 
+                end: FfiConverterTimestamp.read(from: &buf), 
+                byteDelta: FfiConverterInt64.read(from: &buf), 
+                eventCount: FfiConverterUInt32.read(from: &buf), 
+                unknownSizeEventCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoryBucket, into buf: inout [UInt8]) {
+        FfiConverterTimestamp.write(value.start, into: &buf)
+        FfiConverterTimestamp.write(value.end, into: &buf)
+        FfiConverterInt64.write(value.byteDelta, into: &buf)
+        FfiConverterUInt32.write(value.eventCount, into: &buf)
+        FfiConverterUInt32.write(value.unknownSizeEventCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryBucket_lift(_ buf: RustBuffer) throws -> HistoryBucket {
+    return try FfiConverterTypeHistoryBucket.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryBucket_lower(_ value: HistoryBucket) -> RustBuffer {
+    return FfiConverterTypeHistoryBucket.lower(value)
+}
+
+
+public struct HistorySnapshot: Equatable, Hashable {
+    public var rootPath: String
+    public var generatedAt: Date
+    public var totalNetByteDelta: Int64
+    public var eventCount: UInt32
+    public var unknownSizeEventCount: UInt32
+    public var buckets: [HistoryBucket]
+    /**
+     * Newest first.
+     */
+    public var recentEvents: [ActivityEvent]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rootPath: String, generatedAt: Date, totalNetByteDelta: Int64, eventCount: UInt32, unknownSizeEventCount: UInt32, buckets: [HistoryBucket], 
+        /**
+         * Newest first.
+         */recentEvents: [ActivityEvent]) {
+        self.rootPath = rootPath
+        self.generatedAt = generatedAt
+        self.totalNetByteDelta = totalNetByteDelta
+        self.eventCount = eventCount
+        self.unknownSizeEventCount = unknownSizeEventCount
+        self.buckets = buckets
+        self.recentEvents = recentEvents
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HistorySnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistorySnapshot {
+        return
+            try HistorySnapshot(
+                rootPath: FfiConverterString.read(from: &buf), 
+                generatedAt: FfiConverterTimestamp.read(from: &buf), 
+                totalNetByteDelta: FfiConverterInt64.read(from: &buf), 
+                eventCount: FfiConverterUInt32.read(from: &buf), 
+                unknownSizeEventCount: FfiConverterUInt32.read(from: &buf), 
+                buckets: FfiConverterSequenceTypeHistoryBucket.read(from: &buf), 
+                recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistorySnapshot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.rootPath, into: &buf)
+        FfiConverterTimestamp.write(value.generatedAt, into: &buf)
+        FfiConverterInt64.write(value.totalNetByteDelta, into: &buf)
+        FfiConverterUInt32.write(value.eventCount, into: &buf)
+        FfiConverterUInt32.write(value.unknownSizeEventCount, into: &buf)
+        FfiConverterSequenceTypeHistoryBucket.write(value.buckets, into: &buf)
+        FfiConverterSequenceTypeActivityEvent.write(value.recentEvents, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistorySnapshot_lift(_ buf: RustBuffer) throws -> HistorySnapshot {
+    return try FfiConverterTypeHistorySnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistorySnapshot_lower(_ value: HistorySnapshot) -> RustBuffer {
+    return FfiConverterTypeHistorySnapshot.lower(value)
 }
 
 
@@ -1659,6 +1929,30 @@ public func FfiConverterTypeStreamEvent_lower(_ value: StreamEvent) -> RustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
     typealias SwiftType = Int64?
 
@@ -1728,6 +2022,31 @@ fileprivate struct FfiConverterSequenceTypeActivityEvent: FfiConverterRustBuffer
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHistoryBucket: FfiConverterRustBuffer {
+    typealias SwiftType = [HistoryBucket]
+
+    public static func write(_ value: [HistoryBucket], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHistoryBucket.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HistoryBucket] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HistoryBucket]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHistoryBucket.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Crate version, handy for proving the host actually linked this library.
  */
@@ -1763,6 +2082,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_journal_load() != 33495) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_method_journal_load_history() != 30952) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_method_activitylistener_on_event() != 31555) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1772,7 +2094,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_constructor_journal_new() != 12772) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 53417) {
+    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 54333) {
         return InitializationResult.apiChecksumMismatch
     }
 

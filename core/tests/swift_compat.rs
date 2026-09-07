@@ -24,7 +24,10 @@ fn parses_swift_written_rows() {
     assert_eq!(moved.kind, EventKind::Moved);
     assert_eq!(moved.path, "/Users/example/Downloads/b.dmg");
     assert_eq!(moved.root_path, "/Users/example/Downloads");
-    assert_eq!(moved.previous_path.as_deref(), Some("/Users/example/Downloads/a.dmg"));
+    assert_eq!(
+        moved.previous_path.as_deref(),
+        Some("/Users/example/Downloads/a.dmg")
+    );
     assert_eq!(moved.byte_delta, Some(-4096));
     assert_eq!(moved.confidence, Confidence::Estimated);
     assert_eq!(moved.timestamp, unix(1_757_226_000));
@@ -60,11 +63,17 @@ fn encodes_spaces_like_swift_urls() {
         affected_item_count: 1,
     };
     let json: Value = serde_json::from_str(&event.to_json_line().unwrap()).unwrap();
-    assert_eq!(json["path"], "file:///Users/me/My%20Files/report%20final.pdf");
+    assert_eq!(
+        json["path"],
+        "file:///Users/me/My%20Files/report%20final.pdf"
+    );
     assert_eq!(json["rootPath"], "file:///Users/me/My%20Files/");
     assert_eq!(json["kind"], serde_json::json!({"created": {}}));
     assert!(json.get("byteDelta").is_some() && json.get("previousPath").is_none());
-    assert_eq!(ActivityEvent::from_json_line(&event.to_json_line().unwrap()).unwrap(), event);
+    assert_eq!(
+        ActivityEvent::from_json_line(&event.to_json_line().unwrap()).unwrap(),
+        event
+    );
 }
 
 #[test]
@@ -84,8 +93,12 @@ fn journal_round_trips_and_orders_newest_first() {
         previous_path: None,
         affected_item_count: 1,
     };
-    journal.append(vec![make("old.txt", 100), make("new.txt", 200)]).unwrap();
-    journal.append(vec![make("other-root.txt", 300).with_root("/elsewhere")]).unwrap();
+    journal
+        .append(vec![make("old.txt", 100), make("new.txt", 200)])
+        .unwrap();
+    journal
+        .append(vec![make("other-root.txt", 300).with_root("/elsewhere")])
+        .unwrap();
 
     // Swift-written and encrypted rows coexist in the same file.
     let mut contents = std::fs::read_to_string(&journal_path).unwrap();
@@ -108,7 +121,11 @@ fn journal_round_trips_and_orders_newest_first() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&journal_path).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&journal_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
     }
 }

@@ -21,7 +21,9 @@ pub struct Journal {
 impl Journal {
     #[uniffi::constructor]
     pub fn new(path: String) -> Arc<Self> {
-        Arc::new(Self { path: PathBuf::from(path) })
+        Arc::new(Self {
+            path: PathBuf::from(path),
+        })
     }
 
     /// Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
@@ -41,7 +43,10 @@ impl Journal {
             payload.push('\n');
         }
 
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         set_permissions(&self.path, 0o600)?;
         file.write_all(payload.as_bytes())?;
         Ok(())
@@ -69,6 +74,22 @@ impl Journal {
         });
         events.truncate(limit as usize);
         Ok(events)
+    }
+
+    /// Dashboard history for one root: buckets, totals, and the newest rows.
+    pub fn load_history(
+        &self,
+        root_path: String,
+        limit: u32,
+        bucket_interval_secs: u64,
+    ) -> Result<crate::HistorySnapshot, CoreError> {
+        let events = self.load(root_path.clone(), limit)?;
+        Ok(crate::history::build_history(
+            &root_path,
+            events,
+            bucket_interval_secs,
+            std::time::SystemTime::now(),
+        ))
     }
 }
 

@@ -60,7 +60,11 @@ pub struct ActivityEvent {
     pub byte_delta: Option<i64>,
     #[serde(with = "swift_case::confidence")]
     pub confidence: Confidence,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "file_url::opt_path")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "file_url::opt_path"
+    )]
     pub previous_path: Option<String>,
     pub affected_item_count: u32,
 }
@@ -112,7 +116,9 @@ mod swift_case {
         map.end()
     }
 
-    pub fn deserialize_case<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    pub fn deserialize_case<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<String, D::Error> {
         let map: BTreeMap<String, Empty> = BTreeMap::deserialize(deserializer)?;
         map.into_keys()
             .next()
@@ -125,7 +131,10 @@ mod swift_case {
                 use serde::de::Error as _;
                 use serde::{Deserializer, Serializer};
 
-                pub fn serialize<S: Serializer>(value: &$type, serializer: S) -> Result<S::Ok, S::Error> {
+                pub fn serialize<S: Serializer>(
+                    value: &$type,
+                    serializer: S,
+                ) -> Result<S::Ok, S::Error> {
                     let name = <$type>::CASES
                         .iter()
                         .find(|(case, _)| case == value)
@@ -134,7 +143,9 @@ mod swift_case {
                     super::serialize_case(name, serializer)
                 }
 
-                pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<$type, D::Error> {
+                pub fn deserialize<'de, D: Deserializer<'de>>(
+                    deserializer: D,
+                ) -> Result<$type, D::Error> {
                     let name = super::deserialize_case(deserializer)?;
                     <$type>::CASES
                         .iter()
@@ -253,14 +264,19 @@ pub mod file_url {
     pub mod opt_path {
         use serde::{Deserializer, Serializer};
 
-        pub fn serialize<S: Serializer>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error> {
+        pub fn serialize<S: Serializer>(
+            value: &Option<String>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
             match value {
                 Some(path) => super::path::serialize(path, serializer),
                 None => serializer.serialize_none(),
             }
         }
 
-        pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<String>, D::Error> {
             super::deserialize_path(deserializer).map(Some)
         }
     }

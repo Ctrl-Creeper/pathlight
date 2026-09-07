@@ -6,11 +6,19 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod attribution;
 pub mod event;
+pub mod exclusion;
+#[cfg(target_os = "macos")]
+mod fsevents;
+pub mod history;
 pub mod journal;
 pub mod monitor;
 
+pub use attribution::{AggregationOptions, Attributor, SizeIndex};
 pub use event::{ActivityEvent, Confidence, EventKind};
+pub use exclusion::ExclusionFilter;
+pub use history::{HistoryBucket, HistorySnapshot};
 pub use journal::Journal;
 pub use monitor::{ActivityListener, Change, ChangeKind, StreamEvent, Watcher};
 
@@ -26,19 +34,26 @@ pub enum CoreError {
 
 impl From<std::io::Error> for CoreError {
     fn from(error: std::io::Error) -> Self {
-        CoreError::Io { message: error.to_string() }
+        CoreError::Io {
+            message: error.to_string(),
+        }
     }
 }
 
 impl From<serde_json::Error> for CoreError {
     fn from(error: serde_json::Error) -> Self {
-        CoreError::Encoding { message: error.to_string() }
+        CoreError::Encoding {
+            message: error.to_string(),
+        }
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl From<notify::Error> for CoreError {
     fn from(error: notify::Error) -> Self {
-        CoreError::Watch { message: error.to_string() }
+        CoreError::Watch {
+            message: error.to_string(),
+        }
     }
 }
 
