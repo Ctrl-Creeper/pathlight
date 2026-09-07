@@ -50,6 +50,7 @@ let package = Package(
                 "Services/LaunchAtLoginService.swift",
                 "Services/LiveWatchSessionCoordinator.swift",
                 "Services/LongTermWatchTargetStore.swift",
+                "Services/ProcessHintService.swift",
                 "Services/ScanExclusionMatcher.swift",
                 "Services/StorageAttributionService.swift",
                 "Services/SystemIntegration.swift",

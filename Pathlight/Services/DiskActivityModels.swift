@@ -43,6 +43,45 @@ nonisolated struct DiskActivityEvent: Equatable, Codable, Sendable {
     let confidence: DiskActivityEventConfidence
     let previousPath: URL?
     let affectedItemCount: Int
+    /// Best-effort name of the process that had the path open when the change
+    /// was observed; nil when unknown. Absent from rows written before this field existed.
+    let processName: String?
+
+    init(
+        kind: DiskActivityEventKind,
+        path: URL,
+        rootPath: URL,
+        timestamp: Date,
+        byteDelta: Int64?,
+        confidence: DiskActivityEventConfidence,
+        previousPath: URL?,
+        affectedItemCount: Int,
+        processName: String? = nil
+    ) {
+        self.kind = kind
+        self.path = path
+        self.rootPath = rootPath
+        self.timestamp = timestamp
+        self.byteDelta = byteDelta
+        self.confidence = confidence
+        self.previousPath = previousPath
+        self.affectedItemCount = affectedItemCount
+        self.processName = processName
+    }
+
+    func withProcessName(_ processName: String?) -> DiskActivityEvent {
+        DiskActivityEvent(
+            kind: kind,
+            path: path,
+            rootPath: rootPath,
+            timestamp: timestamp,
+            byteDelta: byteDelta,
+            confidence: confidence,
+            previousPath: previousPath,
+            affectedItemCount: affectedItemCount,
+            processName: processName
+        )
+    }
 }
 
 nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {

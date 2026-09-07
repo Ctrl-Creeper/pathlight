@@ -18,6 +18,7 @@ struct AppDependencies {
     var activityStorageUsageService: ActivityStorageUsageService
     var launchAtLoginService: any LaunchAtLoginControlling
     var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
+    var processHints: (any ProcessHinting)?
 
     init(
         systemActions: AppSystemActions,
@@ -32,7 +33,8 @@ struct AppDependencies {
         activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
         launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService(),
-        activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil
+        activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil,
+        processHints: (any ProcessHinting)? = nil
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
@@ -45,6 +47,7 @@ struct AppDependencies {
         self.activityStorageUsageService = activityStorageUsageService
         self.launchAtLoginService = launchAtLoginService
         self.activityGrowthAlertPoster = activityGrowthAlertPoster
+        self.processHints = processHints
     }
 
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
@@ -75,7 +78,8 @@ struct AppDependencies {
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
             launchAtLoginService: SystemLaunchAtLoginService(),
-            activityGrowthAlertPoster: UserNotificationGrowthAlertPoster()
+            activityGrowthAlertPoster: UserNotificationGrowthAlertPoster(),
+            processHints: LsofProcessHintService()
         )
     }
 }
