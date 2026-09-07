@@ -8,11 +8,13 @@ struct ActivityDashboardActions {
     let removeLongTermWatchTarget: (URL) -> Void
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
-    let locateInApp: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
     let setExclusionPatterns: ([String], URL) -> Void
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
+    let addFolder: () -> Void
+    let startLiveMonitor: (DiskActivityAggregationOptions) -> Void
+    let stopLiveMonitor: () -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -20,6 +22,7 @@ struct ActivityDashboardView: View {
     let histories: [ActivityHistorySnapshot]
     let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
     let showsLaunchAtLoginNudge: Bool
+    let isLiveMonitorActive: Bool
     let actions: ActivityDashboardActions
 
     @State private var selectedTargetID: String?
@@ -51,6 +54,37 @@ struct ActivityDashboardView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    actions.addFolder()
+                } label: {
+                    Label("Monitor Folder", systemImage: "folder.badge.plus")
+                }
+                .help("Monitor a Folder Long-Term")
+
+                if isLiveMonitorActive {
+                    Button {
+                        actions.stopLiveMonitor()
+                    } label: {
+                        Label("Stop Live Monitor", systemImage: "stop.circle")
+                    }
+                    .help("Stop Live Monitor")
+                } else {
+                    Menu {
+                        Button("Every file change") {
+                            actions.startLiveMonitor(.shortTermDefault)
+                        }
+                        Button("Changes 1 KB and larger") {
+                            actions.startLiveMonitor(.shortTerm(minimumRecordedByteDelta: 1_024))
+                        }
+                        Button("Changes 1 MB and larger") {
+                            actions.startLiveMonitor(.shortTerm(minimumRecordedByteDelta: 1_024 * 1_024))
+                        }
+                    } label: {
+                        Label("Live Monitor", systemImage: "waveform.path.ecg")
+                    }
+                    .help("Watch a Folder Live")
+                }
+
                 if let selectedRootPath {
                     Button {
                         refreshAllTargetHistories()
@@ -99,7 +133,10 @@ struct ActivityDashboardView: View {
     @ViewBuilder
     private var dashboardContent: some View {
         if targets.isEmpty {
-            ActivityDashboardEmptyState(title: presentation.emptyStateTitle ?? "No Activity")
+            ActivityDashboardEmptyState(
+                title: presentation.emptyStateTitle ?? "No Activity",
+                onAddFolder: actions.addFolder
+            )
         } else {
             HSplitView {
                 targetList
@@ -162,14 +199,14 @@ struct ActivityDashboardView: View {
 
             ActivityDashboardTopChangesSection(
                 changes: presentation.topChanges,
-                onLocate: { actions.locateInApp($0) }
+                onLocate: { actions.revealInFinder($0) }
             )
 
             Divider()
 
             ActivityDashboardTimelineSection(
                 rows: presentation.timelineRows,
-                onLocate: { actions.locateInApp(URL(filePath: $0)) },
+                onLocate: { actions.revealInFinder(URL(filePath: $0)) },
                 onReveal: { actions.revealInFinder(URL(filePath: $0)) }
             )
         }
@@ -700,9 +737,6 @@ private struct ActivityDashboardTimelineRow: View {
             onLocate(row.path)
         }
         .contextMenu {
-            Button("Locate in Pathlight") {
-                onLocate(row.path)
-            }
             Button("Reveal in Finder") {
                 onReveal(row.path)
             }
@@ -742,6 +776,7 @@ private struct ActivityDashboardTimelineRow: View {
 
 private struct ActivityDashboardEmptyState: View {
     let title: String
+    let onAddFolder: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
@@ -752,6 +787,18 @@ private struct ActivityDashboardEmptyState: View {
 
             Text(title)
                 .font(.title3.weight(.semibold))
+
+            Text("Pathlight records what changes inside the folders you monitor.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button {
+                onAddFolder()
+            } label: {
+                Label("Monitor Folder…", systemImage: "folder.badge.plus")
+            }
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

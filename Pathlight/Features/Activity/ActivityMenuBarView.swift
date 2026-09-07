@@ -36,6 +36,5 @@ struct ActivityMenuBarView: View {
     private func openDashboard() {
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
-        appModel.selectSidebarTarget(id: SidebarModel.activityDashboardID)
     }
 }

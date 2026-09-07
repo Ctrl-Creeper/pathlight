@@ -6,6 +6,16 @@
 import Foundation
 
 nonisolated struct ScanExclusionMatcher: Sendable {
+    nonisolated static let defaultCloudStorageRootPath = FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: "Library/CloudStorage", directoryHint: .isDirectory)
+        .standardizedFileURL
+        .path
+
+    nonisolated static let defaultICloudDriveRootPath = FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: "Library/Mobile Documents", directoryHint: .isDirectory)
+        .standardizedFileURL
+        .path
+
     static let commonPresetPatterns = [
         "node_modules/",
         "*.log",
@@ -22,8 +32,8 @@ nonisolated struct ScanExclusionMatcher: Sendable {
         patterns: [String],
         rootURL: URL,
         includeCloudStorage: Bool,
-        cloudStorageRootPath: String = ScanOptions.defaultCloudStorageRootPath,
-        iCloudDriveRootPath: String = ScanOptions.defaultICloudDriveRootPath
+        cloudStorageRootPath: String = Self.defaultCloudStorageRootPath,
+        iCloudDriveRootPath: String = Self.defaultICloudDriveRootPath
     ) {
         self.init(
             patterns: patterns,
@@ -38,8 +48,8 @@ nonisolated struct ScanExclusionMatcher: Sendable {
         patterns: [String],
         rootPath: String,
         includeCloudStorage: Bool,
-        cloudStorageRootPath: String = ScanOptions.defaultCloudStorageRootPath,
-        iCloudDriveRootPath: String = ScanOptions.defaultICloudDriveRootPath
+        cloudStorageRootPath: String = Self.defaultCloudStorageRootPath,
+        iCloudDriveRootPath: String = Self.defaultICloudDriveRootPath
     ) {
         let normalizedRootPath = Self.normalizedRootPath(rootPath)
         self.rootPath = normalizedRootPath

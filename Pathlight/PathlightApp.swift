@@ -64,16 +64,12 @@ struct PathlightApp: App {
         Window("Pathlight", id: "main") {
             ContentView()
                 .environmentObject(appModel)
-                .frame(minWidth: 1180, maxWidth: .infinity, minHeight: 620, maxHeight: .infinity)
+                .frame(minWidth: 820, maxWidth: .infinity, minHeight: 540, maxHeight: .infinity)
         }
-        .defaultSize(width: 1480, height: 820)
+        .defaultSize(width: 1120, height: 720)
         .windowResizability(.contentMinSize)
         .commands {
-            PathlightCommands(
-                appModel: appModel,
-                scanState: appModel.scanState,
-                navigation: appModel.navigation
-            )
+            PathlightCommands(appModel: appModel)
 
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updater: updaterController.updater)
@@ -88,8 +84,7 @@ struct PathlightApp: App {
             }
         }
 
-        // Menu bar presence only while folders are actually monitored, so the
-        // analyzer stays invisible for users who never enable watching.
+        // Menu bar presence only while folders are actually monitored.
         MenuBarExtra(
             "Pathlight Activity",
             systemImage: "waveform.path.ecg",

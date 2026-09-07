@@ -4,7 +4,7 @@ This file tells coding agents how to work effectively in this repository.
 
 ## Purpose
 
-Pathlight is a native macOS disk space analyzer built in Swift and SwiftUI. When developing Pathlight, prioritize Swift/SwiftUI best practices and modern code.
+Pathlight is a native macOS folder-change monitor built in Swift and SwiftUI. This fork keeps only file-change monitoring (live watches, long-term watches, activity history); the original disk analyzer was removed. When developing Pathlight, prioritize Swift/SwiftUI best practices and modern code.
 
 ## Commit Guidelines
 
@@ -29,20 +29,13 @@ Pathlight is a native macOS disk space analyzer built in Swift and SwiftUI. When
 
 ```
 Pathlight/
-├── App/                  # App entry point, commands, window management
-├── Models/               # Core data types (FileNodeRecord, ScanSnapshot, etc.)
-├── Services/             # Scan engine, sunburst geometry, formatters
-├── ViewModels/           # AppModel — central state manager
-├── Features/             # UI features (workspace, sidebar, file browser,
-│   ├── Workspace/        #   visualization, inspector, settings, onboarding)
-│   ├── Sidebar/
-│   ├── FileList/
-│   ├── Visualization/
-│   ├── Inspector/
-│   ├── Settings/
-│   └── Onboarding/
-├── Views/                # Reserved for future shared view composition
-└── Shared/               # Reusable components (breadcrumbs, helpers)
+├── App/                  # App delegate (menu bar survival), menu commands
+├── Services/             # FSEvents monitor, attribution, journals, history, presentation
+├── ViewModels/           # AppModel — central monitoring state
+├── Features/
+│   ├── Activity/         # Dashboard, Live Monitor window, menu bar extra
+│   └── Settings/
+└── Shared/               # Small presentation helpers
 ```
 
 ## Project Layout
@@ -53,11 +46,11 @@ Important paths:
 - `Package.swift`: exact package target membership
 - `Pathlight/PathlightApp.swift`: app entry
 - `Pathlight/ContentView.swift`: root content composition
-- `Pathlight/ViewModels/AppModel.swift`: central `@MainActor` app state and UI coordination
-- `Pathlight/Models/`: core scan targets, node records, tree storage, snapshots, progress, file actions, and trash safety
-- `Pathlight/Services/ScanEngine.swift`: actor-based filesystem scanner
-- `Pathlight/Services/SunburstGeometry.swift`: sunburst layout math
-- `Pathlight/Services/SystemIntegration.swift`: Finder/open/trash/system-facing actions
+- `Pathlight/ViewModels/AppModel.swift`: central `@MainActor` monitoring state (live/long-term watches, history, storage policy)
+- `Pathlight/Services/DiskActivityMonitor.swift`: FSEvents wrapper yielding typed changes with event IDs
+- `Pathlight/Services/StorageAttributionService.swift`: byte-delta attribution for changes
+- `Pathlight/Services/ActivityEventStore.swift` / `ActivityHistoryService.swift`: journal and history aggregation
+- `Pathlight/Services/SystemIntegration.swift`: Finder reveal, folder picker, Full Disk Access probes
 - `Pathlight/Shared/`: shared UI helpers
 - `PathlightCoreTests/`: package-level unit and benchmark-style tests
 - `releases/`: release/update assets
@@ -67,9 +60,9 @@ Important paths:
 
 Pathlight makes several user-facing promises. Do not casually violate them:
 
-- Scans should feel fast and responsive.
-- The app should not mutate files unless the user explicitly requests an action.
-- The sunburst and file browser are primary navigation surfaces, not secondary embellishments.
+- Monitoring must stay cheap: wide FSEvents latency for background watches, no polling.
+- The app never mutates user files; it only reads and records.
+- Monitoring keeps running when the window closes or the user quits into the menu bar.
 
 ## Working Agreement For Changes
 
@@ -78,7 +71,7 @@ When making changes:
 - Keep edits consistent with the existing architecture unless existing architecture is problematic.
 - Prefer fixing behavior in the core model/service layer when the bug is data-related.
 - Prefer fixing behavior in `AppModel` when the issue is coordination, selection, focus, navigation, or settings persistence.
-- Prefer adding or updating tests when changing scanner behavior, path normalization, indexing, geometry, or formatting logic.
+- Prefer adding or updating tests when changing monitor behavior, attribution, journal format, history aggregation, exclusion matching, or formatting logic.
 - Avoid introducing new dependencies unless explicitly justified. The project is intentionally light on external packages.
 
 Use Context7 when working with external libraries, frameworks, or APIs and you need current, version-aware documentation.
@@ -96,9 +89,9 @@ Do not use Context7 for:
 
 ## If You Need A Starting Point
 
-- Scanner bug or data bug: start with `Pathlight/Services/ScanEngine.swift` and the matching tests in `PathlightCoreTests/`
-- Selection/navigation/UI state bug: start with `Pathlight/ViewModels/AppModel.swift`
-- Tree/index behavior bug: start with `Pathlight/Models/FileTreeStore.swift`
-- Search behavior bug: start with `Pathlight/Services/FileBrowserModel.swift`
-- Size or display formatting bug: start with `Pathlight/Services/FileSizeFormatter.swift`
-- Visualization/layout bug: start with `Pathlight/Services/SunburstGeometry.swift`
+- Missing or wrong events: `Pathlight/Services/DiskActivityMonitor.swift`, then `StorageAttributionService.swift`
+- Watch lifecycle, checkpoints, reconnect: `Pathlight/ViewModels/AppModel.swift`
+- Journal, retention, encryption: `Pathlight/Services/ActivityEventStore.swift`, `ActivityStorageLineCodec.swift`
+- Dashboard numbers: `Pathlight/Services/ActivityHistoryService.swift`, `ActivityDashboardPresentation.swift`
+- Exclusion patterns: `Pathlight/Services/ScanExclusionMatcher.swift`, `ActivityExclusionFilter.swift`
+- Size or display formatting bug: `Pathlight/Services/FileSizeFormatter.swift`
