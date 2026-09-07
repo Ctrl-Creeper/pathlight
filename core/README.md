@@ -21,15 +21,18 @@ cd core
 cargo test
 ```
 
-## Swift bindings
+## Swift bindings and the Xcode app
 
 ```sh
-core/scripts/generate-swift-bindings.sh   # -> core/bindings/swift/
+core/scripts/build-xcframework.sh          # release; pass "debug" for a debug build
 ```
 
-That emits `PathlightRustCore.swift`, a C header and a modulemap. Wiring it
-into `Pathlight.xcodeproj` (XCFramework with `aarch64-apple-darwin` and
-`x86_64-apple-darwin` static libs) is the next step and is not done yet.
+The script builds the static library, regenerates
+`core/swift/Sources/PathlightRustCore/PathlightRustCore.swift` (committed) and
+packages `core/swift/PathlightRustCoreFFI.xcframework` (ignored by git).
+`Pathlight.xcodeproj` depends on the local package in `core/swift`, so run the
+script once before building the app. The library is universal only when the
+`x86_64-apple-darwin` Rust target is installed; otherwise it is host-only.
 
 ## Known ceilings
 

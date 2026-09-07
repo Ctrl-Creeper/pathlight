@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		3BBA11332F80739B009EFB1C /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 3BBA11322F80739B009EFB1C /* Sparkle */; };
+		3BC0DE0300000000000000A3 /* PathlightRustCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3BC0DE0200000000000000A2 /* PathlightRustCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +41,7 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				3BBA11332F80739B009EFB1C /* Sparkle in Frameworks */,
+				3BC0DE0300000000000000A3 /* PathlightRustCore in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -80,6 +82,7 @@
 			name = Pathlight;
 			packageProductDependencies = (
 				3BBA11322F80739B009EFB1C /* Sparkle */,
+				3BC0DE0200000000000000A2 /* PathlightRustCore */,
 			);
 			productName = Pathlight;
 			productReference = 3BF007FE2F7E285500DA9E45 /* Pathlight.app */;
@@ -111,6 +114,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				3BBA11312F80739B009EFB1C /* XCRemoteSwiftPackageReference "Sparkle" */,
+				3BC0DE0100000000000000A1 /* XCLocalSwiftPackageReference "core/swift" */,
 			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 3BF007FF2F7E285500DA9E45 /* Products */;
@@ -363,6 +367,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		3BC0DE0100000000000000A1 /* XCLocalSwiftPackageReference "core/swift" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = core/swift;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		3BBA11312F80739B009EFB1C /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -379,6 +390,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3BBA11312F80739B009EFB1C /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		3BC0DE0200000000000000A2 /* PathlightRustCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PathlightRustCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

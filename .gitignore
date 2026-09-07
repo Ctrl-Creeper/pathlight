@@ -10,3 +10,4 @@ releases/
 # Rust core
 core/target/
 core/bindings/
+core/swift/PathlightRustCoreFFI.xcframework/

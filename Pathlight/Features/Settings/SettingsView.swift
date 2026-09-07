@@ -1,3 +1,4 @@
+import PathlightRustCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -57,6 +58,10 @@ private struct GeneralSettingsPane: View {
                 Text(appModel.launchAtLoginStatus.monitoringSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("About") {
+                LabeledContent("Monitoring core", value: "Rust \(coreVersion())")
             }
         }
         .formStyle(.grouped)

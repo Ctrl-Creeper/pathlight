@@ -41,3 +41,9 @@ impl From<notify::Error> for CoreError {
         CoreError::Watch { message: error.to_string() }
     }
 }
+
+/// Crate version, handy for proving the host actually linked this library.
+#[uniffi::export]
+pub fn core_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
