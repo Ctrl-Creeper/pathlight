@@ -49,8 +49,8 @@ final class AppModel: ObservableObject {
     private var activityStorageUsageTaskID: UUID?
     private var activityStoragePolicyTask: Task<Void, Never>?
     private var activityStoragePolicyTaskID: UUID?
-    private var longTermWatchBaselineTask: Task<Void, Never>?
-    private var longTermWatchBaselineTaskID: UUID?
+    private var longTermWatchBaselineTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
+    private var longTermWatchBaselineIDs: [LongTermWatchTarget.ID: UUID] = [:]
     private var longTermWatchTasks: [LongTermWatchTarget.ID: Task<Void, Never>] = [:]
     private var longTermWatchTaskIDs: [LongTermWatchTarget.ID: UUID] = [:]
     private var pendingJournalEvents: [UUID: DiskActivityEvent] = [:]
@@ -273,10 +273,6 @@ final class AppModel: ObservableObject {
         let knownSizeProvider = dependencies.activityKnownSizeProvider
         let baselineService = dependencies.activityBaselineService
 
-        liveWatchBaselineTask = Task.detached {
-            _ = await baselineService.captureBaseline(rootPath: rootPath)
-        }
-
         liveWatchTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -296,6 +292,11 @@ final class AppModel: ObservableObject {
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
                     break
+                }
+                if session.receivedStreamEventCount > 0, self.liveWatchBaselineTask == nil {
+                    self.liveWatchBaselineTask = Task.detached {
+                        _ = await baselineService.captureBaseline(rootPath: rootPath)
+                    }
                 }
                 self.liveWatchSession = session
                 self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
@@ -547,38 +548,9 @@ final class AppModel: ObservableObject {
         rootPath: URL,
         options: LongTermWatchTargetOptions = .default
     ) {
-        cancelLongTermWatchBaseline()
-
-        let taskID = UUID()
-        longTermWatchBaselineTaskID = taskID
-        let baselineService = dependencies.activityBaselineService
-
-        longTermWatchBaselineTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                if self.longTermWatchBaselineTaskID == taskID {
-                    self.longTermWatchBaselineTask = nil
-                    self.longTermWatchBaselineTaskID = nil
-                }
-            }
-
-            let baseline = await baselineService.captureBaseline(rootPath: rootPath)
-            guard !Task.isCancelled, self.longTermWatchBaselineTaskID == taskID else {
-                return
-            }
-
-            let target = LongTermWatchTarget(
-                rootPath: rootPath,
-                isEnabled: true,
-                options: options,
-                baseline: baseline
-            )
-            self.longTermWatchTargets = self.dependencies.longTermWatchTargets.upsert(
-                target,
-                currentTargets: self.longTermWatchTargets
-            )
-            self.startLongTermWatch(for: target)
-        }
+        let target = LongTermWatchTarget(rootPath: rootPath, isEnabled: true, options: options)
+        longTermWatchTargets = dependencies.longTermWatchTargets.upsert(target, currentTargets: longTermWatchTargets)
+        startLongTermWatch(for: target)
     }
 
     func setLongTermWatchEnabled(_ isEnabled: Bool, rootPath: URL) {
@@ -740,9 +712,9 @@ final class AppModel: ObservableObject {
     }
 
     private func cancelLongTermWatchBaseline() {
-        longTermWatchBaselineTask?.cancel()
-        longTermWatchBaselineTask = nil
-        longTermWatchBaselineTaskID = nil
+        for task in longTermWatchBaselineTasks.values { task.cancel() }
+        longTermWatchBaselineTasks.removeAll()
+        longTermWatchBaselineIDs.removeAll()
     }
 
     private func startEnabledLongTermWatches() {
@@ -772,8 +744,6 @@ final class AppModel: ObservableObject {
         )
         let sizeProvider = dependencies.activitySizeProvider
         let priorSizeProvider = dependencies.activityPriorSizeProvider
-        let eventStore = dependencies.activityEventStore
-
         longTermWatchTasks[target.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -801,7 +771,8 @@ final class AppModel: ObservableObject {
                     priorSizeProvider: priorSizeProvider,
                     knownSizeProvider: self.dependencies.activityKnownSizeProvider
                 )
-                var didCaptureGapBaseline = false
+                var capturedInitialBaseline = false
+                var lastGapCount: UInt64 = 0
                 var isInitialSessionYield = true
                 for await session in stream {
                     guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
@@ -846,36 +817,15 @@ final class AppModel: ObservableObject {
                         retryCount: retryCount
                     )
 
-                    if session.historyState == .gapDetected, !didCaptureGapBaseline {
-                        didCaptureGapBaseline = true
-                        let baseline = await self.dependencies.activityBaselineService.captureBaseline(rootPath: target.rootPath)
-                        guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
-                            break
-                        }
-                        let previousBaseline = self.longTermWatchTargets.first(where: { $0.id == target.id })?.baseline
-                        self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateBaseline(
-                            baseline,
-                            forRootPath: target.rootPath,
-                            currentTargets: self.longTermWatchTargets
-                        )
-                        if let eventStore, let previousBaseline {
-                            // Flush first so the rows we subtract are all on disk.
-                            await self.flushJournal()
-                            let recorded = (try? await eventStore.loadEvents(rootPath: target.rootPath, limit: 200_000)) ?? []
-                            let alreadyRecorded = ActivityBaselineReconciler.recordedByteDelta(
-                                in: recorded,
-                                after: previousBaseline,
-                                before: baseline
-                            )
-                            if let reconciliation = ActivityBaselineReconciler.reconciliationEvent(
-                                previous: previousBaseline,
-                                current: baseline,
-                                recordedByteDeltaSincePrevious: alreadyRecorded
-                            ) {
-                                try? await eventStore.append([reconciliation])
-                                self.scheduleEventDrivenHistoryRefresh(rootPath: target.rootPath)
-                            }
-                        }
+                    // Register the source before beginning metadata enumeration. A
+                    // separate task keeps consuming events while the scan is slow.
+                    let newGap = session.historyGapCount > lastGapCount
+                    lastGapCount = session.historyGapCount
+                    if session.receivedStreamEventCount > 0,
+                       session.historyState != .catchingUp,
+                       !capturedInitialBaseline || newGap {
+                        capturedInitialBaseline = true
+                        self.captureLongTermBaseline(for: target, watchTaskID: taskID)
                     }
                     if !session.latestChanges.isEmpty {
                         self.updateLongTermWatchRuntimeStatus(
@@ -904,7 +854,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func captureLongTermBaseline(for target: LongTermWatchTarget, watchTaskID: UUID) {
+        // A distinct gap supersedes an older in-flight scan. Cancellation IDs
+        // prevent a removed/restarted watch from being resurrected on completion.
+        longTermWatchBaselineTasks[target.id]?.cancel()
+        let scanID = UUID()
+        longTermWatchBaselineIDs[target.id] = scanID
+        let service = dependencies.activityBaselineService
+        longTermWatchBaselineTasks[target.id] = Task { @MainActor [weak self] in
+            let baseline = await service.captureBaseline(rootPath: target.rootPath)
+            guard let self, !Task.isCancelled,
+                  self.longTermWatchTaskIDs[target.id] == watchTaskID,
+                  self.longTermWatchBaselineIDs[target.id] == scanID,
+                  self.longTermWatchTargets.contains(where: { $0.id == target.id && $0.isEnabled }) else { return }
+            self.longTermWatchBaselineTasks[target.id] = nil
+            self.longTermWatchBaselineIDs[target.id] = nil
+            self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateBaseline(
+                baseline, forRootPath: target.rootPath, currentTargets: self.longTermWatchTargets
+            )
+            // Notification latency means a quiet callback interval does not prove
+            // a quiet filesystem. Until the monitor exposes a flush/barrier, keep
+            // this scan unverified and do not append a guessed correction row.
+            // The persisted history-gap checkpoint remains set after this scan.
+        }
+    }
+
     private func stopLongTermWatch(targetID: LongTermWatchTarget.ID) {
+        longTermWatchBaselineTasks[targetID]?.cancel()
+        longTermWatchBaselineTasks[targetID] = nil
+        longTermWatchBaselineIDs[targetID] = nil
         flushJournalNow()
         longTermWatchTasks[targetID]?.cancel()
         longTermWatchTasks[targetID] = nil
@@ -913,6 +891,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopAllLongTermWatches() {
+        cancelLongTermWatchBaseline()
         for task in longTermWatchTasks.values {
             task.cancel()
         }

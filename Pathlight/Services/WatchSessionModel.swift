@@ -20,6 +20,8 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
     private(set) var events: [DiskActivityEvent]
     private var eventIDs: [UUID]
     private(set) var lastObservedEventID: UInt64?
+    private(set) var receivedStreamEventCount: UInt64 = 0
+    private(set) var historyGapCount: UInt64 = 0
     private(set) var historyState: WatchSessionHistoryState
     /// Oldest events dropped once `maxRetainedEvents` is exceeded, so a storm
     /// cannot grow memory without bound.
@@ -95,6 +97,11 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
         latestChanges = order.compactMap { id in
             changed[id].map { ChangedEvent(id: id, event: $0) }
         }
+    }
+
+    mutating func recordStreamEvent(isGap: Bool) {
+        receivedStreamEventCount &+= 1
+        if isGap { historyGapCount &+= 1 }
     }
 
     mutating func clearLatestChanges() {

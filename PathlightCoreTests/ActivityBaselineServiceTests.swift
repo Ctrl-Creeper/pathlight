@@ -41,6 +41,8 @@ struct ActivityBaselineServiceTests {
         #expect(baseline.allocatedSize == 3_264)
         #expect(baseline.measuredItemCount == 4)
         #expect(baseline.unreadableItemCount == 0)
+        #expect(baseline.unidentifiedItemCount == 4)
+        #expect(!baseline.withObservedChanges(false).isUsableForReconciliation)
     }
 
     @Test("counts unreadable items without failing the baseline")
@@ -67,6 +69,7 @@ struct ActivityBaselineServiceTests {
         #expect(baseline.allocatedSize == 64)
         #expect(baseline.measuredItemCount == 1)
         #expect(baseline.unreadableItemCount == 2)
+        #expect(baseline.scanState == .partial)
     }
 
     @Test("walks a real directory without counting files as unreadable")
@@ -99,6 +102,74 @@ struct ActivityBaselineServiceTests {
 
         #expect(baseline.measuredItemCount + baseline.unreadableItemCount <= 3)
     }
+
+    @Test("counts allocated bytes once for multiple hard links to one file")
+    func deduplicatesHardLinkedBytes() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "original.bin")
+        try Data(repeating: 0x41, count: 16_384).write(to: file)
+        let before = await ActivityBaselineService().captureBaseline(rootPath: root)
+        try FileManager.default.linkItem(at: file, to: root.appending(path: "alias.bin"))
+
+        let after = await ActivityBaselineService().captureBaseline(rootPath: root)
+
+        #expect(after.allocatedSize == before.allocatedSize)
+        #expect(after.measuredItemCount == before.measuredItemCount + 1)
+        #expect(after.measuredObjectCount == before.measuredObjectCount)
+        #expect(after.unidentifiedItemCount == 0)
+    }
+
+    @Test("records the scan interval without asserting a point-in-time snapshot")
+    func recordsScanInterval() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let finishedAt = Date(timeIntervalSince1970: 110)
+        let service = ActivityBaselineService(now: { finishedAt })
+
+        let snapshot = await service.captureBaseline(rootPath: root, capturedAt: startedAt)
+
+        #expect(snapshot.capturedAt == startedAt)
+        #expect(snapshot.scanStartedAt == startedAt)
+        #expect(snapshot.scanFinishedAt == finishedAt)
+        #expect(snapshot.scanState == .completed)
+        #expect(snapshot.consistency == .unverified)
+        #expect(!snapshot.isUsableForReconciliation)
+        #expect(snapshot.withObservedChanges(false).isUsableForReconciliation)
+        #expect(!snapshot.withObservedChanges(true).isUsableForReconciliation)
+    }
+
+    @Test("cancelled scans explicitly remain incomplete")
+    func marksCancelledScan() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await ActivityBaselineService().captureBaseline(rootPath: root)
+        }
+
+        let snapshot = await task.value
+
+        #expect(snapshot.scanState == .cancelled)
+        #expect(!snapshot.withObservedChanges(false).isUsableForReconciliation)
+    }
+
+    @Test("old persisted snapshots retain unknown intervals and cannot be reconciled")
+    func decodesLegacySnapshot() throws {
+        let data = Data(#"{"rootPath":"file:///Users/example/Downloads/","capturedAt":0,"allocatedSize":1000,"measuredItemCount":10,"unreadableItemCount":0}"#.utf8)
+
+        let snapshot = try JSONDecoder().decode(ActivityBaselineSnapshot.self, from: data)
+
+        #expect(snapshot.allocatedSize == 1_000)
+        #expect(snapshot.scanStartedAt == nil)
+        #expect(snapshot.scanFinishedAt == nil)
+        #expect(snapshot.scanState == .unknown)
+        #expect(snapshot.consistency == .unverified)
+        #expect(snapshot.measuredObjectCount == nil)
+        #expect(!snapshot.withObservedChanges(false).isUsableForReconciliation)
+        #expect(try JSONDecoder().decode(ActivityBaselineSnapshot.self, from: JSONEncoder().encode(snapshot)) == snapshot)
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {
@@ -110,17 +181,27 @@ private func makeTemporaryDirectory() throws -> URL {
 
 @Suite("Activity baseline reconciler")
 struct ActivityBaselineReconcilerTests {
+    @Test("an unreadable subtree cannot become an estimated deletion")
+    func refusesPartialSnapshotDelta() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let previous = snapshot(root: root, start: 0, finish: 10, allocatedSize: 1_000, count: 10)
+        let partial = snapshot(root: root, start: 50, finish: 60, allocatedSize: 100, count: 1, unreadableCount: 2)
+
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: partial) == nil)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: partial, current: previous) == nil)
+    }
+
     @Test("emits one estimated aggregate for the delta between baselines")
     func emitsAggregateForBaselineDelta() {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
-        let previous = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 0), allocatedSize: 1_000, measuredItemCount: 10, unreadableItemCount: 0)
-        let current = ActivityBaselineSnapshot(rootPath: root, capturedAt: Date(timeIntervalSince1970: 60), allocatedSize: 4_000, measuredItemCount: 13, unreadableItemCount: 0)
+        let previous = snapshot(root: root, start: 0, finish: 10, allocatedSize: 1_000, count: 10)
+        let current = snapshot(root: root, start: 50, finish: 60, allocatedSize: 4_000, count: 13)
 
         let event = ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: current)
 
         #expect(event?.kind == .aggregate)
         #expect(event?.byteDelta == 3_000)
-        #expect(event?.timestamp == current.capturedAt)
+        #expect(event?.timestamp == current.scanFinishedAt)
 
         let recorded = [
             DiskActivityEvent(kind: .created, path: root.appending(path: "a"), rootPath: root, timestamp: Date(timeIntervalSince1970: 30), byteDelta: 1_000, confidence: .confirmed, previousPath: nil, affectedItemCount: 1),
@@ -134,5 +215,39 @@ struct ActivityBaselineReconcilerTests {
         #expect(event?.path == root)
         #expect(ActivityBaselineReconciler.reconciliationEvent(previous: nil, current: current) == nil)
         #expect(ActivityBaselineReconciler.reconciliationEvent(previous: current, current: current) == nil)
+    }
+
+    @Test("overlapping or actively changing scans cannot create reconciliation rows")
+    func refusesUncertainIntervals() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let previous = snapshot(root: root, start: 0, finish: 30, allocatedSize: 1_000, count: 10)
+        let overlapping = snapshot(root: root, start: 20, finish: 40, allocatedSize: 500, count: 5)
+        let later = snapshot(root: root, start: 50, finish: 60, allocatedSize: 500, count: 5)
+
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: overlapping) == nil)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: previous, current: later.withObservedChanges(true)) == nil)
+        #expect(ActivityBaselineReconciler.reconciliationEvent(previous: later, current: previous) == nil)
+    }
+
+    @Test("subtracts only records between completed scan intervals")
+    func subtractsRecordsBetweenIntervals() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let previous = snapshot(root: root, start: 0, finish: 10, allocatedSize: 1_000, count: 10)
+        let current = snapshot(root: root, start: 50, finish: 60, allocatedSize: 4_000, count: 13)
+        let events = [5, 10, 30, 50, 55].map { timestamp in
+            DiskActivityEvent(kind: .modified, path: root, rootPath: root, timestamp: Date(timeIntervalSince1970: Double(timestamp)), byteDelta: 100, confidence: .confirmed, previousPath: nil, affectedItemCount: 1)
+        }
+
+        #expect(ActivityBaselineReconciler.recordedByteDelta(in: events, after: previous, before: current) == 100)
+    }
+
+    private func snapshot(root: URL, start: TimeInterval, finish: TimeInterval, allocatedSize: Int64, count: Int, unreadableCount: Int = 0) -> ActivityBaselineSnapshot {
+        ActivityBaselineSnapshot(
+            rootPath: root, capturedAt: Date(timeIntervalSince1970: start),
+            allocatedSize: allocatedSize, measuredItemCount: count, unreadableItemCount: unreadableCount,
+            scanStartedAt: Date(timeIntervalSince1970: start), scanFinishedAt: Date(timeIntervalSince1970: finish),
+            scanState: unreadableCount == 0 ? .completed : .partial,
+            consistency: .noObservedChanges, measuredObjectCount: count, unidentifiedItemCount: 0
+        )
     }
 }
