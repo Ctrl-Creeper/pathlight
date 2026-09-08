@@ -1,0 +1,486 @@
+//! Bounded, explicit monitoring sessions producing an evidence journal.
+//!
+//! Callbacks only enqueue observations. Metadata reads, snapshots and journal
+//! I/O happen on the caller thread. Scans describe observation intervals, not
+//! atomic state or reconstructed operation history. The requested duration is
+//! the live interval between scans; registration and scans add wall-clock time.
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::evidence::{
+    EvidenceJournal, EvidencePayload, EvidenceRecord, NativePath, SourceIdentity,
+};
+use crate::measurement::measure_file;
+use crate::monitor::{watcher_capabilities, ActivityListener, StreamEvent, Watcher};
+
+const QUEUE_CAPACITY: usize = 4096;
+const MAX_PENDING_RECORDS: usize = 256;
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Default)]
+pub struct RecordingSummary {
+    pub records_written: u64,
+    pub observations: u64,
+    pub gaps: u64,
+}
+
+struct ReceivedEvent {
+    event: StreamEvent,
+    received_at: SystemTime,
+}
+
+struct QueueListener {
+    sender: SyncSender<ReceivedEvent>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl ActivityListener for QueueListener {
+    fn on_event(&self, event: StreamEvent) {
+        if let Err(TrySendError::Full(_)) = self.sender.try_send(ReceivedEvent {
+            event,
+            received_at: SystemTime::now(),
+        }) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct Recorder {
+    journal: EvidenceJournal,
+    source: SourceIdentity,
+    sequence: u64,
+    summary: RecordingSummary,
+    pending: Vec<EvidenceRecord>,
+    pending_bytes: usize,
+    flush_due: Option<Instant>,
+}
+
+impl Recorder {
+    fn append(
+        &mut self,
+        payload: EvidencePayload,
+        observed_at: SystemTime,
+        source_cursor: Option<u64>,
+    ) -> io::Result<()> {
+        self.sequence += 1;
+        let record = EvidenceRecord {
+            schema_version: 1,
+            source: self.source.clone(),
+            sequence: self.sequence,
+            source_cursor,
+            observed_at,
+            payload,
+        };
+        let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?.len() + 1;
+        if self.pending_bytes + bytes > MAX_PENDING_BYTES {
+            self.flush()?;
+        }
+        self.pending.push(record);
+        self.pending_bytes += bytes;
+        self.flush_due
+            .get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
+        if self.pending.len() >= MAX_PENDING_RECORDS || self.pending_bytes >= MAX_PENDING_BYTES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let batch = std::mem::take(&mut self.pending);
+        let observations = batch
+            .iter()
+            .filter(|record| matches!(record.payload, EvidencePayload::Observation { .. }))
+            .count();
+        let gaps = batch
+            .iter()
+            .filter(|record| matches!(record.payload, EvidencePayload::Gap { .. }))
+            .count();
+        // This recorder owns a fresh epoch and strictly increasing sequences,
+        // so none of these source keys were previously appended.
+        let written = self.journal.append_batch(batch)?;
+        self.summary.records_written += written as u64;
+        self.summary.observations += observations as u64;
+        self.summary.gaps += gaps as u64;
+        self.pending_bytes = 0;
+        self.flush_due = None;
+        Ok(())
+    }
+
+    fn flush_if_due(&mut self) -> io::Result<()> {
+        if self
+            .flush_due
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn receive_timeout(&self, deadline: Instant) -> Duration {
+        self.flush_due
+            .unwrap_or(deadline)
+            .min(deadline)
+            .saturating_duration_since(Instant::now())
+    }
+
+    fn event(&mut self, received: ReceivedEvent) -> io::Result<bool> {
+        let capabilities = watcher_capabilities();
+        let (payload, cursor, ready) = match received.event {
+            StreamEvent::Change { change, event_id } => {
+                let (measurement, measurement_error) = match measure_file(Path::new(&change.path)) {
+                    Ok(measurement) => (Some(measurement), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                (
+                    EvidencePayload::Observation { change, measurement, measurement_error },
+                    event_id,
+                    false,
+                )
+            }
+            StreamEvent::RequiresRescan { event_id } => (
+                EvidencePayload::Gap {
+                    reason: "Backend reported incomplete observation history; state reconciliation does not restore missing operations".into(),
+                },
+                event_id,
+                false,
+            ),
+            StreamEvent::HistoryCaughtUp { event_id } => (
+                EvidencePayload::Ready {
+                    resumable: capabilities.resumable_cursor,
+                    pairs_renames: capabilities.pairs_renames,
+                },
+                event_id,
+                true,
+            ),
+        };
+        // Zero is used by fresh-start readiness markers, not a replay cursor.
+        self.append(
+            payload,
+            received.received_at,
+            (cursor != 0).then_some(cursor),
+        )?;
+        Ok(ready)
+    }
+
+    fn snapshot(&mut self, root: &Path) -> io::Result<()> {
+        self.flush()?;
+        let snapshot = match crate::snapshot::scan(root) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.append(
+                    EvidencePayload::SnapshotError {
+                        path: NativePath::from_path(root),
+                        kind: format!("{:?}", error.kind()),
+                        message: error.to_string(),
+                    },
+                    SystemTime::now(),
+                    None,
+                )?;
+                self.flush()?;
+                return Err(error);
+            }
+        };
+        let totals = snapshot.totals();
+        self.append(
+            EvidencePayload::Snapshot {
+                started_at: snapshot.started_at,
+                finished_at: snapshot.finished_at,
+                logical_bytes: totals.logical_bytes,
+                allocated_bytes: totals.allocated_bytes,
+                measured_paths: totals.measured_paths,
+                measured_objects: totals.measured_objects,
+                partial: totals.partial,
+            },
+            snapshot.finished_at,
+            None,
+        )?;
+        for error in snapshot.errors {
+            self.append(
+                EvidencePayload::SnapshotError {
+                    path: NativePath::from_path(&error.path),
+                    kind: format!("{:?}", error.kind),
+                    message: error.message,
+                },
+                snapshot.finished_at,
+                None,
+            )?;
+        }
+        self.flush()
+    }
+
+    fn overflow(&mut self, dropped: &AtomicU64) -> io::Result<()> {
+        let count = dropped.swap(0, Ordering::Relaxed);
+        if count > 0 {
+            self.append(
+                EvidencePayload::Gap {
+                    reason: format!(
+                        "Recorder queue overflow: {count} received observations were dropped"
+                    ),
+                },
+                SystemTime::now(),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Record one live interval with a snapshot at each end, while the watcher is
+/// active. The journal must be outside the monitored tree to prevent feedback.
+/// This starts a new source epoch; it does not resume earlier recording sessions.
+pub fn record_for(root: &Path, journal: &Path, duration: Duration) -> io::Result<RecordingSummary> {
+    if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "duration must be positive and representable",
+        ));
+    }
+    let root = root.canonicalize()?;
+    if !root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "watch root must be a directory",
+        ));
+    }
+    let root_text = root.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "watcher root must be representable as UTF-8",
+        )
+    })?;
+    let journal_path = resolve_output(journal)?;
+    if journal_path.starts_with(&root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "journal must be outside the monitored tree",
+        ));
+    }
+    match measure_file(&journal_path) {
+        Ok(measurement) if measurement.link_count.is_some_and(|count| count > 1) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "journal must not have hard-link aliases",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut recorder = Recorder {
+        journal: EvidenceJournal::open(&journal_path)?,
+        source: SourceIdentity {
+            backend: backend_name().into(),
+            epoch: format!(
+                "{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+                NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
+            ),
+        },
+        sequence: 0,
+        summary: RecordingSummary::default(),
+        pending: Vec::new(),
+        pending_bytes: 0,
+        flush_due: None,
+    };
+    recorder.append(
+        EvidencePayload::SessionStarted {
+            root: NativePath::from_path(&root),
+        },
+        SystemTime::now(),
+        None,
+    )?;
+    recorder.flush()?;
+    let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+    let dropped = Arc::new(AtomicU64::new(0));
+    let watcher = Watcher::start(
+        root_text.into(),
+        None,
+        100,
+        Arc::new(QueueListener {
+            sender,
+            dropped: dropped.clone(),
+        }),
+    )
+    .map_err(io::Error::other)?;
+    await_ready(
+        &receiver,
+        &mut recorder,
+        &dropped,
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    recorder.snapshot(&root)?;
+    let deadline = Instant::now().checked_add(duration).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "duration is not representable")
+    })?;
+    loop {
+        recorder.overflow(&dropped)?;
+        recorder.flush_if_due()?;
+        if Instant::now() >= deadline {
+            break;
+        }
+        match receiver.recv_timeout(recorder.receive_timeout(deadline)) {
+            Ok(event) => {
+                recorder.event(event)?;
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "watcher disconnected",
+                ));
+            }
+        }
+    }
+    recorder.snapshot(&root)?;
+    watcher.stop();
+    for event in receiver.try_iter() {
+        recorder.event(event)?;
+    }
+    recorder.overflow(&dropped)?;
+    recorder.append(EvidencePayload::SessionEnded, SystemTime::now(), None)?;
+    recorder.flush()?;
+    Ok(recorder.summary)
+}
+
+fn await_ready(
+    receiver: &Receiver<ReceivedEvent>,
+    recorder: &mut Recorder,
+    dropped: &AtomicU64,
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "watcher readiness deadline expired",
+            ));
+        }
+        recorder.overflow(dropped)?;
+        recorder.flush_if_due()?;
+        let event = match receiver.recv_timeout(recorder.receive_timeout(deadline)) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "watcher disconnected before readiness",
+                ))
+            }
+        };
+        if recorder.event(event)? {
+            return Ok(());
+        }
+    }
+}
+
+fn resolve_output(path: &Path) -> io::Result<PathBuf> {
+    if path.symlink_metadata().is_ok() {
+        return path.canonicalize();
+    }
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "journal needs a file name"))?;
+    Ok(parent.canonicalize()?.join(name))
+}
+
+fn backend_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "fsevents"
+    } else if cfg!(any(target_os = "linux", target_os = "android")) {
+        "inotify"
+    } else if cfg!(windows) {
+        "read_directory_changes"
+    } else {
+        "notify"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_callback_queue_persists_loss_even_when_it_cannot_enqueue_a_gap() {
+        let output = tempfile::tempdir().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let listener = QueueListener {
+            sender,
+            dropped: dropped.clone(),
+        };
+        let mut recorder = Recorder {
+            journal: EvidenceJournal::open(&output.path().join("evidence.jsonl")).unwrap(),
+            source: SourceIdentity {
+                backend: "test".into(),
+                epoch: "overflow".into(),
+            },
+            sequence: 0,
+            summary: RecordingSummary::default(),
+            pending: Vec::new(),
+            pending_bytes: 0,
+            flush_due: None,
+        };
+
+        listener.on_event(StreamEvent::HistoryCaughtUp { event_id: 1 });
+        listener.on_event(StreamEvent::RequiresRescan { event_id: 2 });
+        listener.on_event(StreamEvent::RequiresRescan { event_id: 3 });
+        recorder.event(receiver.try_recv().unwrap()).unwrap();
+        recorder.overflow(&dropped).unwrap();
+        recorder.overflow(&dropped).unwrap();
+        recorder.flush().unwrap();
+
+        let records = recorder.journal.read_records().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            matches!(&records[1].payload, EvidencePayload::Gap { reason }
+            if reason == "Recorder queue overflow: 2 received observations were dropped")
+        );
+        assert_eq!(recorder.summary.gaps, 1);
+    }
+
+    #[test]
+    fn queued_events_cannot_extend_an_expired_readiness_deadline() {
+        let output = tempfile::tempdir().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let listener = QueueListener {
+            sender,
+            dropped: dropped.clone(),
+        };
+        let mut recorder = Recorder {
+            journal: EvidenceJournal::open(&output.path().join("evidence.jsonl")).unwrap(),
+            source: SourceIdentity {
+                backend: "test".into(),
+                epoch: "deadline".into(),
+            },
+            sequence: 0,
+            summary: RecordingSummary::default(),
+            pending: Vec::new(),
+            pending_bytes: 0,
+            flush_due: None,
+        };
+        listener.on_event(StreamEvent::HistoryCaughtUp { event_id: 1 });
+
+        let error = await_ready(&receiver, &mut recorder, &dropped, Instant::now()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(recorder.journal.read_records().unwrap().is_empty());
+    }
+}
