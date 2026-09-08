@@ -12,7 +12,7 @@ struct StorageAttributionServiceTests {
             options: DiskActivityAggregationOptions(
                 minimumRecordedByteDelta: 10,
                 aggregationWindow: 300,
-                longTermRecordsFileNames: false
+                longTermRecordsFileNames: true
             ),
             sizeProvider: { url in
                 url.path == file.path ? 842 : nil
@@ -66,7 +66,7 @@ struct StorageAttributionServiceTests {
             options: DiskActivityAggregationOptions(
                 minimumRecordedByteDelta: 10,
                 aggregationWindow: 300,
-                longTermRecordsFileNames: false
+                longTermRecordsFileNames: true
             ),
             sizeProvider: { _ in nil },
             priorSizeProvider: { url in
@@ -91,7 +91,7 @@ struct StorageAttributionServiceTests {
             options: DiskActivityAggregationOptions(
                 minimumRecordedByteDelta: 10,
                 aggregationWindow: 300,
-                longTermRecordsFileNames: false
+                longTermRecordsFileNames: true
             ),
             sizeProvider: { _ in nil },
             priorSizeProvider: { _ in nil }
@@ -134,7 +134,7 @@ struct StorageAttributionServiceTests {
             options: DiskActivityAggregationOptions(
                 minimumRecordedByteDelta: 10,
                 aggregationWindow: 300,
-                longTermRecordsFileNames: false
+                longTermRecordsFileNames: true
             ),
             sizeProvider: { _ in nil },
             priorSizeProvider: { url in
@@ -159,7 +159,7 @@ struct StorageAttributionServiceTests {
             options: DiskActivityAggregationOptions(
                 minimumRecordedByteDelta: 10,
                 aggregationWindow: 300,
-                longTermRecordsFileNames: false
+                longTermRecordsFileNames: true
             ),
             sizeProvider: { _ in nil },
             priorSizeProvider: { _ in nil }
@@ -200,6 +200,31 @@ struct StorageAttributionServiceTests {
         #expect(events.first?.path == parent)
         #expect(events.first?.byteDelta == 150)
         #expect(events.first?.affectedItemCount == 3)
+    }
+
+    /// Names off has to mean names off. A change alone in its window used to
+    /// keep its full path, so the setting only held for busy folders.
+    @Test("suppresses the file name even when a window holds a single change")
+    func collapsesLoneChangeWhenNamesAreOff() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "Reports/secret-plan.pdf")
+        let service = StorageAttributionService(
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 10,
+                aggregationWindow: 300,
+                longTermRecordsFileNames: false
+            ),
+            sizeProvider: { _ in 900 }
+        )
+
+        let events = service.process([
+            DiskActivityChange(kind: .created, path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 100))
+        ])
+
+        #expect(events.count == 1)
+        #expect(events.first?.path == root.appending(path: "Reports"))
+        #expect(events.first?.kind == .aggregate)
+        #expect(events.first?.byteDelta == 900)
     }
 }
 

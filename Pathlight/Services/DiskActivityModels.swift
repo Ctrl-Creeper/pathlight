@@ -89,10 +89,13 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
     let aggregationWindow: TimeInterval
     let longTermRecordsFileNames: Bool
 
+    /// Names on by default: the byte threshold already keeps the journal small,
+    /// and "which file grew" is the answer the dashboard exists to give. Turning
+    /// names off trades that answer for directory-level rows.
     static let `default` = DiskActivityAggregationOptions(
         minimumRecordedByteDelta: 10 * 1_024 * 1_024,
         aggregationWindow: 5 * 60,
-        longTermRecordsFileNames: false
+        longTermRecordsFileNames: true
     )
 
     static let shortTermDefault = DiskActivityAggregationOptions(

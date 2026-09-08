@@ -140,6 +140,10 @@ struct StorageAttributionService {
         )
     }
 
+    /// With names switched off every change in a window collapses to its parent
+    /// directory — including a change that is alone in its window. That last
+    /// case used to keep its full path, so the setting only held for folders
+    /// busy enough to have something to merge with.
     private func aggregate(_ events: [DiskActivityEvent]) -> [DiskActivityEvent] {
         guard !options.longTermRecordsFileNames, options.aggregationWindow > 0 else {
             return events
@@ -149,7 +153,7 @@ struct StorageAttributionService {
             AggregationKey(event: event, window: options.aggregationWindow)
         }
         return groups.values
-            .map(aggregateGroup)
+            .map(directoryAggregate)
             .sorted { lhs, rhs in
                 if lhs.timestamp == rhs.timestamp {
                     return lhs.path.path < rhs.path.path
@@ -158,11 +162,9 @@ struct StorageAttributionService {
             }
     }
 
-    private func aggregateGroup(_ events: [DiskActivityEvent]) -> DiskActivityEvent {
-        guard events.count > 1 else {
-            return events[0]
-        }
-
+    /// Collapses a window's changes to their parent directory, dropping the
+    /// file names along with them.
+    private func directoryAggregate(_ events: [DiskActivityEvent]) -> DiskActivityEvent {
         let sortedEvents = events.sorted { lhs, rhs in
             if lhs.timestamp == rhs.timestamp {
                 return lhs.path.path < rhs.path.path
