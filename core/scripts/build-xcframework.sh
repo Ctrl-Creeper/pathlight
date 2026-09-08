@@ -10,6 +10,29 @@ cd "$(dirname "$0")/.."
 PROFILE=${1:-release}
 CARGO_FLAGS=""
 [ "$PROFILE" = "release" ] && CARGO_FLAGS="--release"
+# Keep Rust objects compatible with the app's declared minimum. Without this,
+# rustc inherits the current SDK version and Xcode links a macOS 26 library into
+# a macOS 14 app. Callers can override this when the app target changes.
+: "${MACOSX_DEPLOYMENT_TARGET:=14.0}"
+export MACOSX_DEPLOYMENT_TARGET
+
+verify_macos_minimum() {
+    library=$1
+    incompatible=$(
+        otool -l "$library" 2>/dev/null | awk -v maximum="$MACOSX_DEPLOYMENT_TARGET" '
+            function version_code(version, parts) {
+                split(version, parts, ".")
+                return (parts[1] + 0) * 1000000 + (parts[2] + 0) * 1000 + (parts[3] + 0)
+            }
+            $1 == "minos" && version_code($2) > version_code(maximum) { print $2 }
+        ' | sort -u
+    )
+    if [ -n "$incompatible" ]; then
+        echo "error: $library contains objects requiring macOS $incompatible; the app targets macOS $MACOSX_DEPLOYMENT_TARGET" >&2
+        echo "error: use an official rustup toolchain whose standard library supports the deployment target" >&2
+        exit 1
+    fi
+}
 
 HOST=$(rustc -vV | sed -n 's/^host: //p')
 OTHER=""
@@ -26,7 +49,9 @@ fi
 LIBS=""
 for target in $TARGETS; do
     cargo build $CARGO_FLAGS --target "$target"
-    LIBS="${LIBS:+$LIBS }target/$target/$PROFILE/libpathlight_core.a"
+    library="target/$target/$PROFILE/libpathlight_core.a"
+    verify_macos_minimum "$library"
+    LIBS="${LIBS:+$LIBS }$library"
 done
 
 STAGING=target/xcframework
