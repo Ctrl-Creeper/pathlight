@@ -103,7 +103,7 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
 
 nonisolated struct ActivityBaselineService: Sendable {
     typealias ContentsProvider = @Sendable (URL) throws -> [URL]
-    typealias IdentityProvider = @Sendable (URL) -> ObjectIdentity?
+    typealias MeasurementProvider = @Sendable (URL) -> Measurement
 
     /// Scoped to one traversal only: an inode can be reused after unlink, so this
     /// must not become a durable identity without lifecycle evidence.
@@ -112,22 +112,27 @@ nonisolated struct ActivityBaselineService: Sendable {
         let inode: UInt64
     }
 
-    private let sizeProvider: StorageAttributionService.SizeProvider
+    /// One native metadata observation. Keeping allocation and identity in the
+    /// same value prevents a replacement between two path lookups from joining
+    /// the old object's bytes to the new object's identity.
+    struct Measurement: Sendable {
+        let allocatedSize: Int64?
+        let identity: ObjectIdentity?
+    }
+
+    private let measurementProvider: MeasurementProvider
     private let contentsProvider: ContentsProvider
-    private let identityProvider: IdentityProvider
     private let isSystemUnderPressure: @Sendable () -> Bool
     private let now: @Sendable () -> Date
 
     init(
-        sizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
+        measurementProvider: @escaping MeasurementProvider = Self.liveMeasurement(at:),
         contentsProvider: @escaping ContentsProvider = Self.liveContents(at:),
-        identityProvider: @escaping IdentityProvider = Self.liveIdentity(at:),
         isSystemUnderPressure: @escaping @Sendable () -> Bool = Self.liveSystemPressure,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
-        self.sizeProvider = sizeProvider
+        self.measurementProvider = measurementProvider
         self.contentsProvider = contentsProvider
-        self.identityProvider = identityProvider
         self.isSystemUnderPressure = isSystemUnderPressure
         self.now = now
     }
@@ -158,10 +163,11 @@ nonisolated struct ActivityBaselineService: Sendable {
             let standardizedURL = url.standardizedFileURL
             guard visitedPaths.insert(standardizedURL.path).inserted else { continue }
 
-            if let size = sizeProvider(standardizedURL), size >= 0 {
+            let measurement = measurementProvider(standardizedURL)
+            if let size = measurement.allocatedSize, size >= 0 {
                 measuredItemCount += 1
                 let isNewObject: Bool
-                if let identity = identityProvider(standardizedURL) {
+                if let identity = measurement.identity {
                     isNewObject = measuredObjects.insert(identity).inserted
                 } else {
                     unidentifiedItemCount += 1
@@ -213,14 +219,24 @@ nonisolated struct ActivityBaselineService: Sendable {
         return processInfo.isLowPowerModeEnabled
     }
 
-    private static func liveIdentity(at url: URL) -> ObjectIdentity? {
+    private static func liveMeasurement(at url: URL) -> Measurement {
         var metadata = stat()
         let result = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return Int32(-1) }
             return lstat(path, &metadata)
         }
-        guard result == 0 else { return nil }
-        return ObjectIdentity(device: UInt64(bitPattern: Int64(metadata.st_dev)), inode: UInt64(metadata.st_ino))
+        guard result == 0 else {
+            return Measurement(allocatedSize: nil, identity: nil)
+        }
+        let isDirectory = metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+        let allocation = metadata.st_blocks.multipliedReportingOverflow(by: 512)
+        return Measurement(
+            allocatedSize: isDirectory || !allocation.overflow ? (isDirectory ? 0 : allocation.partialValue) : nil,
+            identity: ObjectIdentity(
+                device: UInt64(bitPattern: Int64(metadata.st_dev)),
+                inode: UInt64(metadata.st_ino)
+            )
+        )
     }
 
     private static func liveContents(at url: URL) throws -> [URL] {

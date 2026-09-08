@@ -56,13 +56,14 @@ struct AppDependencies {
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
     /// passes the Rust-backed monitor instead.
     static func live(
-        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor()
+        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activitySizeIndex: ActivitySizeIndex? = nil
     ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
         let activityStorageLineCodec = ActivityStorageLineCodec(
             preferencesStore: activityStoragePreferences
         )
-        let activitySizeIndex = ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
+        let activitySizeIndex = activitySizeIndex ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
         let activitySizeProvider: StorageAttributionService.SizeProvider = { url in
             activitySizeIndex.recordKnownSize(
                 FileAllocatedSizeProvider.allocatedSize(for: url),
@@ -80,7 +81,10 @@ struct AppDependencies {
                 activitySizeIndex.knownSize(for: url)
             },
             activityEventStore: JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec),
-            activityBaselineService: ActivityBaselineService(sizeProvider: activitySizeProvider),
+            // A scan may observe a new size before its delayed change event.
+            // Keep those measurements out of the live attribution index so they
+            // cannot consume an increment or overwrite a newer event measurement.
+            activityBaselineService: ActivityBaselineService(),
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
             launchAtLoginService: SystemLaunchAtLoginService(),

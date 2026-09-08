@@ -4,6 +4,30 @@ import Testing
 
 @Suite("Activity baseline service")
 struct ActivityBaselineServiceTests {
+    @Test("consumes size and identity as one measurement per path")
+    func consumesOneMeasurementPerPath() async {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let calls = LockedCounter()
+        let identity = ActivityBaselineService.ObjectIdentity(device: 7, inode: 11)
+        let service = ActivityBaselineService(
+            measurementProvider: { _ in
+                calls.increment()
+                return ActivityBaselineService.Measurement(
+                    allocatedSize: 4_096,
+                    identity: identity
+                )
+            },
+            contentsProvider: { _ in [] }
+        )
+
+        let baseline = await service.captureBaseline(rootPath: root)
+
+        #expect(calls.value == 1)
+        #expect(baseline.allocatedSize == 4_096)
+        #expect(baseline.measuredObjectCount == 1)
+        #expect(baseline.unidentifiedItemCount == 0)
+    }
+
     @Test("captures recursive allocated size baseline")
     func capturesRecursiveAllocatedSizeBaseline() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
@@ -11,13 +35,17 @@ struct ActivityBaselineServiceTests {
         let folder = root.appending(path: "Archives", directoryHint: .isDirectory)
         let nested = folder.appending(path: "old.zip")
         let service = ActivityBaselineService(
-            sizeProvider: { url in
-                [
+            measurementProvider: { url in
+                let size = [
                     root.standardizedFileURL.path: Int64(64),
                     child.standardizedFileURL.path: Int64(2_048),
                     folder.standardizedFileURL.path: Int64(128),
                     nested.standardizedFileURL.path: Int64(1_024)
                 ][url.standardizedFileURL.path]
+                return ActivityBaselineService.Measurement(
+                    allocatedSize: size,
+                    identity: nil
+                )
             },
             contentsProvider: { url in
                 switch url.standardizedFileURL.path {
@@ -50,8 +78,11 @@ struct ActivityBaselineServiceTests {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let privateFolder = root.appending(path: "Private", directoryHint: .isDirectory)
         let service = ActivityBaselineService(
-            sizeProvider: { url in
-                url.standardizedFileURL.path == root.standardizedFileURL.path ? 64 : nil
+            measurementProvider: { url in
+                ActivityBaselineService.Measurement(
+                    allocatedSize: url.standardizedFileURL.path == root.standardizedFileURL.path ? 64 : nil,
+                    identity: nil
+                )
             },
             contentsProvider: { url in
                 if url.standardizedFileURL.path == root.standardizedFileURL.path {
@@ -170,6 +201,14 @@ struct ActivityBaselineServiceTests {
         #expect(!snapshot.withObservedChanges(false).isUsableForReconciliation)
         #expect(try JSONDecoder().decode(ActivityBaselineSnapshot.self, from: JSONEncoder().encode(snapshot)) == snapshot)
     }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }
 
 private func makeTemporaryDirectory() throws -> URL {

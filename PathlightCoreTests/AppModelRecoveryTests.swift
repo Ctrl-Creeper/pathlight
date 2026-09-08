@@ -87,9 +87,13 @@ final class AppModelRecoveryTests: XCTestCase {
             activityEventStore: nil,
             longTermWatchTargets: LongTermWatchTargetStore(persistence: persistence),
             activityBaselineService: ActivityBaselineService(
-                sizeProvider: { _ in 0 },
+                measurementProvider: { _ in
+                    ActivityBaselineService.Measurement(
+                        allocatedSize: 0,
+                        identity: ActivityBaselineService.ObjectIdentity(device: 1, inode: 1)
+                    )
+                },
                 contentsProvider: { scan.contents(at: $0) },
-                identityProvider: { _ in ActivityBaselineService.ObjectIdentity(device: 1, inode: 1) }
             ),
             activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
             launchAtLoginService: RecoveryTestLoginService()

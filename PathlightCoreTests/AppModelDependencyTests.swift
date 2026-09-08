@@ -3,6 +3,24 @@ import XCTest
 
 @MainActor
 final class AppModelDependencyTests: XCTestCase {
+    func testBaselineDoesNotOverwriteEventAttributionIndex() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "PathlightBaselineIndex-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "changed.bin")
+        try Data(repeating: 0x42, count: 16_384).write(to: file)
+        let sizeIndex = ActivitySizeIndex()
+        sizeIndex.recordKnownSize(4_096, for: file)
+        let dependencies = AppDependencies.live(activitySizeIndex: sizeIndex)
+
+        let baseline = await dependencies.activityBaselineService.captureBaseline(rootPath: root)
+
+        XCTAssertGreaterThanOrEqual(baseline.allocatedSize, 16_384)
+        XCTAssertEqual(dependencies.activityKnownSizeProvider(file), 4_096,
+                       "a delayed modification still needs the pre-scan size for attribution")
+        XCTAssertNil(sizeIndex.knownSize(for: root), "enumeration must not seed paths into the live event index")
+    }
+
     func testLoadsPersistedLongTermWatchTargets() {
         let store = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
