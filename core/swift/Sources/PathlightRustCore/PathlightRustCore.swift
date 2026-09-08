@@ -1068,7 +1068,8 @@ open class Watcher: WatcherProtocol, @unchecked Sendable {
      *
      * `since_event_id` resumes from a previous cursor where the platform supports
      * it (FSEvents); elsewhere a `RequiresRescan` is emitted so the host
-     * re-baselines. `latency_ms` is the coalescing window handed to the kernel.
+     * re-baselines. `latency_ms` is the FSEvents coalescing window; inotify
+     * delivers immediately and waits up to 250 ms only for unmatched renames.
      */
 public static func start(rootPath: String, sinceEventId: UInt64?, latencyMs: UInt64, listener: ActivityListener)throws  -> Watcher  {
     return try  FfiConverterTypeWatcher_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
@@ -1325,8 +1326,9 @@ public struct Capabilities: Equatable, Hashable {
      */
     public var resumableCursor: Bool
     /**
-     * One user-visible rename arrives as one event carrying both paths. When
-     * false the host sees two halves and must pair them itself.
+     * Pairs observed rename halves within the backend's matching window.
+     * Moves across the root boundary, expired halves, and gaps can still be
+     * unpaired. When false the host must pair even ordinary in-root renames.
      */
     public var pairsRenames: Bool
     /**
@@ -1348,8 +1350,9 @@ public struct Capabilities: Equatable, Hashable {
          * previous session instead of silently starting over.
          */resumableCursor: Bool, 
         /**
-         * One user-visible rename arrives as one event carrying both paths. When
-         * false the host sees two halves and must pair them itself.
+         * Pairs observed rename halves within the backend's matching window.
+         * Moves across the root boundary, expired halves, and gaps can still be
+         * unpaired. When false the host must pair even ordinary in-root renames.
          */pairsRenames: Bool, 
         /**
          * Changes name the process responsible. When false the host should show
@@ -2223,7 +2226,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_constructor_journal_new() != 12772) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 54333) {
+    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 44487) {
         return InitializationResult.apiChecksumMismatch
     }
 
