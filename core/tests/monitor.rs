@@ -404,6 +404,10 @@ fn event_ids_never_go_backwards() {
 /// must produce exactly one row carrying both paths, with no loose half left
 /// for the host to pair. Backends that don't claim it are covered by the
 /// weaker portable test above.
+///
+/// The seed write can still surface as a `Created` for the source name: a
+/// backend is allowed to deliver it just after arming. That is not a loose
+/// rename half, so only departure rows for the source name are disqualifying.
 #[test]
 fn a_backend_claiming_to_pair_renames_really_does() {
     if !watcher_capabilities().pairs_renames {
@@ -426,8 +430,17 @@ fn a_backend_claiming_to_pair_renames_really_does() {
     });
     std::thread::sleep(Duration::from_millis(700));
     let changes = harness.changes();
+    let departures: Vec<_> = named(&changes, "draft.txt")
+        .into_iter()
+        .filter(|change| {
+            matches!(
+                change.kind,
+                ChangeKind::Deleted | ChangeKind::Renamed { .. }
+            )
+        })
+        .collect();
     assert!(
-        named(&changes, "draft.txt").is_empty(),
+        departures.is_empty(),
         "the departure half must be suppressed once it is paired: {changes:#?}"
     );
     assert_eq!(
