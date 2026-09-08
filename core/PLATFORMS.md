@@ -58,6 +58,24 @@ a container. Windows x86_64 GNU and Android aarch64 checks prove compilation
 only; Windows/Android device execution, power measurements and privileged
 helpers remain unverified.
 
+## Losing the watch root
+
+A watch whose root is deleted, renamed or unmounted is the one failure a host
+cannot detect on its own: the stream stays open and silent, so a dead watch
+looks exactly like a quiet folder. Every backend has to surface it as
+`RequiresRescan`, and `tests/monitor.rs` holds all of them to it by deleting a
+live root.
+
+| Platform | Kernel signal | Route |
+|---|---|---|
+| macOS | `kFSEventStreamEventFlagRootChanged` | Only delivered when the stream is created with `kFSEventStreamCreateFlagWatchRoot`, which `src/fsevents.rs` now sets. Without that flag the root can vanish and FSEvents reports nothing at all. |
+| Linux | `IN_DELETE_SELF`, `IN_MOVE_SELF` | notify watches the top level with `watch_self`, then the kernel drops the watch right after delivering. `src/notify_backend.rs` recognizes an event naming the root itself and reports the gap instead of filing one ordinary change inside a watch that is already dead. |
+| Windows | none | `ReadDirectoryChangesW` holds an open handle to the watched directory, so the directory cannot be deleted while the watch runs, and a rename keeps the handle valid on the moved directory. There is no equivalent signal to normalize and none is fabricated; the loss modes are unmount and revoked access, which surface as a read failure. |
+
+The `RequiresRescan` contract stops at reporting. Deciding whether the root is
+gone for good or merely renamed is the host's job: the Swift app re-probes the
+path and reports `rootMissing` or reconnects.
+
 ## Platform-specific next steps
 
 1. Replace platform-wide capability constants with a negotiated per-watch
