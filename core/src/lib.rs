@@ -12,8 +12,12 @@ pub mod exclusion;
 #[cfg(target_os = "macos")]
 mod fsevents;
 pub mod history;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod inotify;
 pub mod journal;
 pub mod monitor;
+#[cfg(not(target_os = "macos"))]
+mod notify_backend;
 pub mod paths;
 
 pub use attribution::{AggregationOptions, Attributor, SizeIndex};

@@ -187,6 +187,181 @@ fn a_rename_inside_the_root_stays_reconstructable() {
     });
 }
 
+/// Observe past the first matching event: notify/inotify used to deliver a
+/// correct paired rename *as well as* both halves, yielding three journal rows.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_cookie_paired_rename_is_reported_once() {
+    let harness = Harness::start(|root| std::fs::write(root.join("draft.txt"), b"draft").unwrap());
+    std::fs::rename(
+        harness.root.join("draft.txt"),
+        harness.root.join("final.txt"),
+    )
+    .unwrap();
+    harness.wait_for("the rename destination", |changes| {
+        !named(changes, "final.txt").is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    let changes = harness.changes();
+    let renamed: Vec<_> = changes
+        .iter()
+        .filter(|change| {
+            matches!(change.kind, ChangeKind::Renamed { .. })
+                && (change.path.ends_with("draft.txt") || change.path.ends_with("final.txt"))
+        })
+        .collect();
+    assert_eq!(
+        renamed.len(),
+        1,
+        "one rename became multiple rows: {changes:#?}"
+    );
+    assert_eq!(
+        renamed[0].path,
+        paths::normalize(&harness.root.join("final.txt").to_string_lossy())
+    );
+    assert_eq!(
+        renamed[0].kind,
+        ChangeKind::Renamed {
+            previous_path: Some(paths::normalize(
+                &harness.root.join("draft.txt").to_string_lossy()
+            )),
+        }
+    );
+}
+
+#[test]
+fn moves_across_the_root_boundary_are_not_lost_while_idle() {
+    let harness = Harness::start(|root| std::fs::write(root.join("leaving.txt"), b"bye").unwrap());
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("arriving.txt"), b"hello").unwrap();
+    std::fs::rename(
+        harness.root.join("leaving.txt"),
+        outside.path().join("leaving.txt"),
+    )
+    .unwrap();
+    std::fs::rename(
+        outside.path().join("arriving.txt"),
+        harness.root.join("arriving.txt"),
+    )
+    .unwrap();
+    // No more activity: a pending unmatched half must expire on its own.
+    harness.wait_for("both boundary moves", |changes| {
+        !named(changes, "leaving.txt").is_empty() && !named(changes, "arriving.txt").is_empty()
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unrepresentable_native_names_report_a_gap_instead_of_a_different_file() {
+    use std::os::unix::ffi::OsStringExt;
+    let harness = Harness::start(|_| {});
+    let native = std::ffi::OsString::from_vec(b"native-\xff.txt".to_vec());
+    std::fs::write(harness.root.join(native), b"native bytes").unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until
+        && !harness
+            .events()
+            .iter()
+            .any(|event| matches!(event, StreamEvent::RequiresRescan { .. }))
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        harness
+            .events()
+            .iter()
+            .any(|event| matches!(event, StreamEvent::RequiresRescan { .. })),
+        "unsupported encoding must be explicit: {:?}",
+        harness.events()
+    );
+    assert!(harness
+        .changes()
+        .iter()
+        .all(|change| !change.path.contains('\u{fffd}')));
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn successive_cookie_paired_renames_are_distinct() {
+    let harness = Harness::start(|root| std::fs::write(root.join("a.txt"), b"draft").unwrap());
+    std::fs::rename(harness.root.join("a.txt"), harness.root.join("b.txt")).unwrap();
+    std::fs::rename(harness.root.join("b.txt"), harness.root.join("c.txt")).unwrap();
+    harness.wait_for("the second rename", |changes| {
+        !named(changes, "c.txt").is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    let renamed: Vec<_> = harness
+        .changes()
+        .into_iter()
+        .filter(|change| matches!(change.kind, ChangeKind::Renamed { .. }))
+        .collect();
+    assert_eq!(
+        renamed.len(),
+        2,
+        "distinct operations were dropped or duplicated: {renamed:#?}"
+    );
+    assert!(
+        matches!(&renamed[0].kind, ChangeKind::Renamed { previous_path: Some(p) } if p.ends_with("a.txt"))
+    );
+    assert!(
+        matches!(&renamed[1].kind, ChangeKind::Renamed { previous_path: Some(p) } if p.ends_with("b.txt"))
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_directory_cookie_rename_is_reported_once() {
+    let harness = Harness::start(|root| std::fs::create_dir(root.join("old-dir")).unwrap());
+    std::fs::rename(harness.root.join("old-dir"), harness.root.join("new-dir")).unwrap();
+    harness.wait_for("the directory rename", |changes| {
+        !named(changes, "new-dir").is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    let renamed: Vec<_> = harness
+        .changes()
+        .into_iter()
+        .filter(|change| matches!(change.kind, ChangeKind::Renamed { .. }))
+        .collect();
+    assert_eq!(
+        renamed.len(),
+        1,
+        "directory rename duplicated: {renamed:#?}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn stopping_flushes_an_accepted_departure_with_ordered_ids() {
+    let harness =
+        Harness::start(|root| std::fs::write(root.join("departing.txt"), b"bye").unwrap());
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::rename(
+        harness.root.join("departing.txt"),
+        outside.path().join("departing.txt"),
+    )
+    .unwrap();
+    std::fs::write(harness.root.join("marker.txt"), b"after the departure").unwrap();
+    // Receipt of the later write proves the worker has accepted the departure.
+    harness.wait_for("the later write", |changes| {
+        !named(changes, "marker.txt").is_empty()
+    });
+    harness.watcher.stop();
+    harness.watcher.stop();
+    assert_eq!(named(&harness.changes(), "departing.txt").len(), 1);
+    let ids: Vec<_> = harness
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Change { event_id, .. } => Some(event_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ids.windows(2).all(|pair| pair[0] <= pair[1]),
+        "delayed half reordered IDs: {ids:?}"
+    );
+}
+
 #[test]
 fn changes_in_a_directory_created_after_arming_are_reported() {
     let harness = Harness::start(|_| {});
@@ -241,7 +416,7 @@ fn a_backend_claiming_to_pair_renames_really_does() {
     )
     .unwrap();
 
-    let changes = harness.wait_for("the paired rename", |changes| {
+    harness.wait_for("the paired rename", |changes| {
         named(changes, "final.txt").iter().any(|change| {
             matches!(
                 &change.kind,
@@ -249,9 +424,16 @@ fn a_backend_claiming_to_pair_renames_really_does() {
             )
         })
     });
+    std::thread::sleep(Duration::from_millis(700));
+    let changes = harness.changes();
     assert!(
         named(&changes, "draft.txt").is_empty(),
         "the departure half must be suppressed once it is paired: {changes:#?}"
+    );
+    assert_eq!(
+        named(&changes, "final.txt").len(),
+        1,
+        "duplicate destination: {changes:#?}"
     );
 }
 

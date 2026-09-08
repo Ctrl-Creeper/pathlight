@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::CoreError;
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum ChangeKind {
     Created,
     Modified,
@@ -18,7 +18,7 @@ pub enum ChangeKind {
     Renamed { previous_path: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct Change {
     pub kind: ChangeKind,
     pub path: String,
@@ -52,8 +52,9 @@ pub struct Capabilities {
     /// Event IDs come from the kernel, so `since_event_id` really resumes a
     /// previous session instead of silently starting over.
     pub resumable_cursor: bool,
-    /// One user-visible rename arrives as one event carrying both paths. When
-    /// false the host sees two halves and must pair them itself.
+    /// Pairs observed rename halves within the backend's matching window.
+    /// Moves across the root boundary, expired halves, and gaps can still be
+    /// unpaired. When false the host must pair even ordinary in-root renames.
     pub pairs_renames: bool,
     /// Changes name the process responsible. When false the host should show
     /// nothing rather than a guess.
@@ -110,7 +111,8 @@ impl Watcher {
     ///
     /// `since_event_id` resumes from a previous cursor where the platform supports
     /// it (FSEvents); elsewhere a `RequiresRescan` is emitted so the host
-    /// re-baselines. `latency_ms` is the coalescing window handed to the kernel.
+    /// re-baselines. `latency_ms` is the FSEvents coalescing window; inotify
+    /// delivers immediately and waits up to 250 ms only for unmatched renames.
     #[uniffi::constructor]
     pub fn start(
         root_path: String,
@@ -128,10 +130,11 @@ impl Watcher {
     }
 
     pub fn stop(&self) {
-        if let Ok(mut guard) = self.inner.lock() {
-            if let Some(mut backend) = guard.take() {
-                backend.stop();
-            }
+        let backend = self.inner.lock().ok().and_then(|mut guard| guard.take());
+        // Stopping may join a worker that is calling the listener. Release the
+        // mutex first so a concurrent listener stop cannot deadlock that join.
+        if let Some(mut backend) = backend {
+            backend.stop();
         }
     }
 }
@@ -159,105 +162,5 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use notify::event::{ModifyKind, RenameMode};
-    use notify::{
-        Config, EventKind as NotifyKind, RecommendedWatcher, RecursiveMode, Watcher as _,
-    };
-
-    use super::{Backend, ChangeKind, Emitter, StreamEvent};
-    use crate::CoreError;
-
-    /// inotify and ReadDirectoryChangesW both give a process-local counter, not a
-    /// cursor that survives a restart, and neither pairs rename halves for us
-    /// (the `RenameMode::Both` arm below is opportunistic). Queue overflow is
-    /// reported, so `RequiresRescan` is reachable.
-    pub(crate) const CAPABILITIES: super::Capabilities = super::Capabilities {
-        resumable_cursor: false,
-        pairs_renames: false,
-        reports_process: false,
-        may_drop_events: true,
-    };
-
-    struct NotifyBackend(Option<RecommendedWatcher>);
-
-    impl Backend for NotifyBackend {
-        fn stop(&mut self) {
-            self.0.take();
-        }
-    }
-
-    pub fn start(
-        emitter: Arc<Emitter>,
-        since_event_id: Option<u64>,
-        latency: Duration,
-    ) -> Result<Box<dyn Backend>, CoreError> {
-        // ponytail: counter, not inotify cookies / USN numbers; resume-after-restart
-        // needs a platform backend that exposes the kernel's own cursor.
-        let next_id = Arc::new(AtomicU64::new(1));
-        let handler_emitter = Arc::clone(&emitter);
-        let mut watcher = RecommendedWatcher::new(
-            move |result: notify::Result<notify::Event>| {
-                let event_id = next_id.fetch_add(1, Ordering::Relaxed);
-                forward(&handler_emitter, result, event_id);
-            },
-            Config::default().with_poll_interval(latency),
-        )?;
-        watcher.watch(Path::new(&emitter.root), RecursiveMode::Recursive)?;
-
-        if since_event_id.is_some() {
-            emitter.emit(StreamEvent::RequiresRescan { event_id: 0 });
-        }
-        emitter.emit(StreamEvent::HistoryCaughtUp { event_id: 0 });
-        Ok(Box::new(NotifyBackend(Some(watcher))))
-    }
-
-    fn forward(emitter: &Emitter, result: notify::Result<notify::Event>, event_id: u64) {
-        let event = match result {
-            Ok(event) => event,
-            // A backend error means events may have been lost; the host re-baselines.
-            Err(_) => return emitter.emit(StreamEvent::RequiresRescan { event_id }),
-        };
-        if event.need_rescan() {
-            return emitter.emit(StreamEvent::RequiresRescan { event_id });
-        }
-        let lossy = |path: &Path| path.to_string_lossy().into_owned();
-        match event.kind {
-            NotifyKind::Access(_) => {}
-            NotifyKind::Create(_) => event
-                .paths
-                .iter()
-                .for_each(|p| emitter.change(ChangeKind::Created, lossy(p), event_id)),
-            NotifyKind::Remove(_) => event
-                .paths
-                .iter()
-                .for_each(|p| emitter.change(ChangeKind::Deleted, lossy(p), event_id)),
-            NotifyKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
-                emitter.change(
-                    ChangeKind::Renamed {
-                        previous_path: Some(lossy(&event.paths[0])),
-                    },
-                    lossy(&event.paths[1]),
-                    event_id,
-                )
-            }
-            NotifyKind::Modify(ModifyKind::Name(_)) => event.paths.iter().for_each(|p| {
-                emitter.change(
-                    ChangeKind::Renamed {
-                        previous_path: None,
-                    },
-                    lossy(p),
-                    event_id,
-                )
-            }),
-            NotifyKind::Modify(_) | NotifyKind::Any | NotifyKind::Other => event
-                .paths
-                .iter()
-                .for_each(|p| emitter.change(ChangeKind::Modified, lossy(p), event_id)),
-        }
-    }
+    pub(crate) use crate::notify_backend::{start, CAPABILITIES};
 }

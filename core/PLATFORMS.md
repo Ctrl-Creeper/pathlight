@@ -1,150 +1,101 @@
 # Platform routes
 
-Per-OS technical route for the watcher, and *why* each one is the route. The
-capability declarations themselves live in `src/monitor.rs` and are enforced by
-`tests/monitor.rs`; this file records the decisions and privilege trade-offs
-behind them, which the code cannot show.
+Pathlight prioritizes efficient, accurate monitoring on each OS. Backends may
+provide different guarantees; missing events or missing access must be visible
+instead of silently producing a complete-looking history.
 
-The rule: platforms are not made to behave alike. Each backend uses the
-strongest API it can reach without changing how the app is distributed, and
-declares what it therefore cannot do. Accuracy means a backend is never wrong
-about its own limits.
+Default backends remain usable without installing a privileged helper. Optional
+privileged backends are now part of the roadmap, enabled separately per platform
+and per user choice. They complement the default sources where useful; they are
+not inherently lossless replacements. The detailed design, primary sources,
+permission boundaries and acceptance gates are in
+[PRIVILEGED_BACKENDS.md](PRIVILEGED_BACKENDS.md).
 
-## The privilege line
+## Current implementation
 
-Every platform has a cheap unprivileged API and a strictly better privileged
-one, and the privileged one always changes the shipping story (root install,
-elevation prompt, or Apple review). So each platform gets a **default tier**
-that ships as a normal app, and an optional **privileged tier** behind an
-explicit user action.
+| Platform | Source in the repository | Current guarantees and limits |
+|---|---|---|
+| macOS | Native FSEvents | Kernel cursor and replay while history is retained; inode-based rename pairing; no authoritative process identity; gaps require reconciliation. |
+| Linux | notify/inotify with Pathlight cookie pairing | Observed rename halves are paired; no persistent cursor or process identity; per-directory watches, registration races and overflow remain. |
+| Windows | notify/ReadDirectoryChangesW | Recursive event delivery without polling; separate rename halves; no persistent cursor or process identity. |
+| Android | Rust inotify route compiles for Android | No Android host yet. Compiling the core does not prove storage access, background lifetime or cross-app event coverage on a device. |
+| iOS | No monitoring host | Plan a desktop-history viewer and explicitly scoped foreground features; no public API for an arbitrary system-wide privileged monitor. |
 
-| | default tier | privileged tier | what privilege buys |
-|---|---|---|---|
-| macOS | FSEvents | Endpoint Security | real PID |
-| Linux | inotify | fanotify (`CAP_SYS_ADMIN`) | real PID, whole-volume, no watch cap |
-| Windows | ReadDirectoryChangesW | USN Journal (admin) | cursor that survives reboot |
-| Android | — | — | nothing worth the policy risk |
+`monitor::Capabilities` describes the currently selected implementation.
+`pairs_renames` means ordinary observed halves can be paired within its matching
+window, not that cross-root moves, queue gaps or expired halves have both paths.
+Future helpers need per-watch runtime capabilities, including filesystem,
+authorized scope and source health; an OS-wide constant cannot express those.
 
-Only the default tiers are planned work. The privileged tiers are documented so
-nobody re-discovers them as "missing features".
+## Linux rename correction
 
-## macOS — done
+The pinned notify 8.2.0 inotify source emits `From`, `To`, and then a redundant
+`Both` for one kernel rename. Forwarding all three used to produce three rows.
+`src/inotify.rs` now pairs the halves by cookie and ignores the redundant `Both`
+only on the inotify route. It handles interleaved cookies itself, since notify
+only remembers one pending departure.
 
-FSEvents with `kFSEventStreamCreateFlagFileEvents` + `UseExtendedData`. Kernel
-event IDs are a real resumable cursor, and the inode in the extended data lets
-`fsevents.rs` pair rename halves itself. Wide latency + `NoDefer` keeps
-background watches cheap.
+Unmatched halves wait at most 250 ms after processing before being forwarded,
+so a move into or out of the root is preserved even when the filesystem goes
+idle. Late halves remain separate; they do not acquire a third row. There is
+no timer while the pairing buffer is empty. Memory is bounded: 1,024 pending
+halves and a 4,096-event callback queue. Exhaustion emits `RequiresRescan` and
+clears pairing state at the gap. Accepted events are drained on stop, and event
+IDs are assigned in output order. This is event normalization, not periodic
+filesystem polling; power consumption has not yet been benchmarked.
 
-No process attribution: only Endpoint Security names the process, and it needs
-the `com.apple.developer.endpoint-security.client` entitlement (individual
-Apple approval), a system extension, and Full Disk Access. That turns Pathlight
-into a different kind of product. `reports_process: false` stays, and the `lsof`
-hint stays labelled a hint.
+`tests/monitor.rs` uses real filesystem operations to check single-row file and
+directory renames, successive renames, root-boundary moves, shutdown and event
+ID order. The original single-rename regression failed with three rows on Linux
+before the fix. Unit tests cover interleaved cookies, late halves, gaps and
+pairing-buffer exhaustion. The existing Linux/macOS/Windows CI matrix runs these
+contracts; a cross-compilation check alone is not a Windows or Android runtime
+qualification.
 
-## Linux — inotify, with the watch cap as a first-class failure
+Local verification on 2026-09-08: 38 Rust tests passed on Linux in a container
+(filesystem operations run inside its Linux filesystem), and 29 passed on
+macOS. Clippy with warnings denied passed on both. Windows x86_64 GNU
+`cargo check --all-targets` and Android aarch64 `cargo check --lib` passed.
+Windows/Android device execution, power measurements and privileged helpers
+remain unverified.
 
-inotify pairs renames properly via the `IN_MOVED_FROM`/`IN_MOVED_TO` cookie, so
-`pairs_renames` is achievable here — CI on Ubuntu is what proves it.
+## Platform-specific next steps
 
-Two things must be handled rather than hoped away:
+1. Move snapshot reconciliation into the shared core and distinguish event
+   history from reconstructed net changes. A snapshot cannot recover a temporary
+   file created and deleted entirely during a gap.
+2. Define source identities, per-watch coverage, loss markers and IPC contracts
+   before combining default and privileged sources. Do not append two sources
+   independently and recreate the duplicate-recording bug.
+3. Linux: prototype an optional fanotify helper on explicitly tested kernels and
+   filesystems. Probe supported flags, handle overflow and mount changes, and
+   fall back visibly to inotify. Whole-filesystem marks remove per-directory
+   watch registration, not every limit or coverage gap.
+4. Windows: add an optional USN reader for persistent recovery on supported local
+   volumes, with journal identity/cursor validation and a file-reference/path
+   index. Keep ReadDirectoryChangesW for ordinary live watches. USN does not
+   identify the writing process; evaluate ETW separately if needed.
+5. macOS: pursue the Endpoint Security entitlement and prototype notification
+   events for kernel process attribution. Keep FSEvents replay and reconciliation
+   available; detect ES sequence gaps and avoid synchronous authorization events
+   for this read-only product.
+6. Android: build the Kotlin host and qualify app-private paths, authorized shared
+   storage and provider-backed SAF trees separately. SAF content URIs are not
+   generally inotify paths. Use MediaStore/provider invalidations and snapshot
+   reconciliation where appropriate. A rooted-device helper is an experimental,
+   separately qualified route, not a Play-distributed guarantee.
 
-- **Watch cap.** One watch per directory, capped by
-  `/proc/sys/fs/inotify/max_user_watches` (8192 on many distros). A large tree
-  hits `ENOSPC` mid-arming, and a partial watch that reports itself as complete
-  is the worst outcome available. It has to surface as a real error.
-- **New-subtree race.** A directory created after arming needs its own watch
-  added before anything inside it is visible; changes in that gap are lost.
-  `tests/monitor.rs` already encodes the delay this causes.
+## Accuracy gates before claiming support
 
-No kernel cursor exists, so `resumable_cursor: false` and the host re-baselines.
+- Run the watcher contract on the actual OS/filesystem and test overflow,
+  interrupted access, restart, rename chains and cross-root moves.
+- Report partial watch registration and unsupported filesystems as partial or
+  failed coverage, including inotify watch-limit errors and new-subtree races.
+- Display observed delivery time separately from any source-provided event time.
+  Do not claim precise historical timing from a delayed snapshot.
+- Measure idle CPU/wakeups, backlog growth, write amplification and recovery
+  cost. Tune batching on evidence; do not add periodic full-tree scans as a
+  silent reliability fallback.
 
-The privileged tier is genuinely better — `FAN_MARK_FILESYSTEM` +
-`FAN_REPORT_DFID_NAME` + `FAN_REPORT_PIDFD` covers a whole volume with one mark
-and reports the responsible process — but unprivileged fanotify is explicitly
-barred from all of it: no mount or filesystem marks, and the pid of another
-process is never reported ([`fanotify_init(2)`]). It needs a `setcap` helper
-daemon, i.e. a `sudo` install step. Optional, later, never the default.
-
-## Windows — ReadDirectoryChangesW
-
-Cheaper than inotify: one directory handle with `bWatchSubtree` covers an entire
-tree, with no per-directory cost and no cap. Renames arrive as consecutive
-`FILE_ACTION_RENAMED_OLD_NAME` / `_NEW_NAME`, so they can be paired. Buffer
-overflow reports `ERROR_NOTIFY_ENUM_DIR`, which maps onto `RequiresRescan`. No
-PID, no cursor.
-
-USN Journal is the only thing on any platform that gives a cursor surviving a
-reboot, but Microsoft's own docs require system administrator privileges for
-every change-journal operation, and the volume handle needs
-`FILE_FLAG_BACKUP_SEMANTICS`, i.e. `SeBackupPrivilege` from an elevated token
-([`FSCTL_READ_USN_JOURNAL`]). On top of that, USN records identify files by
-`FileReferenceNumber`, so turning them into paths means maintaining an
-FRN→path index of the volume. Large subsystem, elevation required — an advanced
-option at best.
-
-`paths::normalize` already removes the `\\?\` prefix trap this backend would
-otherwise walk into.
-
-## Android — compatible, but not as a monitor
-
-The Rust core itself needs no changes: `notify`'s inotify backend is already
-`cfg(target_os = "android")`, and UniFFI emits Kotlin bindings. The blockers are
-all platform policy, and all three are load-bearing:
-
-1. **inotify does not see other apps' writes on `/sdcard`.** External storage is
-   FUSE-served since Android 11, and fsnotify was never integrated with FUSE
-   upstream. Your own writes may raise events; other processes' writes generally
-   do not ([libfuse: Fsnotify and FUSE]). `FileObserver` on `/sdcard` for
-   cross-app changes is unsupported in practice, not merely flaky.
-2. **A 24/7 foreground service does not exist.** Targeting Android 15 (API 35),
-   `dataSync` foreground services get 6 hours total per 24, then `onTimeout()`
-   requires `stopSelf()` within seconds; restarting needs the user to foreground
-   the app ([FGS timeouts]).
-3. `MANAGE_EXTERNAL_STORAGE` is restricted by Play policy to file-manager-class
-   apps, and granting it does not fix (1) anyway.
-
-So Android does the parts it can actually do correctly:
-
-- **Snapshot diff (primary).** On open, baseline-diff the authorized trees and
-  report what changed since last time. Same code path as the desktop gap
-  reconciliation, unaffected by FUSE, and cheap on battery precisely because
-  nothing runs in the background.
-- **MediaStore `ContentObserver`** with `notifyForDescendants = true` — the
-  sanctioned mechanism, since MediaStore is where other apps' writes land.
-  Coarse and index-delayed, so it reports low confidence.
-- **Live watching of the app's own directories and SAF-granted trees**, where
-  inotify is reliable, as a user-started session with a visible end.
-- **Journal viewer** for records synced from a desktop.
-
-This forces a new capability bit, `sees_other_processes_writes`, because that is
-the real difference between Android and every other platform and the current
-matrix cannot express it. A new platform demanding a new declaration — rather
-than demanding a lie — is the matrix working.
-
-## iOS — viewer only
-
-Sandboxed to the app container plus Files-granted directories, with stricter
-background execution than Android. Ships as a journal viewer and declares no
-monitoring capability at all.
-
-## Order of work
-
-1. **"One operation is recorded once" as a portable test, then fix the
-   `notify` rename triple.** `notify`'s inotify backend emits `RenameMode::From`,
-   `RenameMode::To`, *and* a paired `RenameMode::Both` for a single rename, and
-   `monitor.rs::forward` handles all three — so one rename becomes three rows on
-   Linux. This is the duplicate-recording bug already fixed on macOS, waiting on
-   another platform. The existing rename test cannot catch it: it asserts the
-   rename is reconstructable, not that it is counted once.
-2. Add `sees_other_processes_writes`; flip Linux `pairs_renames` to true and let
-   CI prove it.
-3. Move baseline diffing into the core. It is the only remedy for
-   `resumable_cursor: false`, and Linux, Windows and Android all need it.
-4. Windows ReadDirectoryChangesW backend.
-5. Android: Kotlin bindings, snapshot diff, MediaStore observer.
-6. Optional privileged tiers: Linux fanotify helper, Windows USN.
-
-[`fanotify_init(2)`]: https://man7.org/linux/man-pages/man2/fanotify_init.2.html
-[`FSCTL_READ_USN_JOURNAL`]: https://learn.microsoft.com/en-us/windows/win32/fileio/using-the-change-journal-identifier
-[libfuse: Fsnotify and FUSE]: https://github.com/libfuse/libfuse/wiki/Fsnotify-and-FUSE
-[FGS timeouts]: https://developer.android.com/develop/background-work/services/fgs/timeout
+See [PRIVILEGED_BACKENDS.md](PRIVILEGED_BACKENDS.md) for the primary documentation
+and platform-specific acceptance criteria.
