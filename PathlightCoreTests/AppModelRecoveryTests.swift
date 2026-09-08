@@ -149,6 +149,38 @@ final class AppModelRecoveryTests: XCTestCase {
         }
     }
 
+    func testDeniedKeychainAccessIsReportedAtLaunch() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let attempts = RecoveryCallCounter()
+        let (model, _, _) = makeModel(monitor: monitor, scan: scan, keyWarmUp: {
+            attempts.increment()
+            throw ActivityStorageLineCodecError.keychainReadFailed(-25293)
+        })
+        defer { model.cleanup() }
+
+        try await eventually("keychain access reported") {
+            model.lastErrorMessage?.contains("needs keychain access") == true
+        }
+        // A denial must not re-prompt; only a timeout is worth waiting out.
+        XCTAssertEqual(attempts.count, 1)
+    }
+
+    func testSlowKeychainPromptIsWaitedOutWithoutComplaining() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let attempts = RecoveryCallCounter()
+        let (model, _, _) = makeModel(monitor: monitor, scan: scan, keyWarmUp: {
+            if attempts.increment() < 2 {
+                throw ActivityStorageLineCodecError.keyUnavailable
+            }
+        })
+        defer { model.cleanup() }
+
+        try await eventually("warm-up retried past the timeout") { attempts.count == 2 }
+        XCTAssertNil(model.lastErrorMessage)
+    }
+
     func testJournalRetryBacksOffWhileFlushesKeepFailing() {
         XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 0), 1)
         XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 1), 2)
@@ -304,7 +336,8 @@ final class AppModelRecoveryTests: XCTestCase {
     private func makeModel(
         monitor: RecoveryTestMonitor,
         scan: RecoveryScanGate,
-        eventStore: (any ActivityEventStoring)? = nil
+        eventStore: (any ActivityEventStoring)? = nil,
+        keyWarmUp: @escaping @Sendable () throws -> Void = {}
     ) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
         let suite = "AppModelRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -327,7 +360,8 @@ final class AppModelRecoveryTests: XCTestCase {
                 contentsProvider: { scan.contents(at: $0) },
             ),
             activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
-            launchAtLoginService: RecoveryTestLoginService()
+            launchAtLoginService: RecoveryTestLoginService(),
+            activityStorageKeyWarmUp: keyWarmUp
         ))
         return (model, persistence, root)
     }
@@ -524,4 +558,19 @@ private final class AlwaysFailRecoveryEventStore: ActivityEventStoring, @uncheck
         eventJournalLimitBytes: Int64,
         now: Date
     ) async throws {}
+}
+
+private final class RecoveryCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var count: Int { lock.withLock { calls } }
+
+    @discardableResult
+    func increment() -> Int {
+        lock.withLock {
+            calls += 1
+            return calls
+        }
+    }
 }

@@ -89,6 +89,7 @@ final class AppModel: ObservableObject {
         longTermWatchTargets = dependencies.longTermWatchTargets.loadTargets()
         launchAtLoginStatus = dependencies.launchAtLoginService.currentStatus()
 
+        warmActivityStorageKey()
         observeActivityStoragePreferences()
         refreshFullDiskAccessStatus()
         startEnabledLongTermWatches()
@@ -522,6 +523,32 @@ final class AppModel: ObservableObject {
     /// Stop paths request the same serialized writer used by scheduled flushes.
     /// If the model is deallocated first, its checkpoint remains behind and the
     /// native journal replays the uncommitted interval on the next launch.
+    /// The journal key is otherwise first touched by a background write minutes
+    /// after launch, where a keychain prompt can sit unnoticed and hold up
+    /// recording. Ask for it now, while the user is still looking at the app.
+    private func warmActivityStorageKey() {
+        let warmUp = dependencies.activityStorageKeyWarmUp
+        Task.detached(priority: .utility) { [weak self] in
+            for _ in 1...Self.activityStorageKeyWarmUpAttempts {
+                do {
+                    try warmUp()
+                    return
+                } catch ActivityStorageLineCodecError.keyUnavailable {
+                    // Still waiting on the prompt; keep waiting without asking again.
+                    continue
+                } catch {
+                    break
+                }
+            }
+            await self?.reportActivityStorageKeyUnavailable()
+        }
+    }
+    /// Each attempt waits out one key-load timeout, so this is how long a slow
+    /// answer to the keychain prompt stays quiet.
+    nonisolated private static let activityStorageKeyWarmUpAttempts = 3
+    private func reportActivityStorageKeyUnavailable() {
+        lastErrorMessage = "Pathlight needs keychain access to record activity history. Grant it and recording continues."
+    }
     /// Doubles per consecutive failure so a stalled store is retried without
     /// spinning, and stays at one second while flushes are succeeding.
     nonisolated static func journalRetryDelay(failureCount: Int) -> TimeInterval {

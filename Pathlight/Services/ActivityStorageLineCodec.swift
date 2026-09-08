@@ -36,6 +36,16 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
 
     static let plaintext = ActivityStorageLineCodec(cryptor: PassthroughActivityStorageCryptor())
 
+    /// Loads the storage key without writing anything. Called at launch so a
+    /// keychain prompt appears while the user is in the app, instead of silently
+    /// stalling the first background journal write minutes later.
+    func prepare() throws {
+        guard preferencesStore?.loadPreferences().encryptNewData == true else {
+            return
+        }
+        _ = try cryptor.encrypt(Data())
+    }
+
     func encode(_ payload: Data) throws -> String {
         guard preferencesStore?.loadPreferences().encryptNewData == true else {
             return String(decoding: payload, as: UTF8.self)

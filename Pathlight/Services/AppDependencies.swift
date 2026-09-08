@@ -20,6 +20,8 @@ struct AppDependencies {
     var launchAtLoginService: any LaunchAtLoginControlling
     var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
     var processHints: (any ProcessHinting)?
+    /// Loads the activity storage key up front; no-op when nothing is encrypted.
+    var activityStorageKeyWarmUp: @Sendable () throws -> Void
 
     init(
         systemActions: AppSystemActions,
@@ -36,7 +38,8 @@ struct AppDependencies {
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
         launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService(),
         activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil,
-        processHints: (any ProcessHinting)? = nil
+        processHints: (any ProcessHinting)? = nil,
+        activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {}
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
@@ -51,6 +54,7 @@ struct AppDependencies {
         self.launchAtLoginService = launchAtLoginService
         self.activityGrowthAlertPoster = activityGrowthAlertPoster
         self.processHints = processHints
+        self.activityStorageKeyWarmUp = activityStorageKeyWarmUp
     }
 
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
@@ -89,7 +93,8 @@ struct AppDependencies {
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
             launchAtLoginService: SystemLaunchAtLoginService(),
             activityGrowthAlertPoster: UserNotificationGrowthAlertPoster(),
-            processHints: LsofProcessHintService()
+            processHints: LsofProcessHintService(),
+            activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() }
         )
     }
 }
