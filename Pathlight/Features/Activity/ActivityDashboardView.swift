@@ -181,6 +181,7 @@ struct ActivityDashboardView: View {
                         onEnable: actions.enableLaunchAtLogin,
                         onDismiss: actions.dismissLaunchAtLoginNudge
                     )
+                    .transition(.opacity)
                 }
 
                 ForEach(presentation.targetRows) { row in
@@ -209,9 +210,12 @@ struct ActivityDashboardView: View {
                             actions.setExclusionPatterns($0, row.rootPath)
                         }
                     )
+                    .transition(.opacity)
                 }
             }
             .padding(14)
+            .animation(PathlightMotion.state, value: presentation.targetRows.count)
+            .animation(PathlightMotion.state, value: showsLaunchAtLoginNudge)
         }
         .background(Color(nsColor: .underPageBackgroundColor))
     }
@@ -295,35 +299,42 @@ private struct ActivityDashboardTargetRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: row.isEnabled ? "record.circle.fill" : "pause.circle")
-                    .foregroundStyle(row.isEnabled ? Color.green : Color.secondary)
+            Button(action: onSelect) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: row.isEnabled ? "record.circle.fill" : "pause.circle")
+                            .foregroundStyle(row.isEnabled ? Color.green : Color.secondary)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.title)
+                                .font(.headline)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
-                    Text(row.subtitle)
+                            Text(row.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        Spacer(minLength: 8)
+                    }
+
+                    HStack(spacing: 8) {
+                        ActivityDashboardMetric(title: row.statusText, value: row.changeText)
+                        ActivityDashboardMetric(title: row.eventText, value: row.thresholdText)
+                    }
+
+                    Text(row.lastActivityText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
                 }
-
-                Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            HStack(spacing: 8) {
-                ActivityDashboardMetric(title: row.statusText, value: row.changeText)
-                ActivityDashboardMetric(title: row.eventText, value: row.thresholdText)
-            }
-
-            Text(row.lastActivityText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            .buttonStyle(PathlightCardButtonStyle())
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             HStack(spacing: 8) {
                 Button {
@@ -422,8 +433,7 @@ private struct ActivityDashboardTargetRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(isSelected ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .onTapGesture(perform: onSelect)
+        .animation(PathlightMotion.state, value: isSelected)
     }
 
     private var rowBackground: Color {
