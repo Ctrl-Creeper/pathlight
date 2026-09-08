@@ -3,6 +3,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use pathlight_core::monitor::{Change, ChangeKind};
 use pathlight_core::{AggregationOptions, Attributor, Confidence, EventKind, SizeIndex};
 
+const SCOPE: &str = "short-term:/Users/example/Downloads";
 const ROOT: &str = "/Users/example/Downloads";
 
 fn change(kind: ChangeKind, name: &str, seconds: u64) -> Change {
@@ -61,10 +62,10 @@ fn first_modified_observation_has_unknown_growth_instead_of_the_whole_file_size(
 #[test]
 fn deletions_and_departed_renames_use_prior_size() {
     let index = SizeIndex::default();
-    index.record(&format!("{ROOT}/gone.zip"), Some(2048));
-    index.record(&format!("{ROOT}/moved.mov"), Some(99));
+    index.record(SCOPE, &format!("{ROOT}/gone.zip"), Some(2048));
+    index.record(SCOPE, &format!("{ROOT}/moved.mov"), Some(99));
     let size = |_: &str| None;
-    let prior = |path: &str| index.take(path);
+    let prior = |path: &str| index.take(SCOPE, path);
     let none = |_: &str| None;
     let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &prior, &none);
 
@@ -86,7 +87,7 @@ fn deletions_and_departed_renames_use_prior_size() {
     assert_eq!(events[2].byte_delta, None);
     assert_eq!(events[2].confidence, Confidence::Unknown);
     assert_eq!(
-        index.take(&format!("{ROOT}/gone.zip")),
+        index.take(SCOPE, &format!("{ROOT}/gone.zip")),
         None,
         "prior size is consumed"
     );
@@ -210,4 +211,22 @@ fn aggregated_small_writes_are_judged_as_one_change() {
     assert_eq!(events[0].kind, EventKind::Aggregate);
     assert_eq!(events[0].byte_delta, Some(1_200));
     assert_eq!(events[0].affected_item_count, 2);
+}
+
+/// Two watches over the same file are independent observers. Sharing one
+/// baseline lets whichever watch handles the event first consume it, so the
+/// other measures a delta of zero and its threshold drops the change.
+#[test]
+fn baselines_are_per_watch_not_per_path() {
+    let index = SizeIndex::default();
+    let path = format!("{ROOT}/shared.bin");
+    index.record("long-term:/", &path, Some(4_096));
+    index.record("short-term:/Users/example/Downloads", &path, Some(2_048));
+
+    assert_eq!(index.take("long-term:/", &path), Some(4_096));
+    assert_eq!(
+        index.take("short-term:/Users/example/Downloads", &path),
+        Some(2_048),
+        "one watch consuming its baseline must not blind the other"
+    );
 }

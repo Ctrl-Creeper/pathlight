@@ -45,6 +45,12 @@ pub fn allocated_size(path: &Path) -> Option<i64> {
 }
 
 /// Remembers the last known size of each path so deletions can be attributed.
+///
+/// Every entry is namespaced by a `scope`. Two watches over the same file — a
+/// whole-disk watch and a folder watch, or a live watch and a background one —
+/// are independent observers and each needs its own baseline. Sharing one entry
+/// lets whichever watch handles an event first record the new size, so the
+/// others measure a delta of zero and their threshold drops the change.
 // ponytail: in-memory only; Swift persists this as a journal so deletions after a
 // relaunch still get a size. Add persistence when a non-mac shell needs it.
 #[derive(Debug, Default)]
@@ -53,19 +59,24 @@ pub struct SizeIndex {
 }
 
 impl SizeIndex {
-    /// Records `size` for `path` (or forgets it when `None`) and returns it.
-    pub fn record(&self, path: &str, size: Option<i64>) -> Option<i64> {
+    /// Records `size` for `path` in `scope` (or forgets it when `None`).
+    pub fn record(&self, scope: &str, path: &str, size: Option<i64>) -> Option<i64> {
         let mut sizes = self.sizes.lock().unwrap();
         match size {
-            Some(size) => sizes.insert(path.to_owned(), size),
-            None => sizes.remove(path),
+            Some(size) => sizes.insert(key(scope, path), size),
+            None => sizes.remove(&key(scope, path)),
         };
         size
     }
 
-    pub fn take(&self, path: &str) -> Option<i64> {
-        self.sizes.lock().unwrap().remove(path)
+    pub fn take(&self, scope: &str, path: &str) -> Option<i64> {
+        self.sizes.lock().unwrap().remove(&key(scope, path))
     }
+}
+
+/// A newline cannot appear in a scope, so no scope can spell another one's key.
+fn key(scope: &str, path: &str) -> String {
+    format!("{scope}\n{path}")
 }
 
 pub type SizeProvider<'a> = dyn Fn(&str) -> Option<i64> + Send + Sync + 'a;
