@@ -160,6 +160,11 @@ private final class FSEventsStreamBox: @unchecked Sendable {
             continuation.finish()
             return
         }
+        // SinceNow does not produce HistoryDone. Announce successful registration
+        // so initial baselines can start before the first actual file change.
+        if sinceEventID == nil {
+            continuation.yield(.historyCaughtUp(eventID: 0))
+        }
     }
 
     nonisolated func stop() {
