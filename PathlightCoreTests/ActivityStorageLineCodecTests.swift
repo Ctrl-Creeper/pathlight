@@ -55,6 +55,25 @@ struct ActivityStorageLineCodecTests {
         #expect(underlying.callCount == 2)
     }
 
+    @Test("reports a stalled key load instead of blocking the caller")
+    func reportsStalledKeyLoadInsteadOfBlocking() throws {
+        let underlying = BlockingActivityStorageKeyProvider(key: Data(repeating: 4, count: 32))
+        let caching = CachingActivityStorageKeyProvider(wrapping: underlying, timeout: .milliseconds(200))
+
+        #expect(throws: ActivityStorageLineCodecError.self) {
+            try caching.loadOrCreateKey()
+        }
+        // A second stalled call must not queue up another blocked load.
+        #expect(throws: ActivityStorageLineCodecError.self) {
+            try caching.loadOrCreateKey()
+        }
+        #expect(underlying.callCount == 1)
+
+        underlying.unblock()
+        #expect(try caching.loadOrCreateKey() == Data(repeating: 4, count: 32))
+        #expect(underlying.callCount == 1)
+    }
+
     @Test("round-trips encryption through the caching provider")
     func roundTripsEncryptionThroughCachingProvider() throws {
         let codec = ActivityStorageLineCodec(
@@ -86,5 +105,30 @@ private final class ScriptedActivityStorageKeyProvider: ActivityStorageKeyProvid
         callCount += 1
         let result = results.count > 1 ? results.removeFirst() : results[0]
         return try result.get()
+    }
+}
+
+private final class BlockingActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {
+    private let key: Data
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var calls = 0
+
+    init(key: Data) {
+        self.key = key
+    }
+
+    var callCount: Int {
+        lock.withLock { calls }
+    }
+
+    func unblock() {
+        gate.signal()
+    }
+
+    func loadOrCreateKey() throws -> Data {
+        lock.withLock { calls += 1 }
+        gate.wait()
+        return key
     }
 }

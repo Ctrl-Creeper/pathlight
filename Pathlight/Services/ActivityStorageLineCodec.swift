@@ -8,6 +8,7 @@ nonisolated enum ActivityStorageLineCodecError: Error {
     case randomGenerationFailed(OSStatus)
     case keychainReadFailed(OSStatus)
     case keychainWriteFailed(OSStatus)
+    case keyUnavailable
 }
 
 nonisolated protocol ActivityStorageLineCrypting: Sendable {
@@ -87,26 +88,74 @@ nonisolated struct AESGCMActivityStorageCryptor: ActivityStorageLineCrypting {
 }
 
 nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {
+    /// One attempt at the underlying provider, shared by everyone waiting on it.
+    private final class Load: @unchecked Sendable {
+        let gate = DispatchSemaphore(value: 0)
+        var result: Result<Data, any Error>?
+    }
+
     private let lock = NSLock()
     private let underlying: any ActivityStorageKeyProviding
+    private let timeout: DispatchTimeInterval
+    private let queue = DispatchQueue(label: "com.ctrlcreeper.Pathlight.activity-storage-key")
     private var cachedKey: Data?
+    private var inFlight: Load?
 
-    init(wrapping underlying: any ActivityStorageKeyProviding) {
+    init(
+        wrapping underlying: any ActivityStorageKeyProviding,
+        timeout: DispatchTimeInterval = .seconds(5)
+    ) {
         self.underlying = underlying
+        self.timeout = timeout
     }
 
     func loadOrCreateKey() throws -> Data {
         lock.lock()
+        if let cachedKey {
+            lock.unlock()
+            return cachedKey
+        }
+        let load = inFlight ?? startLoad()
+        lock.unlock()
+
+        // A keychain prompt or a wedged securityd never returns, and the journal
+        // writer calls this synchronously. Bound the wait so the caller gets an
+        // error it can report instead of stalling recording forever; the attempt
+        // keeps running on its own queue and a later call picks up its result.
+        guard load.gate.wait(timeout: .now() + timeout) == .success else {
+            throw ActivityStorageLineCodecError.keyUnavailable
+        }
+        load.gate.signal()
+
+        lock.lock()
         defer {
             lock.unlock()
         }
-        if let cachedKey {
-            return cachedKey
+        guard let result = load.result else {
+            throw ActivityStorageLineCodecError.keyUnavailable
         }
         // Failures are never cached; the next call retries the underlying provider.
-        let key = try underlying.loadOrCreateKey()
-        cachedKey = key
-        return key
+        return try result.get()
+    }
+
+    private func startLoad() -> Load {
+        let load = Load()
+        inFlight = load
+        let underlying = self.underlying
+        queue.async { [self] in
+            let result = Result { try underlying.loadOrCreateKey() }
+            lock.lock()
+            load.result = result
+            if case .success(let key) = result {
+                cachedKey = key
+            }
+            if inFlight === load {
+                inFlight = nil
+            }
+            lock.unlock()
+            load.gate.signal()
+        }
+        return load
     }
 }
 
