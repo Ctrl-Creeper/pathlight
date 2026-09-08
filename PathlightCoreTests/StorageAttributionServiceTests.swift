@@ -47,7 +47,8 @@ struct StorageAttributionServiceTests {
                 aggregationWindow: 300,
                 longTermRecordsFileNames: false
             ),
-            sizeProvider: { _ in 99 }
+            sizeProvider: { _ in 99 },
+            knownSizeProvider: { _ in 0 }
         )
 
         let events = service.process([
@@ -103,6 +104,26 @@ struct StorageAttributionServiceTests {
         #expect(events.first?.kind == .deleted)
         #expect(events.first?.byteDelta == nil)
         #expect(events.first?.confidence == .unknown)
+    }
+
+    @Test("unknown initial modification still seeds a measurement for the next change")
+    func unknownModificationRecordsCurrentMeasurement() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let file = root.appending(path: "existing.bin")
+        let index = ActivitySizeIndex()
+        let service = StorageAttributionService(
+            options: .shortTermDefault,
+            sizeProvider: { url in index.recordKnownSize(8_192, for: url) },
+            knownSizeProvider: { url in index.knownSize(for: url) }
+        )
+        let change = DiskActivityChange(kind: .modified, path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 10))
+
+        let first = service.process([change])
+        let second = service.process([change])
+
+        #expect(first.first?.byteDelta == nil)
+        #expect(second.first?.byteDelta == 0)
+        #expect(second.first?.confidence == .confirmed)
     }
 
     @Test("records the departure side of a rename with the last known size")
@@ -168,7 +189,8 @@ struct StorageAttributionServiceTests {
                 aggregationWindow: 300,
                 longTermRecordsFileNames: false
             ),
-            sizeProvider: { _ in 50 }
+            sizeProvider: { _ in 50 },
+            knownSizeProvider: { _ in 0 }
         )
 
         let events = service.process(changes)
@@ -184,6 +206,21 @@ struct StorageAttributionServiceTests {
 @Suite("Storage attribution increments")
 struct StorageAttributionIncrementTests {
     private let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+
+    @Test("a first observed modification has unknown growth, not the whole file size")
+    func modificationWithoutPriorSizeIsUnknown() {
+        let file = root.appending(path: "existing.bin")
+        let service = StorageAttributionService(options: .shortTermDefault, sizeProvider: { _ in 8_192 })
+
+        let events = service.process([
+            DiskActivityChange(kind: .modified, path: file, rootPath: root, timestamp: Date(timeIntervalSince1970: 10))
+        ])
+
+        #expect(events.count == 1)
+        #expect(events.first?.kind == .modified)
+        #expect(events.first?.byteDelta == nil)
+        #expect(events.first?.confidence == .unknown)
+    }
 
     @Test("a modification reports growth since the last known size")
     func modificationReportsGrowth() {

@@ -119,17 +119,22 @@ struct StorageAttributionService {
         confidence: DiskActivityEventConfidence,
         previousPath: URL? = nil
     ) -> DiskActivityEvent? {
-        let knownSize = knownSizeProvider(change.path) ?? 0
+        let knownSize = knownSizeProvider(change.path)
         guard let size = sizeProvider(change.path) else {
             return nil
         }
+        // Creation establishes a zero starting point. A first observation of an
+        // existing file does not: its current allocation is not evidence of how
+        // many bytes this modification added. The provider still records `size`
+        // so a subsequent change can be measured against this observation.
+        let byteDelta = knownSize.map { size - $0 } ?? (kind == .created ? size : nil)
         return DiskActivityEvent(
             kind: kind,
             path: change.path,
             rootPath: change.rootPath,
             timestamp: change.timestamp,
-            byteDelta: size - knownSize,
-            confidence: confidence,
+            byteDelta: byteDelta,
+            confidence: byteDelta == nil ? .unknown : confidence,
             previousPath: previousPath,
             affectedItemCount: 1
         )

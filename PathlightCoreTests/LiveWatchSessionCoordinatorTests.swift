@@ -77,10 +77,10 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            exclusionFilter: try #require(ActivityExclusionFilter(
+            exclusionFilter: ActivityExclusionFilter(
                 patterns: [".DS_Store"],
                 rootPath: root
-            )),
+            ),
             sizeProvider: { _ in 4_096 }
         ).makeAsyncIterator()
 
@@ -112,7 +112,8 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            sizeProvider: { _ in 512 }
+            sizeProvider: { _ in 512 },
+            knownSizeProvider: { _ in 0 }
         ).makeAsyncIterator()
 
         let initialSession = await iterator.next()
