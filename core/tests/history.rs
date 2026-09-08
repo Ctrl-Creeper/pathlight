@@ -30,7 +30,7 @@ fn buckets_totals_and_newest_first_ordering() {
         event("b", 3_650, Some(-40)),
         event("c", 3_700, None),
     ];
-    let history = build_history(&format!("{ROOT}/"), events, 3_600, UNIX_EPOCH);
+    let history = build_history(&format!("{ROOT}/"), events, 3_600, 100, UNIX_EPOCH);
 
     assert_eq!(history.root_path, ROOT);
     assert_eq!(history.total_net_byte_delta, 60);
@@ -51,4 +51,22 @@ fn buckets_totals_and_newest_first_ordering() {
         .map(|e| e.path.rsplit('/').next().unwrap())
         .collect();
     assert_eq!(names, ["c", "b", "a"]);
+}
+
+/// The page limit cuts the rows a caller lists, never the numbers: totalling
+/// only the newest page understates the answer by the ratio between the
+/// journal and the page, which is how a full disk reads as a quiet one.
+#[test]
+fn totals_cover_every_event_while_listing_one_page() {
+    let events: Vec<ActivityEvent> = (0..10)
+        .map(|i| event(&format!("f{i}"), i, Some(10)))
+        .collect();
+
+    let history = build_history(ROOT, events, 3_600, 3, UNIX_EPOCH);
+
+    assert_eq!(history.event_count, 10);
+    assert_eq!(history.total_net_byte_delta, 100);
+    assert_eq!(history.buckets[0].event_count, 10);
+    assert_eq!(history.recent_events.len(), 3);
+    assert!(history.is_truncated);
 }

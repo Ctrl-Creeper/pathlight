@@ -83,11 +83,14 @@ impl Journal {
         limit: u32,
         bucket_interval_secs: u64,
     ) -> Result<crate::HistorySnapshot, CoreError> {
-        let events = self.load(root_path.clone(), limit)?;
+        // Every retained row, not just the page: `limit` cuts the listed rows
+        // inside `build_history`, after the totals are known.
+        let events = self.load(root_path.clone(), u32::MAX)?;
         Ok(crate::history::build_history(
             &root_path,
             events,
             bucket_interval_secs,
+            limit,
             std::time::SystemTime::now(),
         ))
     }

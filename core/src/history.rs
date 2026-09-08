@@ -24,15 +24,22 @@ pub struct HistorySnapshot {
     pub event_count: u32,
     pub unknown_size_event_count: u32,
     pub buckets: Vec<HistoryBucket>,
-    /// Newest first.
+    /// Newest first, at most `recent_limit` rows.
     pub recent_events: Vec<ActivityEvent>,
+    /// The totals above cover more rows than `recent_events` lists.
+    pub is_truncated: bool,
 }
 
 /// `events` are the rows already filtered to `root_path` (see `Journal::load`).
+///
+/// Totals and buckets cover every row given, and only `recent_events` is cut
+/// to `recent_limit`: totalling just the rows a caller can display understates
+/// the answer by the ratio between the journal and the page.
 pub fn build_history(
     root_path: &str,
     mut events: Vec<ActivityEvent>,
     bucket_interval_secs: u64,
+    recent_limit: u32,
     generated_at: SystemTime,
 ) -> HistorySnapshot {
     let interval = bucket_interval_secs.max(1);
@@ -61,13 +68,17 @@ pub fn build_history(
         })
         .collect();
 
-    HistorySnapshot {
+    let snapshot = HistorySnapshot {
         root_path: crate::paths::normalize(root_path),
         generated_at,
         total_net_byte_delta: events.iter().filter_map(|e| e.byte_delta).sum(),
         event_count: events.len() as u32,
         unknown_size_event_count: events.iter().filter(|e| e.byte_delta.is_none()).count() as u32,
         buckets,
+        is_truncated: events.len() > recent_limit as usize,
         recent_events: events,
-    }
+    };
+    let mut snapshot = snapshot;
+    snapshot.recent_events.truncate(recent_limit as usize);
+    snapshot
 }
