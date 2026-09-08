@@ -4,7 +4,51 @@ use std::fs;
 use pathlight_core::measurement::measure_file;
 #[cfg(unix)]
 use pathlight_core::measurement::FileKind;
-use pathlight_core::snapshot::{reconcile, scan, BindingChangeKind, ScanConsistency};
+use pathlight_core::snapshot::{
+    reconcile, scan, BindingChangeKind, IdentityContinuity, ScanConsistency,
+};
+
+#[test]
+fn matching_object_numbers_are_not_paired_across_unknown_continuity() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_path = directory.path().join("old-name");
+    let new_path = directory.path().join("new-name");
+    fs::write(&old_path, b"old contents").unwrap();
+    let before = scan(directory.path()).unwrap();
+    fs::rename(&old_path, &new_path).unwrap();
+    let after = scan(directory.path()).unwrap();
+
+    let delta = reconcile(&before, &after, IdentityContinuity::Unknown);
+
+    assert!(!delta
+        .bindings
+        .iter()
+        .any(|binding| binding.kind == BindingChangeKind::Renamed));
+    assert!(delta
+        .bindings
+        .iter()
+        .any(|binding| binding.kind == BindingChangeKind::Removed && binding.path == old_path));
+    assert!(delta
+        .bindings
+        .iter()
+        .any(|binding| binding.kind == BindingChangeKind::Created && binding.path == new_path));
+}
+
+#[test]
+fn identity_change_without_continuity_cannot_invent_a_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("file");
+    fs::write(&path, b"before").unwrap();
+    let before = scan(directory.path()).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, b"after").unwrap();
+    let after = scan(directory.path()).unwrap();
+
+    let delta = reconcile(&before, &after, IdentityContinuity::Unknown);
+
+    assert!(delta.bindings.is_empty());
+    assert!(!delta.historical_complete);
+}
 
 #[test]
 fn hard_links_keep_both_names_without_double_counting_size() {
@@ -23,7 +67,7 @@ fn hard_links_keep_both_names_without_double_counting_size() {
         after.totals().allocated_bytes,
         before.totals().allocated_bytes
     );
-    let delta = reconcile(&before, &after);
+    let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
     assert_eq!(delta.logical_delta, Some(0));
     assert!(delta.bindings.iter().any(|binding| {
         binding.kind == BindingChangeKind::HardLinkAdded && binding.path == alias
@@ -31,7 +75,11 @@ fn hard_links_keep_both_names_without_double_counting_size() {
 
     fs::remove_file(&alias).unwrap();
     let after_removal = scan(directory.path()).unwrap();
-    let delta = reconcile(&after, &after_removal);
+    let delta = reconcile(
+        &after,
+        &after_removal,
+        IdentityContinuity::ObservedWithoutGap,
+    );
     assert_eq!(delta.logical_delta, Some(0));
     assert!(delta.bindings.iter().any(|binding| {
         binding.kind == BindingChangeKind::HardLinkRemoved && binding.path == alias
@@ -47,7 +95,7 @@ fn rename_changes_a_binding_without_claiming_space_was_reclaimed() {
     let before = scan(directory.path()).unwrap();
     fs::rename(&old_name, &new_name).unwrap();
     let after = scan(directory.path()).unwrap();
-    let delta = reconcile(&before, &after);
+    let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
 
     assert_eq!(delta.logical_delta, Some(0));
     assert_eq!(delta.allocated_delta, Some(0));
@@ -72,7 +120,7 @@ fn replacement_at_the_same_name_preserves_both_object_identities() {
     fs::rename(&name, retained.path().join("old-object")).unwrap();
     fs::write(&name, b"replacement").unwrap();
     let after = scan(directory.path()).unwrap();
-    let delta = reconcile(&before, &after);
+    let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
 
     assert_eq!(delta.logical_delta, Some(8));
     assert_eq!(delta.bindings.len(), 1);
@@ -92,7 +140,7 @@ fn removing_the_last_name_changes_observed_totals_not_physical_reclaim() {
     let before = scan(directory.path()).unwrap();
     fs::remove_file(&name).unwrap();
     let after = scan(directory.path()).unwrap();
-    let delta = reconcile(&before, &after);
+    let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
 
     assert_eq!(delta.logical_delta, Some(-13));
     assert_eq!(delta.bindings.len(), 1);
@@ -105,7 +153,11 @@ fn snapshots_from_different_roots_cannot_be_reconciled() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();
     fs::write(left.path().join("file"), b"large file").unwrap();
-    let delta = reconcile(&scan(left.path()).unwrap(), &scan(right.path()).unwrap());
+    let delta = reconcile(
+        &scan(left.path()).unwrap(),
+        &scan(right.path()).unwrap(),
+        IdentityContinuity::ObservedWithoutGap,
+    );
     assert_eq!(delta.logical_delta, None);
     assert_eq!(delta.allocated_delta, None);
     assert!(delta.bindings.is_empty());
@@ -122,7 +174,7 @@ fn replacing_the_root_ends_its_identity_scope_even_at_the_same_path() {
     fs::create_dir(&root).unwrap();
     let after = scan(&root).unwrap();
 
-    let delta = reconcile(&before, &after);
+    let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
     assert_eq!(delta.logical_delta, None);
     assert_eq!(delta.allocated_delta, None);
     assert!(delta.bindings.is_empty());
@@ -153,7 +205,12 @@ fn unknown_identity_or_allocation_cannot_be_presented_as_unique_space() {
     assert_eq!(unsupported_identity.totals().logical_bytes, None);
     assert_eq!(unsupported_identity.totals().allocated_bytes, None);
     assert_eq!(
-        reconcile(&snapshot, &unsupported_identity).logical_delta,
+        reconcile(
+            &snapshot,
+            &unsupported_identity,
+            IdentityContinuity::ObservedWithoutGap,
+        )
+        .logical_delta,
         None
     );
 }

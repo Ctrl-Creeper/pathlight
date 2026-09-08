@@ -52,6 +52,15 @@ pub enum BindingChangeKind {
     HardLinkRemoved,
 }
 
+/// Whether native object IDs can be compared across these two observations.
+/// A gap, remount, journal reset, or unknown source lifecycle must use
+/// `Unknown`: inode and file-reference values can be reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityContinuity {
+    ObservedWithoutGap,
+    Unknown,
+}
+
 #[derive(Clone, Debug)]
 pub struct BindingChange {
     /// Endpoint correspondence, not proof that this operation occurred.
@@ -219,7 +228,11 @@ impl ScanSnapshot {
 /// across deletion, gaps or remounts; a matching ID does not prove continuity.
 /// Renamed denotes one lost and one gained name with matching observed IDs,
 /// which can also result from unlink/link. It must not count filesystem calls.
-pub fn reconcile(previous: &ScanSnapshot, current: &ScanSnapshot) -> Reconciliation {
+pub fn reconcile(
+    previous: &ScanSnapshot,
+    current: &ScanSnapshot,
+    identity_continuity: IdentityContinuity,
+) -> Reconciliation {
     let mut result = Reconciliation {
         logical_delta: None,
         allocated_delta: None,
@@ -265,30 +278,32 @@ pub fn reconcile(previous: &ScanSnapshot, current: &ScanSnapshot) -> Reconciliat
         .collect();
     let mut paired_old = BTreeSet::new();
     let mut paired_new = BTreeSet::new();
-    for (identity, old_paths) in &old_ids {
-        let Some(new_paths) = new_ids.get(identity) else {
-            continue;
-        };
-        let lost: Vec<_> = old_paths
-            .iter()
-            .copied()
-            .filter(|path| removed.contains_key(path))
-            .collect();
-        let gained: Vec<_> = new_paths
-            .iter()
-            .copied()
-            .filter(|path| added.contains_key(path))
-            .collect();
-        if let ([old_path], [new_path]) = (lost.as_slice(), gained.as_slice()) {
-            result.bindings.push(BindingChange {
-                kind: BindingChangeKind::Renamed,
-                path: (**new_path).clone(),
-                previous_path: Some((**old_path).clone()),
-                identity: Some((*identity).clone()),
-                previous_identity: Some((*identity).clone()),
-            });
-            paired_old.insert(*old_path);
-            paired_new.insert(*new_path);
+    if identity_continuity == IdentityContinuity::ObservedWithoutGap {
+        for (identity, old_paths) in &old_ids {
+            let Some(new_paths) = new_ids.get(identity) else {
+                continue;
+            };
+            let lost: Vec<_> = old_paths
+                .iter()
+                .copied()
+                .filter(|path| removed.contains_key(path))
+                .collect();
+            let gained: Vec<_> = new_paths
+                .iter()
+                .copied()
+                .filter(|path| added.contains_key(path))
+                .collect();
+            if let ([old_path], [new_path]) = (lost.as_slice(), gained.as_slice()) {
+                result.bindings.push(BindingChange {
+                    kind: BindingChangeKind::Renamed,
+                    path: (**new_path).clone(),
+                    previous_path: Some((**old_path).clone()),
+                    identity: Some((*identity).clone()),
+                    previous_identity: Some((*identity).clone()),
+                });
+                paired_old.insert(*old_path);
+                paired_new.insert(*new_path);
+            }
         }
     }
     for (path, measurement) in removed {
@@ -296,10 +311,11 @@ pub fn reconcile(previous: &ScanSnapshot, current: &ScanSnapshot) -> Reconciliat
             continue;
         }
         result.bindings.push(BindingChange {
-            kind: if measurement
-                .identity
-                .as_ref()
-                .is_some_and(|id| new_ids.contains_key(id))
+            kind: if identity_continuity == IdentityContinuity::ObservedWithoutGap
+                && measurement
+                    .identity
+                    .as_ref()
+                    .is_some_and(|id| new_ids.contains_key(id))
             {
                 BindingChangeKind::HardLinkRemoved
             } else {
@@ -316,10 +332,11 @@ pub fn reconcile(previous: &ScanSnapshot, current: &ScanSnapshot) -> Reconciliat
             continue;
         }
         result.bindings.push(BindingChange {
-            kind: if measurement
-                .identity
-                .as_ref()
-                .is_some_and(|id| old_ids.contains_key(id))
+            kind: if identity_continuity == IdentityContinuity::ObservedWithoutGap
+                && measurement
+                    .identity
+                    .as_ref()
+                    .is_some_and(|id| old_ids.contains_key(id))
             {
                 BindingChangeKind::HardLinkAdded
             } else {
@@ -331,21 +348,23 @@ pub fn reconcile(previous: &ScanSnapshot, current: &ScanSnapshot) -> Reconciliat
             previous_identity: None,
         });
     }
-    for (path, measurement) in &current.entries {
-        let Some(old) = previous.entries.get(path) else {
-            continue;
-        };
-        if old.identity.is_some()
-            && measurement.identity.is_some()
-            && old.identity != measurement.identity
-        {
-            result.bindings.push(BindingChange {
-                kind: BindingChangeKind::Replaced,
-                path: path.clone(),
-                previous_path: Some(path.clone()),
-                identity: measurement.identity.clone(),
-                previous_identity: old.identity.clone(),
-            });
+    if identity_continuity == IdentityContinuity::ObservedWithoutGap {
+        for (path, measurement) in &current.entries {
+            let Some(old) = previous.entries.get(path) else {
+                continue;
+            };
+            if old.identity.is_some()
+                && measurement.identity.is_some()
+                && old.identity != measurement.identity
+            {
+                result.bindings.push(BindingChange {
+                    kind: BindingChangeKind::Replaced,
+                    path: path.clone(),
+                    previous_path: Some(path.clone()),
+                    identity: measurement.identity.clone(),
+                    previous_identity: old.identity.clone(),
+                });
+            }
         }
     }
     result
@@ -414,7 +433,7 @@ mod tests {
         assert_eq!(after.errors.len(), 1);
         assert_eq!(after.errors[0].path, unreadable);
         assert_eq!(after.errors[0].kind, io::ErrorKind::PermissionDenied);
-        let delta = reconcile(&before, &after);
+        let delta = reconcile(&before, &after, IdentityContinuity::ObservedWithoutGap);
         assert_eq!(delta.logical_delta, None);
         assert_eq!(delta.allocated_delta, None);
         assert!(delta.bindings.is_empty());
