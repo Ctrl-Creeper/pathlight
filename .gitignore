@@ -11,3 +11,7 @@ releases/
 core/target/
 core/bindings/
 core/swift/PathlightRustCoreFFI.xcframework/
+
+# Private agent and tool configuration
+.claude/
+.serena/
