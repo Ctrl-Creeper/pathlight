@@ -14,6 +14,31 @@ struct ActivitySizeIndexTests {
         #expect(index.takeKnownSize(for: file) == nil)
     }
 
+    /// A whole-disk watch and a folder watch over the same file are separate
+    /// observers. They shared one entry, so whichever handled an event first
+    /// recorded the new size and the other measured a delta of zero.
+    @Test("keeps one watch's baseline out of another's")
+    func scopesBaselinesPerWatch() {
+        let index = ActivitySizeIndex()
+        let file = URL(filePath: "/Users/example/Downloads/archive.zip")
+        let disk = ActivitySizeProviders.scope(kind: "long-term", rootPath: URL(filePath: "/"))
+        let folder = ActivitySizeProviders.scope(
+            kind: "long-term",
+            rootPath: URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        )
+
+        index.recordKnownSize(1_024, for: file, scope: disk)
+
+        #expect(index.knownSize(for: file, scope: folder) == nil)
+        #expect(index.knownSize(for: file) == nil, "an unscoped lookup is its own namespace too")
+
+        index.recordKnownSize(4_096, for: file, scope: folder)
+
+        #expect(index.knownSize(for: file, scope: disk) == 1_024)
+        #expect(index.takeKnownSize(for: file, scope: folder) == 4_096)
+        #expect(index.knownSize(for: file, scope: disk) == 1_024, "taking one scope must not clear another")
+    }
+
     @Test("uses standardized file paths as cache keys")
     func standardizesCacheKeys() {
         let index = ActivitySizeIndex()

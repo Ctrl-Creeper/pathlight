@@ -1,5 +1,13 @@
 import Foundation
 
+/// Last-known allocated sizes, so a change can be reported as a delta instead
+/// of the whole file again.
+///
+/// Every entry is namespaced by a `scope`. Two watches over the same file — a
+/// whole-disk watch and a folder watch, or a live watch and a background one —
+/// are independent observers, and each needs its own baseline. Sharing one
+/// entry let whichever watch handled an event first record the new size, so
+/// the others measured a delta of zero and dropped the change.
 nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     private let lock = NSLock()
     private let ioQueue = DispatchQueue(label: "com.pathlight.activity-size-index-journal")
@@ -50,7 +58,7 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     }
 
     @discardableResult
-    func recordKnownSize(_ size: Int64?, for url: URL) -> Int64? {
+    func recordKnownSize(_ size: Int64?, for url: URL, scope: String = "") -> Int64? {
         guard let size else {
             return nil
         }
@@ -60,7 +68,7 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
             lock.unlock()
         }
 
-        let key = key(for: url)
+        let key = key(for: url, scope: scope)
         sizesByPath[key] = size
         enqueueJournalWrite(
             JournalEntry(
@@ -73,21 +81,21 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         return size
     }
 
-    func knownSize(for url: URL) -> Int64? {
+    func knownSize(for url: URL, scope: String = "") -> Int64? {
         lock.lock()
         defer {
             lock.unlock()
         }
-        return sizesByPath[key(for: url)]
+        return sizesByPath[key(for: url, scope: scope)]
     }
 
-    func takeKnownSize(for url: URL) -> Int64? {
+    func takeKnownSize(for url: URL, scope: String = "") -> Int64? {
         lock.lock()
         defer {
             lock.unlock()
         }
 
-        let key = key(for: url)
+        let key = key(for: url, scope: scope)
         guard let size = sizesByPath.removeValue(forKey: key) else {
             return nil
         }
@@ -112,8 +120,9 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         ioQueue.sync {}
     }
 
-    private func key(for url: URL) -> String {
-        url.standardizedFileURL.path
+    // A newline cannot appear in a scope, so no scope can spell another one's key.
+    private func key(for url: URL, scope: String) -> String {
+        scope.isEmpty ? url.standardizedFileURL.path : scope + "\n" + url.standardizedFileURL.path
     }
 
     // Enqueued while holding `lock`, so journal order matches dictionary mutation order.

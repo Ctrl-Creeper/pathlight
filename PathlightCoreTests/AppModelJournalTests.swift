@@ -21,8 +21,12 @@ final class AppModelJournalTests: XCTestCase {
             dependencies: AppDependencies(
                 systemActions: .inert,
                 activityMonitor: monitor,
-                activitySizeProvider: { sizes.next(for: $0) },
-                activityKnownSizeProvider: { sizes.known(for: $0) },
+                activitySizeProviders: { _ in
+                    ActivitySizeProviders(
+                        size: { sizes.next(for: $0) },
+                        known: { sizes.known(for: $0) }
+                    )
+                },
                 activityEventStore: store,
                 longTermWatchTargets: LongTermWatchTargetStore(
                     persistence: UserDefaultsLongTermWatchTargetPersistence(

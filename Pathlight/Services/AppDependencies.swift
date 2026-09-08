@@ -5,13 +5,26 @@
 
 import Foundation
 
+/// The three byte-attribution lookups one watch needs, already scoped to it.
+nonisolated struct ActivitySizeProviders: Sendable {
+    var size: StorageAttributionService.SizeProvider
+    var prior: StorageAttributionService.SizeProvider = { _ in nil }
+    var known: StorageAttributionService.SizeProvider = { _ in nil }
+
+    /// Stable scope for a watch: live and background watches over one root are
+    /// separate observers, so they must not share a baseline either.
+    nonisolated static func scope(kind: String, rootPath: URL) -> String {
+        "\(kind):\(rootPath.standardizedFileURL.path)"
+    }
+}
+
 @MainActor
 struct AppDependencies {
     var systemActions: AppSystemActions
     var activityMonitor: any DiskActivityMonitoring
-    var activitySizeProvider: StorageAttributionService.SizeProvider
-    var activityPriorSizeProvider: StorageAttributionService.SizeProvider
-    var activityKnownSizeProvider: StorageAttributionService.SizeProvider
+    /// Byte-attribution providers for one watch. Each watch asks for its own
+    /// scope so overlapping watches cannot consume each other's measurements.
+    var activitySizeProviders: @Sendable (_ scope: String) -> ActivitySizeProviders
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
@@ -26,9 +39,9 @@ struct AppDependencies {
     init(
         systemActions: AppSystemActions,
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
-        activitySizeProvider: @escaping StorageAttributionService.SizeProvider = FileAllocatedSizeProvider.allocatedSize(for:),
-        activityPriorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
-        activityKnownSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
+        activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
+            ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
+        },
         activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live(),
         longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence()
@@ -43,9 +56,7 @@ struct AppDependencies {
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
-        self.activitySizeProvider = activitySizeProvider
-        self.activityPriorSizeProvider = activityPriorSizeProvider
-        self.activityKnownSizeProvider = activityKnownSizeProvider
+        self.activitySizeProviders = activitySizeProviders
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
@@ -68,21 +79,21 @@ struct AppDependencies {
             preferencesStore: activityStoragePreferences
         )
         let activitySizeIndex = activitySizeIndex ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
-        let activitySizeProvider: StorageAttributionService.SizeProvider = { url in
-            activitySizeIndex.recordKnownSize(
-                FileAllocatedSizeProvider.allocatedSize(for: url),
-                for: url
-            )
-        }
         return AppDependencies(
             systemActions: .live,
             activityMonitor: activityMonitor,
-            activitySizeProvider: activitySizeProvider,
-            activityPriorSizeProvider: { url in
-                activitySizeIndex.takeKnownSize(for: url)
-            },
-            activityKnownSizeProvider: { url in
-                activitySizeIndex.knownSize(for: url)
+            activitySizeProviders: { scope in
+                ActivitySizeProviders(
+                    size: { url in
+                        activitySizeIndex.recordKnownSize(
+                            FileAllocatedSizeProvider.allocatedSize(for: url),
+                            for: url,
+                            scope: scope
+                        )
+                    },
+                    prior: { url in activitySizeIndex.takeKnownSize(for: url, scope: scope) },
+                    known: { url in activitySizeIndex.knownSize(for: url, scope: scope) }
+                )
             },
             activityEventStore: JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec),
             // A scan may observe a new size before its delayed change event.

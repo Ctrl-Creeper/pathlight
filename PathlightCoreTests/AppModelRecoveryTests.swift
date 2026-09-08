@@ -343,11 +343,15 @@ final class AppModelRecoveryTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let persistence = UserDefaultsLongTermWatchTargetPersistence(defaults: defaults)
+        // The root has to exist: a watch over a path that is not there reports
+        // `.rootMissing`, not `.reconnecting`.
         let root = URL(filePath: "/tmp/pathlight-recovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let model = AppModel(dependencies: AppDependencies(
             systemActions: .inert,
             activityMonitor: monitor,
-            activitySizeProvider: { _ in 4_096 },
+            activitySizeProviders: { _ in ActivitySizeProviders(size: { _ in 4_096 }) },
             activityEventStore: eventStore,
             longTermWatchTargets: LongTermWatchTargetStore(persistence: persistence),
             activityBaselineService: ActivityBaselineService(

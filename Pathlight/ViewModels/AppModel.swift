@@ -285,9 +285,9 @@ final class AppModel: ObservableObject {
             monitor: dependencies.activityMonitor,
             processHints: dependencies.processHints
         )
-        let sizeProvider = dependencies.activitySizeProvider
-        let priorSizeProvider = dependencies.activityPriorSizeProvider
-        let knownSizeProvider = dependencies.activityKnownSizeProvider
+        let sizeProviders = dependencies.activitySizeProviders(
+            ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
+        )
         let baselineService = dependencies.activityBaselineService
 
         liveWatchTask = Task { @MainActor [weak self] in
@@ -302,9 +302,9 @@ final class AppModel: ObservableObject {
             let stream = coordinator.sessions(
                 rootPath: rootPath,
                 options: options,
-                sizeProvider: sizeProvider,
-                priorSizeProvider: priorSizeProvider,
-                knownSizeProvider: knownSizeProvider
+                sizeProvider: sizeProviders.size,
+                priorSizeProvider: sizeProviders.prior,
+                knownSizeProvider: sizeProviders.known
             )
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
@@ -961,15 +961,16 @@ final class AppModel: ObservableObject {
         longTermWatchTaskIDs[target.id] = taskID
         updateLongTermWatchRuntimeStatus(
             targetID: target.id,
-            state: .starting,
+            state: Self.rootExists(target.rootPath) ? .starting : .rootMissing,
             retryCount: 0
         )
         let coordinator = LiveWatchSessionCoordinator(
             monitor: dependencies.activityMonitor,
             processHints: dependencies.processHints
         )
-        let sizeProvider = dependencies.activitySizeProvider
-        let priorSizeProvider = dependencies.activityPriorSizeProvider
+        let sizeProviders = dependencies.activitySizeProviders(
+            ActivitySizeProviders.scope(kind: "long-term", rootPath: target.rootPath)
+        )
         longTermWatchTasks[target.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -1000,9 +1001,9 @@ final class AppModel: ObservableObject {
                         patterns: currentTarget.options.exclusionPatterns,
                         rootPath: currentTarget.rootPath
                     ),
-                    sizeProvider: sizeProvider,
-                    priorSizeProvider: priorSizeProvider,
-                    knownSizeProvider: self.dependencies.activityKnownSizeProvider
+                    sizeProvider: sizeProviders.size,
+                    priorSizeProvider: sizeProviders.prior,
+                    knownSizeProvider: sizeProviders.known
                 )
                 var capturedInitialBaseline = false
                 var lastGapCount: UInt64 = 0

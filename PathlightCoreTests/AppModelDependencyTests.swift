@@ -10,15 +10,17 @@ final class AppModelDependencyTests: XCTestCase {
         let file = root.appending(path: "changed.bin")
         try Data(repeating: 0x42, count: 16_384).write(to: file)
         let sizeIndex = ActivitySizeIndex()
-        sizeIndex.recordKnownSize(4_096, for: file)
+        let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: root)
+        sizeIndex.recordKnownSize(4_096, for: file, scope: scope)
         let dependencies = AppDependencies.live(activitySizeIndex: sizeIndex)
 
         let baseline = await dependencies.activityBaselineService.captureBaseline(rootPath: root)
 
         XCTAssertGreaterThanOrEqual(baseline.allocatedSize, 16_384)
-        XCTAssertEqual(dependencies.activityKnownSizeProvider(file), 4_096,
+        XCTAssertEqual(dependencies.activitySizeProviders(scope).known(file), 4_096,
                        "a delayed modification still needs the pre-scan size for attribution")
-        XCTAssertNil(sizeIndex.knownSize(for: root), "enumeration must not seed paths into the live event index")
+        XCTAssertNil(sizeIndex.knownSize(for: root, scope: scope),
+                     "enumeration must not seed paths into the live event index")
     }
 
     func testLoadsPersistedLongTermWatchTargets() {
