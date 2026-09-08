@@ -6,6 +6,38 @@ nonisolated enum ActivityEventStoreError: Error {
     case commitStateUnknown
 }
 
+/// Pathlight's own storage, held out of every watch that can reach it.
+///
+/// Recording a change to the journal appends a row to the journal, and that
+/// append is another change: on a live watch the event journal and the size
+/// index push each other around at the stream's latency for as long as the
+/// watch runs, and every round trip also records a timeline event the user
+/// never caused. The byte threshold does not stop it, because attribution
+/// writes the size index before any threshold is applied.
+///
+/// This is deliberately not part of `ActivityExclusionFilter`: that filter is
+/// a user setting, and watching the home folder or the whole disk is a normal
+/// thing to ask for. So this exclusion is not negotiable and not editable.
+nonisolated enum ActivityStorageIsolation {
+    /// The directory holding the event journal, the size index, and the
+    /// temporary files their rewrites go through.
+    static let directoryPath: String = JSONLActivityEventStore.defaultJournalURL()
+        .deletingLastPathComponent()
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+        .path
+
+    static func excludes(_ url: URL) -> Bool {
+        excludes(url.standardizedFileURL.path, storageDirectory: directoryPath)
+    }
+
+    /// A sibling whose name merely starts the same way — `Pathlight-backup` —
+    /// is somebody else's folder, so the separator is part of the match.
+    static func excludes(_ path: String, storageDirectory: String) -> Bool {
+        path == storageDirectory || path.hasPrefix(storageDirectory + "/")
+    }
+}
+
 nonisolated protocol ActivityEventStoring: Sendable {
     /// Returns only after the whole batch is durably committed. A thrown error
     /// is retryable unless it is `commitStateUnknown`.

@@ -61,9 +61,13 @@ struct LiveWatchSessionCoordinator: Sendable {
                     switch streamEvent {
                     case let .change(change, eventID):
                         // Excluded changes still advance the cursor so
-                        // checkpoints move past them.
+                        // checkpoints move past them. Pathlight's own storage
+                        // is excluded here rather than downstream: attribution
+                        // records sizes into the size index, so letting a
+                        // journal write reach it would write the next event.
                         session.record(eventID: eventID)
-                        if exclusionFilter?.excludes(change.path) != true {
+                        if !ActivityStorageIsolation.excludes(change.path),
+                           exclusionFilter?.excludes(change.path) != true {
                             var events = attributionService.process([change])
                             if !events.isEmpty {
                                 if let processHints,

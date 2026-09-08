@@ -126,6 +126,62 @@ struct LiveWatchSessionCoordinatorTests {
         let finishedSession = await iterator.next()
         #expect(finishedSession == nil)
     }
+
+    /// Recording an event writes the journal, and writing the journal is a
+    /// change: on a whole-disk watch that loop feeds itself forever. The
+    /// exclusion filter cannot be trusted with it — the user can empty it.
+    @Test("never records its own journal, even with no exclusion filter")
+    func isolatesItsOwnStorageFromAnyWatch() async {
+        let root = URL(filePath: "/", directoryHint: .isDirectory)
+        // FSEvents reports resolved paths, which is the spelling the guard
+        // holds; `defaultJournalURL()` has not been through `realpath`.
+        let journal = URL(filePath: ActivityStorageIsolation.directoryPath, directoryHint: .isDirectory)
+            .appending(path: "activity-events.jsonl")
+        let change = DiskActivityChange(
+            kind: .modified,
+            path: journal,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 130)
+        )
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 306)])
+        )
+        nonisolated(unsafe) var measuredJournal = false
+
+        var iterator = coordinator.sessions(
+            rootPath: root,
+            startedAt: Date(timeIntervalSince1970: 100),
+            options: DiskActivityAggregationOptions(
+                minimumRecordedByteDelta: 0,
+                aggregationWindow: 0,
+                longTermRecordsFileNames: true
+            ),
+            sizeProvider: { _ in
+                measuredJournal = true
+                return 4_096
+            }
+        ).makeAsyncIterator()
+
+        _ = await iterator.next()
+        let updatedSession = await iterator.next()
+        #expect(updatedSession?.events.isEmpty == true)
+        #expect(updatedSession?.lastObservedEventID == 306)
+        #expect(
+            measuredJournal == false,
+            "measuring the journal is what appends to the size index, which is the next event"
+        )
+    }
+
+    /// A folder whose name merely starts the same way belongs to someone else.
+    @Test("isolates the storage folder itself, not its name prefix")
+    func matchesTheStorageFolderOnPathBoundaries() {
+        let storage = "/Users/example/Library/Application Support/Pathlight"
+
+        #expect(ActivityStorageIsolation.excludes(storage, storageDirectory: storage))
+        #expect(ActivityStorageIsolation.excludes("\(storage)/activity-events.jsonl", storageDirectory: storage))
+        #expect(!ActivityStorageIsolation.excludes("\(storage)-backup/notes.txt", storageDirectory: storage))
+        #expect(!ActivityStorageIsolation.excludes("/Users/example/Library", storageDirectory: storage))
+    }
 }
 
 private struct StaticDiskActivityMonitor: DiskActivityMonitoring {
