@@ -38,18 +38,10 @@ impl AggregationOptions {
 /// Allocated on-disk size; directories count as 0 so readable folders are not
 /// mistaken for unreadable ones.
 pub fn allocated_size(path: &Path) -> Option<i64> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if metadata.is_dir() {
-        return Some(0);
-    }
-    #[cfg(unix)]
-    let size = {
-        use std::os::unix::fs::MetadataExt;
-        metadata.blocks() as i64 * 512
-    };
-    #[cfg(not(unix))]
-    let size = metadata.len() as i64;
-    Some(size)
+    crate::measurement::measure_file(path)
+        .ok()?
+        .allocated_bytes
+        .and_then(|bytes| i64::try_from(bytes).ok())
 }
 
 /// Remembers the last known size of each path so deletions can be attributed.

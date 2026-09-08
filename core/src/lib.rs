@@ -15,6 +15,7 @@ pub mod history;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod inotify;
 pub mod journal;
+pub mod measurement;
 pub mod monitor;
 #[cfg(not(target_os = "macos"))]
 mod notify_backend;
