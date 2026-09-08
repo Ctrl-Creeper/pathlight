@@ -20,6 +20,7 @@ pub mod monitor;
 #[cfg(not(target_os = "macos"))]
 mod notify_backend;
 pub mod paths;
+pub mod snapshot;
 
 pub use attribution::{AggregationOptions, Attributor, SizeIndex};
 pub use event::{ActivityEvent, Confidence, EventKind};
