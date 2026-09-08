@@ -21,6 +21,25 @@
 // event paths come from the kernel echoing that same root, so the casing
 // already agrees. Fold here if a backend ever reports its own casing.
 pub fn normalize(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        normalize_windows(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed.is_empty() && path.starts_with('/') {
+            "/".into()
+        } else {
+            trimmed.into()
+        }
+    }
+}
+
+/// A Windows spelling conversion, never applied to a POSIX filename. Kept
+/// independently testable so the verbatim/UNC contract is checked on every OS.
+#[cfg(any(windows, test))]
+fn normalize_windows(path: &str) -> String {
     // `\\?\UNC\server\share` is really `\\server\share`; plain `\\?\C:\x` is `C:\x`.
     let stripped = path
         .strip_prefix(r"\\?\UNC\")
@@ -47,30 +66,47 @@ pub fn is_inside(root: &str, path: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn posix_backslashes_are_filename_characters() {
+        assert_eq!(normalize(r"/watched/a\b.txt"), r"/watched/a\b.txt");
+        assert_ne!(
+            normalize(r"/watched/a\b.txt"),
+            normalize("/watched/a/b.txt")
+        );
+        assert_eq!(normalize("/watched/name:/"), "/watched/name:");
+    }
+
     #[test]
     fn trailing_separators_go_away_but_roots_survive() {
         assert_eq!(normalize("/Users/x/Documents/"), "/Users/x/Documents");
         assert_eq!(normalize("/Users/x//"), "/Users/x");
         assert_eq!(normalize("/"), "/");
-        assert_eq!(normalize("C:/"), "C:/");
+        assert_eq!(normalize_windows("C:/"), "C:/");
     }
 
     #[test]
     fn windows_spellings_collapse_onto_the_portable_one() {
         assert_eq!(
-            normalize(r"\\?\C:\Users\x\Documents"),
+            normalize_windows(r"\\?\C:\Users\x\Documents"),
             "C:/Users/x/Documents"
         );
-        assert_eq!(normalize(r"C:\Users\x\"), "C:/Users/x");
-        assert_eq!(normalize(r"\\?\UNC\server\share\x"), "//server/share/x");
+        assert_eq!(normalize_windows(r"C:\Users\x\"), "C:/Users/x");
+        assert_eq!(
+            normalize_windows(r"\\?\UNC\server\share\x"),
+            "//server/share/x"
+        );
     }
 
     /// The bug this module exists to prevent: a verbatim-prefixed event path
     /// tested against a plain watch root looks like it is outside the watch.
     #[test]
     fn a_verbatim_event_path_is_inside_its_plain_root() {
-        let root = normalize(r"C:\Watched");
-        assert!(is_inside(&root, &normalize(r"\\?\C:\Watched\file.bin")));
+        let root = normalize_windows(r"C:\Watched");
+        assert!(is_inside(
+            &root,
+            &normalize_windows(r"\\?\C:\Watched\file.bin")
+        ));
     }
 
     #[test]
