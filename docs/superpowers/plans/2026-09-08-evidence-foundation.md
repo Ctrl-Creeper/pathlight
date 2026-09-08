@@ -35,15 +35,12 @@ test evidence. Existing private agent configuration is not part of commits.
   backward-compatible scan intervals, hard-link accounting, reject incomplete
   baseline corrections, begin observing before scanning, preserve history gaps.
 - [x] Evidence persistence and integration (`evidence.rs`, tests and recording
-  command): source epoch/sequence, tagged records, measured state distinct from
-  events, replay deduplication and explicit loss; retain legacy journal fixtures.
-- [x] Build/verify on macOS and Linux: `cargo fmt --check`, `cargo clippy
-  --all-targets -D warnings`, `cargo test` (59 tests macOS, 65 Linux incl.
-  inotify), `swift test` (96 tests), and a real `pathlight-monitor` recording.
-- [ ] Build/verify remaining, CI-only here: Windows and Android compile checks
-  need cross toolchains this machine lacks (no rustup targets, no NDK); the
-  Xcode app bundle build needs the universal xcframework. CI covers all three.
-  Documented capability status still needs the Linux inotify evidence folded in.
+  command): schema-v2 source epoch/sequence, chunked native manifests, measured
+  state distinct from events, replay deduplication and explicit loss; retain and
+  validate legacy schema-v1 journal fixtures.
+- [ ] Final build/verify after review fixes: Rust format, tests and clippy on
+  macOS/Linux; Windows and Android compile checks; Swift tests, regenerated
+  xcframework, unsigned Xcode app build, and a real recording smoke test.
 - [ ] Commit reviewed increments using Conventional Commits.
 
 ## Acceptance cases

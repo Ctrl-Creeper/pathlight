@@ -9,7 +9,11 @@ Swift and Kotlin through [UniFFI](https://mozilla.github.io/uniffi-rs/).
 |--------|---------|--------|
 | `event` | `ActivityEvent` and a JSON encoding byte-compatible with the Swift `JSONLActivityEventStore` | done, fixture-tested against Swift output |
 | `journal` | Append-only JSONL journal (0700 dir, 0600 file), newest-first load, `load_history`, skips Swift-encrypted rows | done |
-| `monitor` + `fsevents` | `Watcher` emitting `StreamEvent`s to a host listener. macOS: native FSEvents with real event IDs and `since_event_id` resume. Others: `notify` (inotify / ReadDirectoryChangesW) with a counter | done; the macOS app uses it |
+| `monitor` + platform backends | `Watcher` emitting `StreamEvent`s. macOS uses resumable FSEvents; Linux/Android pair inotify renames; Windows uses ReadDirectoryChangesW through `notify` | default backends implemented; Windows/Android device qualification remains |
+| `measurement` | Logical length, filesystem-reported allocation, link count, kind and scoped native object identity from one metadata observation | implemented and real-filesystem tested on macOS/Linux; Windows compile-tested |
+| `snapshot` | Native-name interval traversal, identity-aware totals and continuity-gated endpoint reconciliation | implemented; explicitly not an atomic snapshot or historical replay |
+| `evidence` | Locked, versioned JSONL evidence with source epochs, native paths, explicit gaps and bounded durable batches | implemented (Rust API) |
+| `recording` | Bounded recording sessions with watcher-first startup, chunked native binding manifests and interval snapshots | implemented as `pathlight-monitor`; no restart resume yet |
 | `attribution` | Byte-delta attribution, threshold, window aggregation, in-memory `SizeIndex` | done (Rust API only, not yet on the FFI surface) |
 | `exclusion` | gitignore-style noise filter via the `ignore` crate | done (Rust API only) |
 | `history` | Buckets, totals, newest-first rows for the dashboard | done, exposed as `Journal.load_history` |
@@ -37,11 +41,19 @@ packages `core/swift/PathlightRustCoreFFI.xcframework` (ignored by git).
 `Pathlight.xcodeproj` depends on the local package in `core/swift`, so run the
 script once before building the app. The library is universal only when the
 `x86_64-apple-darwin` Rust target is installed; otherwise it is host-only.
+Use an official rustup toolchain for release artifacts. The script inspects all
+Mach-O members and rejects a Rust standard library whose minimum macOS version
+is newer than `MACOSX_DEPLOYMENT_TARGET` (14.0 by default); setting the
+environment variable cannot rewrite precompiled standard-library objects.
 
 ## Known ceilings
 
 - On Linux and Windows event IDs are a process-local counter, so `Watcher`
   cannot resume after a restart there; `since_event_id` triggers a
   `RequiresRescan`. A USN Journal backend would fix Windows.
-- Paths are POSIX; `file://` conversion does not handle Windows drive letters.
+- Legacy `StreamEvent` paths still cross UniFFI as UTF-8 strings. Evidence
+  manifests preserve native Unix bytes/Windows UTF-16; an unrepresentable live
+  event becomes an explicit gap and is recovered only as observable snapshot state.
+- Windows verbatim path semantics and real device behavior still require native
+  runtime tests before the backend can claim full path coverage.
 - Timestamps are written at whole-second precision to match Swift.

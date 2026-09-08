@@ -52,34 +52,30 @@ pairing-buffer exhaustion. The existing Linux/macOS/Windows CI matrix runs these
 contracts; a cross-compilation check alone is not a Windows or Android runtime
 qualification.
 
-Local verification on 2026-09-08: 38 Rust tests passed on Linux in a container
-(filesystem operations run inside its Linux filesystem), and 29 passed on
-macOS. Clippy with warnings denied passed on both. Windows x86_64 GNU
-`cargo check --all-targets` and Android aarch64 `cargo check --lib` passed.
-Windows/Android device execution, power measurements and privileged helpers
-remain unverified.
+Local verification counts are recorded in the evidence-foundation plan after
+each complete verification pass. Linux tests run on a real Linux filesystem in
+a container. Windows x86_64 GNU and Android aarch64 checks prove compilation
+only; Windows/Android device execution, power measurements and privileged
+helpers remain unverified.
 
 ## Platform-specific next steps
 
-1. Move snapshot reconciliation into the shared core and distinguish event
-   history from reconstructed net changes. A snapshot cannot recover a temporary
-   file created and deleted entirely during a gap.
-2. Define source identities, per-watch coverage, loss markers and IPC contracts
-   before combining default and privileged sources. Do not append two sources
-   independently and recreate the duplicate-recording bug.
-3. Linux: prototype an optional fanotify helper on explicitly tested kernels and
+1. Replace platform-wide capability constants with a negotiated per-watch
+   coverage descriptor before combining default and privileged sources. Do not
+   append two sources independently and recreate the duplicate-recording bug.
+2. Linux: prototype an optional fanotify helper on explicitly tested kernels and
    filesystems. Probe supported flags, handle overflow and mount changes, and
    fall back visibly to inotify. Whole-filesystem marks remove per-directory
    watch registration, not every limit or coverage gap.
-4. Windows: add an optional USN reader for persistent recovery on supported local
+3. Windows: add an optional USN reader for persistent recovery on supported local
    volumes, with journal identity/cursor validation and a file-reference/path
    index. Keep ReadDirectoryChangesW for ordinary live watches. USN does not
    identify the writing process; evaluate ETW separately if needed.
-5. macOS: pursue the Endpoint Security entitlement and prototype notification
+4. macOS: pursue the Endpoint Security entitlement and prototype notification
    events for kernel process attribution. Keep FSEvents replay and reconciliation
    available; detect ES sequence gaps and avoid synchronous authorization events
    for this read-only product.
-6. Android: build the Kotlin host and qualify app-private paths, authorized shared
+5. Android: build the Kotlin host and qualify app-private paths, authorized shared
    storage and provider-backed SAF trees separately. SAF content URIs are not
    generally inotify paths. Use MediaStore/provider invalidations and snapshot
    reconciliation where appropriate. A rooted-device helper is an experimental,
