@@ -133,14 +133,15 @@ impl<'a> Attributor<'a> {
             process_name: None,
         };
         let sized = |kind, previous_path: Option<String>| {
-            let known = (self.known_size)(&change.path).unwrap_or(0);
+            let known = (self.known_size)(&change.path);
             (self.size)(&change.path).map(|size| {
-                base(
-                    kind,
-                    Some(size - known),
-                    Confidence::Confirmed,
-                    previous_path,
-                )
+                let (byte_delta, confidence) = match (kind, known) {
+                    (EventKind::Modified, None) => (None, Confidence::Unknown),
+                    (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
+                    (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
+                    (_, None) => (None, Confidence::Unknown),
+                };
+                base(kind, byte_delta, confidence, previous_path)
             })
         };
         let vanished = |kind, previous_path: Option<String>| match (self.prior_size)(&change.path) {

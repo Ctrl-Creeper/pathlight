@@ -24,6 +24,7 @@ fn records_created_file_and_filters_below_threshold() {
         }
     };
     let none = |_: &str| None;
+    let known = |path: &str| path.ends_with("tiny.txt").then_some(0);
     let attributor = Attributor::new(
         AggregationOptions {
             minimum_recorded_byte_delta: 1024,
@@ -31,7 +32,7 @@ fn records_created_file_and_filters_below_threshold() {
         },
         &size,
         &none,
-        &none,
+        &known,
     );
     let events = attributor.process(&[
         change(ChangeKind::Created, "big.dmg", 1),
@@ -41,6 +42,20 @@ fn records_created_file_and_filters_below_threshold() {
     assert_eq!(events[0].kind, EventKind::Created);
     assert_eq!(events[0].byte_delta, Some(4096));
     assert_eq!(events[0].confidence, Confidence::Confirmed);
+}
+
+#[test]
+fn first_modified_observation_has_unknown_growth_instead_of_the_whole_file_size() {
+    let size = |_: &str| Some(8_192);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &none, &none);
+
+    let events = attributor.process(&[change(ChangeKind::Modified, "existing.bin", 1)]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Modified);
+    assert_eq!(events[0].byte_delta, None);
+    assert_eq!(events[0].confidence, Confidence::Unknown);
 }
 
 #[test]
