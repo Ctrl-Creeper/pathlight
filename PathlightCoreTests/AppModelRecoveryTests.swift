@@ -149,6 +149,42 @@ final class AppModelRecoveryTests: XCTestCase {
         }
     }
 
+    func testJournalRetryBacksOffWhileFlushesKeepFailing() {
+        XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 0), 1)
+        XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 1), 2)
+        XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 3), 8)
+        XCTAssertEqual(AppModel.journalRetryDelay(failureCount: 9), 30)
+    }
+
+    func testRepeatedJournalFailuresAreReportedInsteadOfRetriedSilently() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = AlwaysFailRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "unwritable.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 44
+        ))
+
+        try await eventually("failure reported", timeout: .seconds(12)) {
+            model.lastErrorMessage?.contains("could not write activity history") == true
+        }
+        XCTAssertGreaterThanOrEqual(store.appendCallCount, 3)
+        // Recording keeps retrying, so the cursor must stay behind the batch.
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1)
+    }
+
     func testImmediateStopFlushKeepsCheckpointBehindInFlightAppend() async throws {
         let monitor = RecoveryTestMonitor()
         let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
@@ -461,6 +497,25 @@ private final class UnknownCommitRecoveryEventStore: ActivityEventStoring, @unch
     func append(_ events: [DiskActivityEvent]) async throws {
         lock.withLock { calls += 1 }
         throw ActivityEventStoreError.commitStateUnknown
+    }
+
+    func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] { [] }
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
+}
+
+private final class AlwaysFailRecoveryEventStore: ActivityEventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var appendCallCount: Int { lock.withLock { calls } }
+
+    func append(_ events: [DiskActivityEvent]) async throws {
+        lock.withLock { calls += 1 }
+        throw RecoveryStoreError.injectedFailure
     }
 
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] { [] }

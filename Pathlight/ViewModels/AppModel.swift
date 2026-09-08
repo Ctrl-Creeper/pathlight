@@ -64,6 +64,7 @@ final class AppModel: ObservableObject {
     private var journalFlushInFlightRoots: Set<String> = []
     private var journalFlushImmediatelyRequested = false
     private var journalStorageBlocked = false
+    private var journalFlushFailureCount = 0
     /// Rows wait until the live-monitor coalescing window (1 s) has closed so a
     /// created+modified burst lands in the journal as one final row.
     private static let journalFlushDelay: TimeInterval = 1.2
@@ -72,6 +73,9 @@ final class AppModel: ObservableObject {
     /// Session coalescing is one second. Retaining committed versions slightly
     /// longer lets a max-wait flush turn a later merged version into a delta.
     private static let committedJournalEventRetention: TimeInterval = 2
+    /// One or two failed flushes are normal transients; past that the store is
+    /// really unavailable and the user deserves to hear about it.
+    private static let journalFlushFailureReportThreshold = 3
 
     init(dependencies: AppDependencies = .live()) {
         self.dependencies = dependencies
@@ -409,6 +413,7 @@ final class AppModel: ObservableObject {
                 )
             }
             try await store.append(journalEvents)
+            journalFlushFailureCount = 0
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             for entry in batch.entries {
@@ -439,9 +444,15 @@ final class AppModel: ObservableObject {
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             restorePendingJournalBatch(batch)
+            journalFlushFailureCount += 1
+            if journalFlushFailureCount >= Self.journalFlushFailureReportThreshold {
+                lastErrorMessage = "Pathlight could not write activity history. Monitoring continues and recording keeps retrying."
+            }
         }
         if !pendingJournalEvents.isEmpty {
-            let delay: TimeInterval = journalFlushImmediatelyRequested ? 0 : 1
+            let delay: TimeInterval = journalFlushImmediatelyRequested
+                ? 0
+                : Self.journalRetryDelay(failureCount: journalFlushFailureCount)
             journalFlushImmediatelyRequested = false
             scheduleJournalFlush(after: delay)
         } else {
@@ -511,6 +522,12 @@ final class AppModel: ObservableObject {
     /// Stop paths request the same serialized writer used by scheduled flushes.
     /// If the model is deallocated first, its checkpoint remains behind and the
     /// native journal replays the uncommitted interval on the next launch.
+    /// Doubles per consecutive failure so a stalled store is retried without
+    /// spinning, and stays at one second while flushes are succeeding.
+    nonisolated static func journalRetryDelay(failureCount: Int) -> TimeInterval {
+        guard failureCount > 0 else { return 1 }
+        return min(30, pow(2, Double(min(failureCount, 5))))
+    }
     private func flushJournalNow() {
         journalFlushTask?.cancel()
         journalFlushTask = nil
