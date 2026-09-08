@@ -24,6 +24,7 @@ struct ActivityDashboardView: View {
     let histories: [ActivityHistorySnapshot]
     let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
     let showsLaunchAtLoginNudge: Bool
+    var monitoringStatusMessage: String? = nil
     let isLiveMonitorActive: Bool
     let actions: ActivityDashboardActions
 
@@ -56,8 +57,13 @@ struct ActivityDashboardView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let monitoringStatusMessage {
+                ActivityMonitoringStatusBanner(message: monitoringStatusMessage)
+                    .transition(.opacity)
+            }
             dashboardContent
         }
+        .animation(PathlightMotion.state, value: monitoringStatusMessage)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
@@ -438,6 +444,31 @@ private struct ActivityDashboardTargetRow: View {
 
     private var rowBackground: Color {
         isSelected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor)
+    }
+}
+
+/// Recording health sits above the data it describes, so the numbers below are
+/// never read as complete while they are not. Translucent and un-dismissable:
+/// it is live status, not a message, and it clears itself once writes succeed.
+private struct ActivityMonitoringStatusBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+
+            Text(message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .accessibilityElement(children: .combine)
     }
 }
 

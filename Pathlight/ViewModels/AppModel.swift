@@ -15,6 +15,9 @@ final class AppModel: ObservableObject {
     @Published var activityStorageLimitBytes = ActivityStoragePreferences.defaults.storageLimitBytes
     @Published var activityEncryptNewData = ActivityStoragePreferences.defaults.encryptNewData
     @Published var lastErrorMessage: String?
+    /// Recording health. Shown as a banner beside the data it affects, because
+    /// a modal alert interrupts without offering anything to act on.
+    @Published var monitoringStatusMessage: String?
     @Published private(set) var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
@@ -415,6 +418,7 @@ final class AppModel: ObservableObject {
             }
             try await store.append(journalEvents)
             journalFlushFailureCount = 0
+            monitoringStatusMessage = nil
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             for entry in batch.entries {
@@ -440,14 +444,14 @@ final class AppModel: ObservableObject {
             pendingJournalOrder.removeAll()
             pendingJournalRoots.removeAll()
             pendingJournalSince = nil
-            lastErrorMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
+            monitoringStatusMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
         } catch {
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             restorePendingJournalBatch(batch)
             journalFlushFailureCount += 1
             if journalFlushFailureCount >= Self.journalFlushFailureReportThreshold {
-                lastErrorMessage = "Pathlight could not write activity history. Monitoring continues and recording keeps retrying."
+                monitoringStatusMessage = "Pathlight could not write activity history. Monitoring continues and recording keeps retrying."
             }
         }
         if !pendingJournalEvents.isEmpty {
@@ -547,7 +551,7 @@ final class AppModel: ObservableObject {
     /// answer to the keychain prompt stays quiet.
     nonisolated private static let activityStorageKeyWarmUpAttempts = 3
     private func reportActivityStorageKeyUnavailable() {
-        lastErrorMessage = "Pathlight needs keychain access to record activity history. Grant it and recording continues."
+        monitoringStatusMessage = "Pathlight needs keychain access to record activity history. Grant it and recording continues."
     }
     /// Doubles per consecutive failure so a stalled store is retried without
     /// spinning, and stays at one second while flushes are succeeding.

@@ -16,6 +16,7 @@ struct ContentView: View {
             histories: Array(appModel.activityDashboardHistories.values),
             runtimeStatuses: appModel.longTermWatchRuntimeStatuses,
             showsLaunchAtLoginNudge: appModel.shouldShowLaunchAtLoginNudge,
+            monitoringStatusMessage: appModel.monitoringStatusMessage,
             isLiveMonitorActive: appModel.liveWatchSession != nil,
             actions: dashboardActions
         )

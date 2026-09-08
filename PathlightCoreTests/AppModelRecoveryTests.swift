@@ -160,7 +160,7 @@ final class AppModelRecoveryTests: XCTestCase {
         defer { model.cleanup() }
 
         try await eventually("keychain access reported") {
-            model.lastErrorMessage?.contains("needs keychain access") == true
+            model.monitoringStatusMessage?.contains("needs keychain access") == true
         }
         // A denial must not re-prompt; only a timeout is worth waiting out.
         XCTAssertEqual(attempts.count, 1)
@@ -178,7 +178,7 @@ final class AppModelRecoveryTests: XCTestCase {
         defer { model.cleanup() }
 
         try await eventually("warm-up retried past the timeout") { attempts.count == 2 }
-        XCTAssertNil(model.lastErrorMessage)
+        XCTAssertNil(model.monitoringStatusMessage)
     }
 
     func testJournalRetryBacksOffWhileFlushesKeepFailing() {
@@ -210,7 +210,7 @@ final class AppModelRecoveryTests: XCTestCase {
         ))
 
         try await eventually("failure reported", timeout: .seconds(12)) {
-            model.lastErrorMessage?.contains("could not write activity history") == true
+            model.monitoringStatusMessage?.contains("could not write activity history") == true
         }
         XCTAssertGreaterThanOrEqual(store.appendCallCount, 3)
         // Recording keeps retrying, so the cursor must stay behind the batch.
@@ -308,7 +308,7 @@ final class AppModelRecoveryTests: XCTestCase {
             eventID: 42
         ))
         try await eventually("uncertain commit surfaced") {
-            model.lastErrorMessage?.contains("recording is paused") == true
+            model.monitoringStatusMessage?.contains("recording is paused") == true
         }
         try await Task.sleep(for: .milliseconds(1_200))
 
