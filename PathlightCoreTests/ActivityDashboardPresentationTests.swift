@@ -81,6 +81,44 @@ struct ActivityDashboardPresentationTests {
         )
     }
 
+    /// A watch whose folder was renamed away kept reporting "Watching" and
+    /// still counted toward the active total, so nothing said it was blind.
+    @Test("says so when the watched folder is gone")
+    func reportsAMissingRoot() {
+        let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let desktop = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
+        let presentation = ActivityDashboardPresentation(
+            targets: [LongTermWatchTarget(rootPath: downloads), LongTermWatchTarget(rootPath: desktop)],
+            selectedRootPath: downloads,
+            histories: [],
+            runtimeStatuses: [
+                downloads.standardizedFileURL.path: LongTermWatchRuntimeStatus(state: .rootMissing, lastActivityAt: nil, retryCount: 0),
+                desktop.standardizedFileURL.path: LongTermWatchRuntimeStatus(state: .watching, lastActivityAt: nil, retryCount: 0)
+            ]
+        )
+
+        #expect(presentation.targetRows.first?.statusText == "Folder Missing")
+        #expect(
+            presentation.targetRows.first?.lastActivityText
+                == "Folder is missing — nothing can be recorded"
+        )
+        #expect(presentation.summaryText.contains("1 active"))
+    }
+
+    /// `/` has no last path component, so the whole-disk watch showed the raw
+    /// path as both its title and its subtitle.
+    @Test("names the whole disk instead of showing a bare slash")
+    func namesTheWholeDisk() {
+        let root = URL(filePath: "/", directoryHint: .isDirectory)
+
+        #expect(WatchRootNaming.displayName(for: root) == "Whole Disk")
+        #expect(
+            WatchRootNaming.displayName(
+                for: URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+            ) == "Downloads"
+        )
+    }
+
     @Test("shows per-target history summaries for unselected targets")
     func showsPerTargetHistorySummaries() {
         let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

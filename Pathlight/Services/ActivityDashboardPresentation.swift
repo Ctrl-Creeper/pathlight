@@ -1,5 +1,18 @@
 import Foundation
 
+/// What to call a watch root. `/` has no last path component, so the old
+/// `lastPathComponent` fallback showed the raw path as both title and subtitle.
+nonisolated enum WatchRootNaming {
+    nonisolated static func displayName(for url: URL) -> String {
+        let standardized = url.standardizedFileURL
+        if standardized.path == "/" {
+            return "Whole Disk"
+        }
+        let name = standardized.lastPathComponent
+        return name.isEmpty ? standardized.path : name
+    }
+}
+
 struct ActivityDashboardPresentation: Equatable, Sendable {
     struct TargetRow: Equatable, Identifiable, Sendable {
         let id: String
@@ -11,6 +24,9 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let thresholdText: String
         let lastActivityText: String
         let hasHistoryGap: Bool
+        /// Set when the folder contains links whose bytes can change from
+        /// outside it. Nothing is wrong with the watch; it just cannot see them.
+        let unobservableLinkNote: String?
         let isEnabled: Bool
         let growthAlertThresholdBytes: Int64?
         let exclusionPatterns: [String]
@@ -59,7 +75,11 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         title = "Activity"
         emptyStateTitle = targets.isEmpty ? "No Long-Term Watches" : nil
 
-        let activeCount = targets.filter(\.isEnabled).count
+        // A folder that vanished is still enabled but is not being watched;
+        // counting it as active is how the old summary hid the failure.
+        let activeCount = targets.filter { target in
+            target.isEnabled && runtimeStatuses[target.id]?.state != .rootMissing
+        }.count
         if targets.isEmpty {
             summaryText = "No tracked folders"
         } else {
@@ -111,7 +131,11 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         limit: Int,
         trashContains: (String) -> Bool
     ) -> [RecentDeletion] {
-        history.recentEvents
+        let root = history.rootPath.standardizedFileURL.path
+        return history.recentEvents
+            // Unmounting a volume or renaming the watch root reports the root
+            // path as removed. That is a watch ending, not a file the user lost.
+            .filter { $0.path.standardizedFileURL.path != root }
             .filter { $0.kind == .deleted || ($0.kind == .moved && ($0.byteDelta ?? 0) < 0) }
             .sorted { lhs, rhs in
                 let lhsBytes = abs(lhs.byteDelta ?? 0)
@@ -185,6 +209,15 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             }
     }
 
+    /// FSEvents reports paths, not inodes. A write through a name outside the
+    /// watched folder changes the folder's contents with no event under it, so
+    /// the honest answer is to say how many such names exist.
+    private static func unobservableLinkNote(for baseline: ActivityBaselineSnapshot?) -> String? {
+        guard let count = baseline?.unobservableLinkCount, count > 0 else { return nil }
+        let itemLabel = count == 1 ? "item" : "items"
+        return "\(count.formatted()) linked \(itemLabel) can change from outside this folder without being recorded"
+    }
+
     private static func targetRow(
         for target: LongTermWatchTarget,
         history: ActivityHistorySnapshot?,
@@ -201,8 +234,9 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             changeText: history.map { "\(signedSize($0.totalNetByteDelta)) net" } ?? "No history",
             eventText: history.map { eventCountText($0.eventCount) } ?? "0 events",
             thresholdText: "Records changes over \(PathlightFormatters.size(target.options.minimumRecordedByteDelta))",
-            lastActivityText: lastActivityText(for: status),
+            lastActivityText: lastActivityText(for: status, history: history),
             hasHistoryGap: status.state == .historyGap,
+            unobservableLinkNote: unobservableLinkNote(for: target.baseline),
             isEnabled: target.isEnabled,
             growthAlertThresholdBytes: target.options.growthAlertThresholdBytes,
             exclusionPatterns: target.options.exclusionPatterns,
@@ -210,9 +244,8 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         )
     }
 
-    private static func displayName(for url: URL) -> String {
-        let name = url.lastPathComponent
-        return name.isEmpty ? url.path : name
+    static func displayName(for url: URL) -> String {
+        WatchRootNaming.displayName(for: url)
     }
 
     private static func eventCountText(_ count: Int) -> String {
@@ -231,13 +264,23 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             return "Catching Up"
         case .historyGap:
             return "History Gap"
+        case .rootMissing:
+            return "Folder Missing"
         case .paused:
             return "Paused"
         }
     }
 
-    private static func lastActivityText(for status: LongTermWatchRuntimeStatus) -> String {
-        guard let lastActivityAt = status.lastActivityAt else {
+    /// After a relaunch nothing has been observed yet, so the recorded history
+    /// is the only thing that knows when this folder last changed.
+    private static func lastActivityText(
+        for status: LongTermWatchRuntimeStatus,
+        history: ActivityHistorySnapshot?
+    ) -> String {
+        if status.state == .rootMissing {
+            return "Folder is missing — nothing can be recorded"
+        }
+        guard let lastActivityAt = status.lastActivityAt ?? history?.recentEvents.first?.timestamp else {
             return status.state == .paused ? "Monitoring paused" : "No activity yet"
         }
         return "Last activity \(PathlightFormatters.date(lastActivityAt))"
@@ -297,10 +340,9 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
             let status = runtimeStatuses[target.id] ?? (target.isEnabled
                 ? LongTermWatchRuntimeStatus(state: .starting, lastActivityAt: nil, retryCount: 0)
                 : .paused)
-            let name = target.rootPath.lastPathComponent
             return Row(
                 id: target.id,
-                title: name.isEmpty ? target.rootPath.path : name,
+                title: ActivityDashboardPresentation.displayName(for: target.rootPath),
                 statusText: ActivityDashboardPresentation.statusText(for: status),
                 todayChangeText: "\(ActivityDashboardPresentation.signedSize(todayDelta)) today",
                 isEnabled: target.isEnabled,

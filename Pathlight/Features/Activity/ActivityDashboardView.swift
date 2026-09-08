@@ -412,6 +412,13 @@ private struct ActivityDashboardTargetRow: View {
                     )
                 }
 
+                if let note = row.unobservableLinkNote {
+                    Label("Linked Items", systemImage: "link.badge.plus")
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.secondary)
+                        .help(note)
+                }
+
                 if row.hasHistoryGap {
                     Button(action: onClearHistoryGap) {
                         Label("Clear History Gap", systemImage: "exclamationmark.triangle")

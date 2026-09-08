@@ -1032,6 +1032,9 @@ final class AppModel: ObservableObject {
                         )
                     }
 
+                    // A root change (rename, delete, unmount) arrives as a
+                    // rescan request, so that is the moment to confirm the
+                    // folder is still there rather than keep saying "Watching".
                     let runtimeState: LongTermWatchRuntimeState
                     switch session.historyState {
                     case .live:
@@ -1039,7 +1042,7 @@ final class AppModel: ObservableObject {
                     case .catchingUp:
                         runtimeState = .catchingUp
                     case .gapDetected:
-                        runtimeState = .historyGap
+                        runtimeState = Self.rootExists(currentTarget.rootPath) ? .historyGap : .rootMissing
                     }
                     self.updateLongTermWatchRuntimeStatus(
                         targetID: target.id,
@@ -1083,7 +1086,7 @@ final class AppModel: ObservableObject {
                 retryCount += 1
                 self.updateLongTermWatchRuntimeStatus(
                     targetID: target.id,
-                    state: .reconnecting,
+                    state: Self.rootExists(currentTarget.rootPath) ? .reconnecting : .rootMissing,
                     retryCount: retryCount
                 )
                 let delayNanoseconds = UInt64(min(1 << min(retryCount - 1, 5), 30)) * 1_000_000_000
@@ -1168,6 +1171,12 @@ final class AppModel: ObservableObject {
 
     func openLoginItemsSettings() {
         dependencies.launchAtLoginService.openLoginItemsSettings()
+    }
+
+    /// One `stat` on a path the user chose, only when the monitor already told
+    /// us something changed about the root. Cheap enough not to count as polling.
+    private nonisolated static func rootExists(_ rootPath: URL) -> Bool {
+        FileManager.default.fileExists(atPath: rootPath.standardizedFileURL.path)
     }
 
     private func updateLongTermWatchRuntimeStatus(

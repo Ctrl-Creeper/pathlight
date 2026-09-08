@@ -36,6 +36,11 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
     /// Distinct identified objects. Entries lacking identity are counted separately.
     let measuredObjectCount: Int?
     let unidentifiedItemCount: Int?
+    /// Items inside the root whose bytes can be changed from outside it without
+    /// any event for a path under the root: symlinks pointing elsewhere, and
+    /// hard links whose other names are not in this folder. FSEvents reports
+    /// paths, so a write through the outside name is invisible here.
+    let unobservableLinkCount: Int?
 
     init(
         rootPath: URL,
@@ -48,7 +53,8 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
         scanState: ActivityBaselineScanState = .unknown,
         consistency: ActivityBaselineConsistency = .unverified,
         measuredObjectCount: Int? = nil,
-        unidentifiedItemCount: Int? = nil
+        unidentifiedItemCount: Int? = nil,
+        unobservableLinkCount: Int? = nil
     ) {
         self.rootPath = rootPath.standardizedFileURL
         self.capturedAt = capturedAt
@@ -61,6 +67,7 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
         self.consistency = consistency
         self.measuredObjectCount = measuredObjectCount
         self.unidentifiedItemCount = unidentifiedItemCount
+        self.unobservableLinkCount = unobservableLinkCount
     }
 
     init(from decoder: any Decoder) throws {
@@ -76,6 +83,7 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
         consistency = try container.decodeIfPresent(ActivityBaselineConsistency.self, forKey: .consistency) ?? .unverified
         measuredObjectCount = try container.decodeIfPresent(Int.self, forKey: .measuredObjectCount)
         unidentifiedItemCount = try container.decodeIfPresent(Int.self, forKey: .unidentifiedItemCount)
+        unobservableLinkCount = try container.decodeIfPresent(Int.self, forKey: .unobservableLinkCount)
     }
 
     var isUsableForReconciliation: Bool {
@@ -96,7 +104,8 @@ nonisolated struct ActivityBaselineSnapshot: Codable, Equatable, Sendable {
             measuredItemCount: measuredItemCount, unreadableItemCount: unreadableItemCount,
             scanStartedAt: scanStartedAt, scanFinishedAt: scanFinishedAt, scanState: scanState,
             consistency: changed ? .changed : .noObservedChanges,
-            measuredObjectCount: measuredObjectCount, unidentifiedItemCount: unidentifiedItemCount
+            measuredObjectCount: measuredObjectCount, unidentifiedItemCount: unidentifiedItemCount,
+            unobservableLinkCount: unobservableLinkCount
         )
     }
 }
@@ -118,6 +127,11 @@ nonisolated struct ActivityBaselineService: Sendable {
     struct Measurement: Sendable {
         let allocatedSize: Int64?
         let identity: ObjectIdentity?
+        /// How many names this object has. More than one means a write through
+        /// another name changes these bytes; if that name is outside the root,
+        /// no event ever mentions a path under the root.
+        var linkCount: UInt64 = 1
+        var isSymbolicLink: Bool = false
     }
 
     private let measurementProvider: MeasurementProvider
@@ -149,6 +163,10 @@ nonisolated struct ActivityBaselineService: Sendable {
         var unidentifiedItemCount = 0
         var visitedPaths = Set<String>()
         var measuredObjects = Set<ObjectIdentity>()
+        // Only multi-named objects are tracked, so this stays empty on the
+        // overwhelming majority of folders.
+        var namesSeenPerLinkedObject: [ObjectIdentity: (expected: UInt64, seen: UInt64)] = [:]
+        var escapingSymlinkCount = 0
 
         while let url = pending.popLast() {
             guard !Task.isCancelled else { break }
@@ -164,6 +182,15 @@ nonisolated struct ActivityBaselineService: Sendable {
             guard visitedPaths.insert(standardizedURL.path).inserted else { continue }
 
             let measurement = measurementProvider(standardizedURL)
+            if measurement.isSymbolicLink {
+                if !Self.isUnder(standardizedRoot, standardizedURL.resolvingSymlinksInPath()) {
+                    escapingSymlinkCount += 1
+                }
+            } else if measurement.linkCount > 1, let identity = measurement.identity {
+                let seen = (namesSeenPerLinkedObject[identity]?.seen ?? 0) + 1
+                namesSeenPerLinkedObject[identity] = (measurement.linkCount, seen)
+            }
+
             if let size = measurement.allocatedSize, size >= 0 {
                 measuredItemCount += 1
                 let isNewObject: Bool
@@ -192,6 +219,16 @@ nonisolated struct ActivityBaselineService: Sendable {
             }
         }
 
+        // A traversal that could not read everything has not seen every name of
+        // a hard link either, so only a complete scan may conclude a name is
+        // outside the root. Escaping symlinks need no such caveat.
+        let scanState: ActivityBaselineScanState = Task.isCancelled
+            ? .cancelled
+            : (unreadableItemCount == 0 ? .completed : .partial)
+        let externalHardLinkCount = scanState == .completed
+            ? namesSeenPerLinkedObject.values.count(where: { $0.seen < $0.expected })
+            : 0
+
         return ActivityBaselineSnapshot(
             rootPath: standardizedRoot,
             capturedAt: capturedAt,
@@ -200,10 +237,19 @@ nonisolated struct ActivityBaselineService: Sendable {
             unreadableItemCount: unreadableItemCount,
             scanStartedAt: capturedAt,
             scanFinishedAt: now(),
-            scanState: Task.isCancelled ? .cancelled : (unreadableItemCount == 0 ? .completed : .partial),
+            scanState: scanState,
             measuredObjectCount: measuredObjects.count,
-            unidentifiedItemCount: unidentifiedItemCount
+            unidentifiedItemCount: unidentifiedItemCount,
+            unobservableLinkCount: escapingSymlinkCount + externalHardLinkCount
         )
+    }
+
+    /// Whether `url` is the root or somewhere inside it. `/` contains
+    /// everything, and appending a separator to it would spell `//`.
+    static func isUnder(_ root: URL, _ url: URL) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return rootPath == "/" || path == rootPath || path.hasPrefix(rootPath + "/")
     }
 
     static func liveSystemPressure() -> Bool {
@@ -230,12 +276,16 @@ nonisolated struct ActivityBaselineService: Sendable {
         }
         let isDirectory = metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
         let allocation = metadata.st_blocks.multipliedReportingOverflow(by: 512)
+        // Directories always report more than one name (`.` and `..`), so only
+        // files can say anything useful about hard links here.
         return Measurement(
             allocatedSize: isDirectory || !allocation.overflow ? (isDirectory ? 0 : allocation.partialValue) : nil,
             identity: ObjectIdentity(
                 device: UInt64(bitPattern: Int64(metadata.st_dev)),
                 inode: UInt64(metadata.st_ino)
-            )
+            ),
+            linkCount: isDirectory ? 1 : UInt64(metadata.st_nlink),
+            isSymbolicLink: metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK)
         )
     }
 

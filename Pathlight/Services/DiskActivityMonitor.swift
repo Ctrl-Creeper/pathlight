@@ -132,7 +132,9 @@ private final class FSEventsStreamBox: @unchecked Sendable {
         // NoDefer fires the first event immediately, which is what an interactive
         // live monitor wants; relaxed background watches let the kernel batch the
         // full latency window so the process wakes far less often.
-        var rawFlags = kFSEventStreamCreateFlagFileEvents
+        // WatchRoot is what makes FSEvents report the root itself being renamed,
+        // deleted, or unmounted; without it such a watch goes silent unnoticed.
+        var rawFlags = kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot
         if latency < 1 {
             rawFlags |= kFSEventStreamCreateFlagNoDefer
         }

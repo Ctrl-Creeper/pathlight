@@ -87,6 +87,9 @@ nonisolated enum LongTermWatchRuntimeState: Equatable, Sendable {
     case reconnecting
     case catchingUp
     case historyGap
+    /// The watched folder or volume is no longer there, so nothing can be
+    /// observed until it comes back.
+    case rootMissing
     case paused
 }
 

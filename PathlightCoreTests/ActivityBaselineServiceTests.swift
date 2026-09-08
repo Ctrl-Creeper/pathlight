@@ -151,6 +151,36 @@ struct ActivityBaselineServiceTests {
         #expect(after.unidentifiedItemCount == 0)
     }
 
+    /// The watch is not broken, it is blind: FSEvents reports paths, so a write
+    /// through a name outside the folder never mentions a path inside it. The
+    /// card can only be honest about that if the scan counts such names.
+    @Test("counts links whose bytes can change from outside the folder")
+    func countsLinksReachableFromOutside() async throws {
+        let outside = try makeTemporaryDirectory()
+        let root = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let inside = root.appending(path: "inside.bin")
+        try Data(repeating: 0x41, count: 4_096).write(to: inside)
+        let shared = outside.appending(path: "shared.bin")
+        try Data(repeating: 0x42, count: 4_096).write(to: shared)
+
+        // Both names of this pair live in the folder, so either write is seen.
+        try FileManager.default.linkItem(at: inside, to: root.appending(path: "alias.bin"))
+        // A symlink that stays inside is observable through its destination.
+        try FileManager.default.createSymbolicLink(at: root.appending(path: "local"), withDestinationURL: inside)
+        // These two are the blind spots.
+        try FileManager.default.createSymbolicLink(at: root.appending(path: "escape"), withDestinationURL: outside)
+        try FileManager.default.linkItem(at: shared, to: root.appending(path: "borrowed.bin"))
+
+        let baseline = await ActivityBaselineService().captureBaseline(rootPath: root)
+
+        #expect(baseline.scanState == .completed)
+        #expect(baseline.unobservableLinkCount == 2)
+    }
+
     @Test("records the scan interval without asserting a point-in-time snapshot")
     func recordsScanInterval() async throws {
         let root = try makeTemporaryDirectory()

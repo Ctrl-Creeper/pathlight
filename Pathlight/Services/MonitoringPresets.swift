@@ -26,6 +26,20 @@ nonisolated struct MonitoringPreset: Identifiable, Equatable, Sendable {
     nonisolated static func all(home: URL) -> [MonitoringPreset] {
         let library = home.appending(path: "Library", directoryHint: .isDirectory)
         return [
+            // The whole disk is not reachable through the folder picker in a
+            // sandboxed panel, so it needs its own entry. `/private/var/folders`
+            // and the firmlinked data volume are pure churn from here.
+            MonitoringPreset(
+                id: "whole-disk",
+                title: "Whole Disk",
+                rootPath: URL(filePath: "/", directoryHint: .isDirectory),
+                extraExclusionPatterns: [
+                    "private/var/folders/",
+                    "private/var/db/",
+                    "System/Volumes/",
+                    "**/.Trash/"
+                ]
+            ),
             MonitoringPreset(id: "downloads", title: "Downloads", rootPath: home.appending(path: "Downloads", directoryHint: .isDirectory), extraExclusionPatterns: []),
             MonitoringPreset(id: "desktop", title: "Desktop", rootPath: home.appending(path: "Desktop", directoryHint: .isDirectory), extraExclusionPatterns: []),
             MonitoringPreset(id: "documents", title: "Documents", rootPath: home.appending(path: "Documents", directoryHint: .isDirectory), extraExclusionPatterns: []),

@@ -31,6 +31,10 @@ const K_CF_NUMBER_SINT64_TYPE: CFIndex = 4;
 const K_FSEVENT_STREAM_EVENT_ID_SINCE_NOW: FSEventStreamEventId = u64::MAX;
 const FLAG_CREATE_USE_CF_TYPES: FSEventStreamCreateFlags = 0x01;
 const FLAG_CREATE_NO_DEFER: FSEventStreamCreateFlags = 0x02;
+/// Without this, FSEvents never reports that the watched root itself was
+/// renamed, deleted, or unmounted: the stream stays open and silent, so a watch
+/// looks healthy while it observes nothing.
+const FLAG_CREATE_WATCH_ROOT: FSEventStreamCreateFlags = 0x04;
 const FLAG_CREATE_FILE_EVENTS: FSEventStreamCreateFlags = 0x10;
 const FLAG_CREATE_USE_EXTENDED_DATA: FSEventStreamCreateFlags = 0x40;
 /// How long a rename departure waits for its arrival in a later batch.
@@ -218,8 +222,10 @@ pub(crate) fn start(
     // NoDefer fires the first event immediately for interactive live monitors;
     // background watches let the kernel batch the whole latency window.
     // Extended data carries the inode, which is what pairs the two halves of a rename.
-    let mut flags =
-        FLAG_CREATE_FILE_EVENTS | FLAG_CREATE_USE_CF_TYPES | FLAG_CREATE_USE_EXTENDED_DATA;
+    let mut flags = FLAG_CREATE_FILE_EVENTS
+        | FLAG_CREATE_USE_CF_TYPES
+        | FLAG_CREATE_USE_EXTENDED_DATA
+        | FLAG_CREATE_WATCH_ROOT;
     if latency_secs < 1.0 {
         flags |= FLAG_CREATE_NO_DEFER;
     }
