@@ -286,6 +286,13 @@ private struct UninstallSettingsPane: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Section("One Thing Pathlight Cannot Remove") {
+                Text("macOS keeps its own record of the Full Disk Access you granted, and no app is allowed to delete that entry. Remove Pathlight from System Settings › Privacy & Security › Full Disk Access yourself.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         .confirmationDialog(
@@ -298,7 +305,7 @@ private struct UninstallSettingsPane: View {
                 role: .destructive
             ) {
                 if let scope = pendingScope {
-                    appModel.uninstall(scope: scope)
+                    Task { await appModel.uninstall(scope: scope) }
                 }
                 pendingScope = nil
             }

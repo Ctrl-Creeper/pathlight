@@ -276,8 +276,15 @@ final class AppModel: ObservableObject {
     /// Uninstall is a one-way door: stop recording first so nothing writes
     /// after its files are gone, then remove what the user chose. A successful
     /// uninstall never returns — the app is quit from under us.
-    func uninstall(scope: UninstallScope) {
+    func uninstall(scope: UninstallScope) async {
         cleanup()
+        if scope == .appOnly {
+            // The history is being kept, so it has to be all of it. `cleanup()`
+            // only schedules the last flush, and the `exit(0)` inside the
+            // uninstall never lets that task run.
+            // ponytail: a flush already in flight cannot be awaited from here.
+            await flushJournal()
+        }
         let outcome = dependencies.systemActions.uninstall(scope)
         let failures: [String]
         switch outcome {
