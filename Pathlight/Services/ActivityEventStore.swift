@@ -1,6 +1,14 @@
 import Foundation
 
+nonisolated enum ActivityEventStoreError: Error {
+    /// The store could not prove whether part of a failed batch reached disk.
+    /// Replaying into the same journal could duplicate evidence.
+    case commitStateUnknown
+}
+
 nonisolated protocol ActivityEventStoring: Sendable {
+    /// Returns only after the whole batch is durably committed. A thrown error
+    /// is retryable unless it is `commitStateUnknown`.
     func append(_ events: [DiskActivityEvent]) async throws
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
     func enforceStoragePolicy(
@@ -17,6 +25,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     private let decoder: JSONDecoder
     private var hasScannedJournal = false
     private var oldestKnownEventTimestamp: Date?
+    private var requiresReopenAfterFailedRollback = false
 
     init(
         journalURL: URL,
@@ -55,6 +64,9 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         guard !events.isEmpty else {
             return
         }
+        guard !requiresReopenAfterFailedRollback else {
+            throw ActivityEventStoreError.commitStateUnknown
+        }
 
         let fileManager = FileManager.default
         try ActivityStorageFileProtection.createProtectedDirectory(
@@ -74,16 +86,59 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             .joined(separator: "\n")
         let payload = Data((lines + "\n").utf8)
 
-        let handle = try FileHandle(forWritingTo: journalURL)
+        let handle = try FileHandle(forUpdating: journalURL)
         defer {
             try? handle.close()
         }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: payload)
-        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
+        let originalOffset = try Self.recoverIncompleteTail(in: handle)
+        do {
+            try handle.seek(toOffset: originalOffset)
+            try handle.write(contentsOf: payload)
+            try handle.synchronize()
+        } catch {
+            do {
+                try handle.truncate(atOffset: originalOffset)
+                try handle.synchronize()
+            } catch {
+                requiresReopenAfterFailedRollback = true
+                throw ActivityEventStoreError.commitStateUnknown
+            }
+            throw error
+        }
         if let minTimestamp = events.map(\.timestamp).min() {
             oldestKnownEventTimestamp = min(oldestKnownEventTimestamp ?? .distantFuture, minTimestamp)
         }
+    }
+
+    /// Discards only an unterminated tail left by a crashed append. Its cursor
+    /// was never committed, so the monitor will replay that batch after restart.
+    private nonisolated static func recoverIncompleteTail(in handle: FileHandle) throws -> UInt64 {
+        let end = try handle.seekToEnd()
+        guard end > 0 else { return 0 }
+
+        try handle.seek(toOffset: end - 1)
+        if try handle.read(upToCount: 1)?.first == 0x0A {
+            return end
+        }
+
+        let blockSize: UInt64 = 64 * 1_024
+        var searchEnd = end
+        while searchEnd > 0 {
+            let start = searchEnd > blockSize ? searchEnd - blockSize : 0
+            try handle.seek(toOffset: start)
+            let data = try handle.read(upToCount: Int(searchEnd - start)) ?? Data()
+            if let newline = data.lastIndex(of: 0x0A) {
+                let completeEnd = start + UInt64(newline + 1)
+                try handle.truncate(atOffset: completeEnd)
+                try handle.synchronize()
+                return completeEnd
+            }
+            searchEnd = start
+        }
+
+        try handle.truncate(atOffset: 0)
+        try handle.synchronize()
+        return 0
     }
 
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {

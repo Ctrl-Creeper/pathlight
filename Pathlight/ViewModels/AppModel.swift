@@ -56,13 +56,22 @@ final class AppModel: ObservableObject {
     private var pendingJournalEvents: [UUID: DiskActivityEvent] = [:]
     private var pendingJournalOrder: [UUID] = []
     private var pendingJournalRoots: Set<String> = []
+    private var pendingJournalCheckpoints: [String: LongTermWatchCheckpoint] = [:]
+    private var committedJournalEvents: [UUID: DiskActivityEvent] = [:]
     private var pendingJournalSince: Date?
     private var journalFlushTask: Task<Void, Never>?
+    private var journalFlushInProgress = false
+    private var journalFlushInFlightRoots: Set<String> = []
+    private var journalFlushImmediatelyRequested = false
+    private var journalStorageBlocked = false
     /// Rows wait until the live-monitor coalescing window (1 s) has closed so a
     /// created+modified burst lands in the journal as one final row.
     private static let journalFlushDelay: TimeInterval = 1.2
     /// A never-quiet file still gets persisted at least this often.
     private static let journalFlushMaxWait: TimeInterval = 5
+    /// Session coalescing is one second. Retaining committed versions slightly
+    /// longer lets a max-wait flush turn a later merged version into a delta.
+    private static let committedJournalEventRetention: TimeInterval = 2
 
     init(dependencies: AppDependencies = .live()) {
         self.dependencies = dependencies
@@ -320,7 +329,9 @@ final class AppModel: ObservableObject {
     /// coalescing window has closed, so merged bursts are written once, as the
     /// final merged row, and never re-written after a later merge.
     private func enqueueForJournal(_ changes: [WatchSessionModel.ChangedEvent], rootPath: URL) {
-        guard dependencies.activityEventStore != nil, !changes.isEmpty else {
+        guard dependencies.activityEventStore != nil,
+              !journalStorageBlocked,
+              !changes.isEmpty else {
             return
         }
         let now = Date()
@@ -336,6 +347,14 @@ final class AppModel: ObservableObject {
         let remainingMaxWait = max(0, Self.journalFlushMaxWait - now.timeIntervalSince(since))
         let delay = min(Self.journalFlushDelay, remainingMaxWait)
 
+        scheduleJournalFlush(after: delay)
+    }
+
+    private func scheduleJournalFlush(after delay: TimeInterval) {
+        guard !journalFlushInProgress else {
+            if delay == 0 { journalFlushImmediatelyRequested = true }
+            return
+        }
         journalFlushTask?.cancel()
         journalFlushTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(delay * 1_000)))
@@ -345,40 +364,199 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func takePendingJournalBatch() -> (events: [DiskActivityEvent], roots: Set<String>) {
-        journalFlushTask?.cancel()
-        journalFlushTask = nil
-        let events = pendingJournalOrder.compactMap { pendingJournalEvents[$0] }
+    private struct PendingJournalBatch {
+        let entries: [(id: UUID, event: DiskActivityEvent)]
+        let roots: Set<String>
+        let checkpoints: [String: LongTermWatchCheckpoint]
+        let since: Date?
+    }
+
+    private func takePendingJournalBatch() -> PendingJournalBatch {
+        let entries = pendingJournalOrder.compactMap { id in
+            pendingJournalEvents[id].map { (id, $0) }
+        }
         let roots = pendingJournalRoots
+        let checkpoints = Dictionary(uniqueKeysWithValues: roots.compactMap { root in
+            pendingJournalCheckpoints[root].map { (root, $0) }
+        })
+        let since = pendingJournalSince
         pendingJournalEvents.removeAll()
         pendingJournalOrder.removeAll()
         pendingJournalRoots.removeAll()
         pendingJournalSince = nil
-        return (events, roots)
+        return PendingJournalBatch(
+            entries: entries,
+            roots: roots,
+            checkpoints: checkpoints,
+            since: since
+        )
     }
 
     private func flushJournal() async {
-        guard let store = dependencies.activityEventStore else { return }
+        guard let store = dependencies.activityEventStore, !journalFlushInProgress else { return }
         let batch = takePendingJournalBatch()
-        guard !batch.events.isEmpty else { return }
+        guard !batch.entries.isEmpty else {
+            advanceUnblockedCheckpoints()
+            return
+        }
+        journalFlushInProgress = true
+        journalFlushInFlightRoots.formUnion(batch.roots)
         do {
-            try await store.append(batch.events)
+            let journalEvents = batch.entries.compactMap { entry in
+                Self.incrementalJournalEvent(
+                    entry.event,
+                    after: committedJournalEvents[entry.id]
+                )
+            }
+            try await store.append(journalEvents)
+            journalFlushInProgress = false
+            journalFlushInFlightRoots.subtract(batch.roots)
+            for entry in batch.entries {
+                committedJournalEvents[entry.id] = entry.event
+            }
+            let retentionCutoff = Date().addingTimeInterval(-Self.committedJournalEventRetention)
+            committedJournalEvents = committedJournalEvents.filter {
+                $0.value.timestamp >= retentionCutoff || pendingJournalEvents[$0.key] != nil
+            }
+            for (root, checkpoint) in batch.checkpoints {
+                persistCheckpoint(checkpoint, rootPath: root)
+            }
+            advanceUnblockedCheckpoints()
             applyActivityStoragePolicy()
             for root in batch.roots {
                 scheduleEventDrivenHistoryRefresh(rootPath: URL(filePath: root, directoryHint: .isDirectory))
             }
+        } catch ActivityEventStoreError.commitStateUnknown {
+            journalFlushInProgress = false
+            journalFlushInFlightRoots.subtract(batch.roots)
+            journalStorageBlocked = true
+            pendingJournalEvents.removeAll()
+            pendingJournalOrder.removeAll()
+            pendingJournalRoots.removeAll()
+            pendingJournalSince = nil
+            lastErrorMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
         } catch {
-            // A failed journal write should not interrupt monitoring.
+            journalFlushInProgress = false
+            journalFlushInFlightRoots.subtract(batch.roots)
+            restorePendingJournalBatch(batch)
+        }
+        if !pendingJournalEvents.isEmpty {
+            let delay: TimeInterval = journalFlushImmediatelyRequested ? 0 : 1
+            journalFlushImmediatelyRequested = false
+            scheduleJournalFlush(after: delay)
+        } else {
+            journalFlushImmediatelyRequested = false
         }
     }
 
-    /// Fire-and-forget flush for stop paths and deinit, where awaiting is not possible.
+    private func restorePendingJournalBatch(_ batch: PendingJournalBatch) {
+        let restoredIDs = Set(batch.entries.map(\.id))
+        pendingJournalOrder = batch.entries.map(\.id)
+            + pendingJournalOrder.filter { !restoredIDs.contains($0) }
+        for entry in batch.entries where pendingJournalEvents[entry.id] == nil {
+            pendingJournalEvents[entry.id] = entry.event
+        }
+        pendingJournalRoots.formUnion(batch.roots)
+        if let since = batch.since {
+            pendingJournalSince = min(pendingJournalSince ?? since, since)
+        }
+    }
+
+    /// `WatchSessionModel` publishes the full merged event on every update. If
+    /// a five-second max-wait flush committed an earlier version, persist only
+    /// the newly observed increment instead of counting the cumulative value
+    /// again. IDs never intentionally cross paths or kinds; a mismatch is kept
+    /// as independent evidence rather than guessed into a delta.
+    nonisolated static func incrementalJournalEvent(
+        _ current: DiskActivityEvent,
+        after committed: DiskActivityEvent?
+    ) -> DiskActivityEvent? {
+        guard let committed else { return current }
+        guard current != committed else { return nil }
+        guard current.rootPath.standardizedFileURL == committed.rootPath.standardizedFileURL,
+              current.path.standardizedFileURL == committed.path.standardizedFileURL,
+              current.kind == committed.kind,
+              current.timestamp >= committed.timestamp else {
+            return current
+        }
+
+        let byteDelta: Int64?
+        if let currentDelta = current.byteDelta, let committedDelta = committed.byteDelta {
+            let difference = currentDelta.subtractingReportingOverflow(committedDelta)
+            byteDelta = difference.overflow ? nil : difference.partialValue
+        } else {
+            byteDelta = nil
+        }
+        let confidence: DiskActivityEventConfidence
+        if byteDelta == nil {
+            confidence = .unknown
+        } else if current.confidence == .confirmed, committed.confidence == .confirmed {
+            confidence = .confirmed
+        } else {
+            confidence = .estimated
+        }
+        return DiskActivityEvent(
+            kind: .modified,
+            path: current.path,
+            rootPath: current.rootPath,
+            timestamp: current.timestamp,
+            byteDelta: byteDelta,
+            confidence: confidence,
+            previousPath: nil,
+            affectedItemCount: current.affectedItemCount,
+            processName: current.processName
+        )
+    }
+
+    /// Stop paths request the same serialized writer used by scheduled flushes.
+    /// If the model is deallocated first, its checkpoint remains behind and the
+    /// native journal replays the uncommitted interval on the next launch.
     private func flushJournalNow() {
-        guard let store = dependencies.activityEventStore else { return }
-        let batch = takePendingJournalBatch()
-        guard !batch.events.isEmpty else { return }
-        Task {
-            try? await store.append(batch.events)
+        journalFlushTask?.cancel()
+        journalFlushTask = nil
+        guard !pendingJournalEvents.isEmpty else {
+            advanceUnblockedCheckpoints()
+            return
+        }
+        scheduleJournalFlush(after: 0)
+    }
+
+    private func stageCheckpoint(_ checkpoint: LongTermWatchCheckpoint, rootPath: URL) {
+        let root = rootPath.standardizedFileURL.path
+        guard dependencies.activityEventStore == nil || !journalStorageBlocked else { return }
+        let persisted = longTermWatchTargets.first(where: { $0.id == root })?.checkpoint
+        if let existing = pendingJournalCheckpoints[root] ?? persisted {
+            guard checkpoint.eventID >= existing.eventID || checkpoint.hasHistoryGap else { return }
+            pendingJournalCheckpoints[root] = LongTermWatchCheckpoint(
+                eventID: max(existing.eventID, checkpoint.eventID),
+                recordedAt: max(existing.recordedAt, checkpoint.recordedAt),
+                hasHistoryGap: existing.hasHistoryGap || checkpoint.hasHistoryGap
+            )
+        } else {
+            pendingJournalCheckpoints[root] = checkpoint
+        }
+        advanceUnblockedCheckpoints()
+    }
+
+    private func advanceUnblockedCheckpoints() {
+        guard dependencies.activityEventStore == nil || !journalStorageBlocked else { return }
+        let ready = pendingJournalCheckpoints.filter {
+            !pendingJournalRoots.contains($0.key) && !journalFlushInFlightRoots.contains($0.key)
+        }
+        for (root, checkpoint) in ready
+        {
+            persistCheckpoint(checkpoint, rootPath: root)
+        }
+    }
+
+    private func persistCheckpoint(_ checkpoint: LongTermWatchCheckpoint, rootPath: String) {
+        longTermWatchTargets = dependencies.longTermWatchTargets.updateCheckpoint(
+            checkpoint,
+            forRootPath: URL(filePath: rootPath, directoryHint: .isDirectory),
+            currentTargets: longTermWatchTargets
+        )
+        if pendingJournalCheckpoints[rootPath] == checkpoint {
+            pendingJournalCheckpoints[rootPath] = nil
         }
     }
 
@@ -756,9 +934,16 @@ final class AppModel: ObservableObject {
             var retryCount = 0
             while !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID {
                 let currentTarget = self.longTermWatchTargets.first(where: { $0.id == target.id }) ?? target
+                let rootKey = currentTarget.rootPath.standardizedFileURL.path
+                // Within this process, resume after the latest accepted cursor,
+                // including a batch still waiting for durable journal commit.
+                // After a crash only the persisted checkpoint survives, causing
+                // the native source to replay anything that was not committed.
+                let resumeCheckpoint = self.pendingJournalCheckpoints[rootKey]
+                    ?? currentTarget.checkpoint
                 let stream = coordinator.sessions(
                     rootPath: currentTarget.rootPath,
-                    sinceEventID: currentTarget.checkpoint?.eventID,
+                    sinceEventID: resumeCheckpoint?.eventID,
                     options: currentTarget.options.diskActivityOptions,
                     // Background watches don't need sub-second delivery; a wide
                     // latency window lets the kernel coalesce and saves wakeups.
@@ -787,18 +972,15 @@ final class AppModel: ObservableObject {
                     } else {
                         retryCount = 0
                     }
-                    let existingCheckpoint = self.longTermWatchTargets.first(where: { $0.id == target.id })?.checkpoint
+                    let existingCheckpoint = self.pendingJournalCheckpoints[rootKey]
+                        ?? self.longTermWatchTargets.first(where: { $0.id == target.id })?.checkpoint
+                    var checkpointToStage: LongTermWatchCheckpoint?
                     if let eventID = session.lastObservedEventID,
                        eventID != existingCheckpoint?.eventID || session.historyState == .gapDetected {
-                        let checkpoint = LongTermWatchCheckpoint(
+                        checkpointToStage = LongTermWatchCheckpoint(
                             eventID: eventID,
                             recordedAt: Date(),
                             hasHistoryGap: existingCheckpoint?.hasHistoryGap == true || session.historyState == .gapDetected
-                        )
-                        self.longTermWatchTargets = self.dependencies.longTermWatchTargets.updateCheckpoint(
-                            checkpoint,
-                            forRootPath: target.rootPath,
-                            currentTargets: self.longTermWatchTargets
                         )
                     }
 
@@ -836,12 +1018,20 @@ final class AppModel: ObservableObject {
                         )
                         self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
                     }
+                    if let checkpointToStage {
+                        self.stageCheckpoint(checkpointToStage, rootPath: target.rootPath)
+                    }
                 }
 
                 guard !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID else {
                     break
                 }
 
+                // A source ending invalidates any scan started under that stream,
+                // even though the outer watch task survives the reconnect loop.
+                self.longTermWatchBaselineTasks[target.id]?.cancel()
+                self.longTermWatchBaselineTasks[target.id] = nil
+                self.longTermWatchBaselineIDs[target.id] = nil
                 retryCount += 1
                 self.updateLongTermWatchRuntimeStatus(
                     targetID: target.id,

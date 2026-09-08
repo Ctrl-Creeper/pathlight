@@ -50,6 +50,40 @@ struct ActivityEventStoreTests {
         #expect(loaded == [second, first])
     }
 
+    @Test("recovers an unterminated crash tail before the next durable append")
+    func recoversUnterminatedCrashTail() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let first = makeEvent(
+            root: root,
+            name: "before-crash.bin",
+            timestamp: Date(timeIntervalSince1970: 100),
+            byteDelta: 1
+        )
+        let second = makeEvent(
+            root: root,
+            name: "after-restart.bin",
+            timestamp: Date(timeIntervalSince1970: 200),
+            byteDelta: 2
+        )
+        let firstStore = JSONLActivityEventStore(journalURL: journalURL)
+        try await firstStore.append([first])
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"torn\":".utf8))
+        try handle.synchronize()
+        try handle.close()
+
+        let restartedStore = JSONLActivityEventStore(journalURL: journalURL)
+        try await restartedStore.append([second])
+
+        #expect(try await restartedStore.loadEvents(rootPath: root, limit: 10) == [second, first])
+        let lines = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 2)
+    }
+
     @Test("limits loaded events")
     func limitsLoadedEvents() async throws {
         let tempDirectory = try makeTemporaryDirectory()

@@ -51,6 +51,37 @@ final class AppModelJournalTests: XCTestCase {
         XCTAssertEqual(copyRow?.byteDelta, 400, "created 100 then grew by 300")
         XCTAssertEqual(rows.first { $0.path.lastPathComponent == "other.txt" }?.byteDelta, 7)
     }
+
+    func testMergedVersionAfterEarlyCommitWritesOnlyItsNewDelta() {
+        let root = URL(filePath: "/tmp/pathlight-journal-tests", directoryHint: .isDirectory)
+        let path = root.appending(path: "continuous-copy.bin")
+        let first = DiskActivityEvent(
+            kind: .created,
+            path: path,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 100),
+            byteDelta: 100,
+            confidence: .confirmed,
+            previousPath: nil,
+            affectedItemCount: 1
+        )
+        let laterMergedVersion = DiskActivityEvent(
+            kind: .created,
+            path: path,
+            rootPath: root,
+            timestamp: Date(timeIntervalSince1970: 100.5),
+            byteDelta: 400,
+            confidence: .confirmed,
+            previousPath: nil,
+            affectedItemCount: 1
+        )
+
+        let incremental = AppModel.incrementalJournalEvent(laterMergedVersion, after: first)
+
+        XCTAssertEqual(incremental?.kind, .modified)
+        XCTAssertEqual(incremental?.byteDelta, 300)
+        XCTAssertEqual((first.byteDelta ?? 0) + (incremental?.byteDelta ?? 0), 400)
+    }
 }
 
 /// Returns scripted sizes in order and remembers the last one as "known".

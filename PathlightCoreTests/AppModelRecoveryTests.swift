@@ -70,11 +70,206 @@ final class AppModelRecoveryTests: XCTestCase {
         XCTAssertNil(model.longTermWatchRuntimeStatuses[root.path])
     }
 
+    func testDisconnectCancelsBaselineBeforeReconnectBackoff() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: 1, monitor: monitor)
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan)
+        defer { scan.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("initial baseline started") { scan.invocationCount == 1 }
+
+        monitor.finish()
+        try await eventually("watch is reconnecting") {
+            model.longTermWatchRuntimeStatuses[root.path]?.state == .reconnecting
+        }
+        scan.release()
+        try await eventually("disconnected scan returned") { scan.completedCount == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertNil(model.longTermWatchTargets.first?.baseline,
+                     "a scan whose source ended cannot publish during reconnect backoff")
+    }
+
+    func testCheckpointWaitsForJournalDurability() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "durable.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 42
+        ))
+        try await eventually("journal append started") { store.appendStarted }
+
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1,
+                       "a crash before append completes must replay event 42")
+        store.release()
+        try await eventually("durable cursor advanced") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 42
+        }
+    }
+
+    func testFailedJournalAppendIsRetriedBeforeCheckpointAdvances() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = FailOnceRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "retry.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 43
+        ))
+        try await eventually("first append failed") { store.appendCallCount >= 1 }
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1)
+
+        try await eventually("failed batch retried", timeout: .seconds(4)) {
+            store.persistedEventCount == 1
+                && model.longTermWatchTargets.first?.checkpoint?.eventID == 43
+        }
+    }
+
+    func testImmediateStopFlushKeepsCheckpointBehindInFlightAppend() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        let changedAt = Date()
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "stop-flush.bin"),
+                rootPath: root,
+                timestamp: changedAt
+            ),
+            eventID: 42
+        ))
+        try await eventually("event accepted") {
+            model.longTermWatchRuntimeStatuses[root.path]?.lastActivityAt == changedAt
+        }
+        model.stopShortTermWatch()
+        try await eventually("immediate append started") { store.appendStarted }
+
+        monitor.send(.historyCaughtUp(eventID: 43))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1,
+                       "a stop-triggered append must remain an in-flight checkpoint barrier")
+
+        store.release()
+        try await eventually("later cursor committed") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 43
+        }
+    }
+
+    func testReconnectResumesFromAcceptedInMemoryCursor() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "before-disconnect.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 42
+        ))
+        try await eventually("journal append started") { store.appendStarted }
+        monitor.finish()
+
+        try await eventually("watcher reconnected", timeout: .seconds(4)) {
+            monitor.subscriptionCount >= 2
+        }
+        XCTAssertEqual(monitor.mostRecentSinceEventID, 42,
+                       "same-process reconnect must not replay the buffered event")
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1,
+                       "the disk checkpoint still waits for the append")
+    }
+
+    func testUnknownCommitStatePausesRecordingWithoutAdvancingOrRetrying() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = UnknownCommitRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "unknown-commit.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 42
+        ))
+        try await eventually("uncertain commit surfaced") {
+            model.lastErrorMessage?.contains("recording is paused") == true
+        }
+        try await Task.sleep(for: .milliseconds(1_200))
+
+        XCTAssertEqual(store.appendCallCount, 1, "an uncertain commit cannot be retried blindly")
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1)
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "after-failure.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 43
+        ))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.appendCallCount, 1)
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1)
+    }
+
     private var detailedOptions: LongTermWatchTargetOptions {
         LongTermWatchTargetOptions(minimumRecordedByteDelta: 1, aggregationWindow: 0, recordsFileNames: true, exclusionPatterns: [])
     }
 
-    private func makeModel(monitor: RecoveryTestMonitor, scan: RecoveryScanGate) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
+    private func makeModel(
+        monitor: RecoveryTestMonitor,
+        scan: RecoveryScanGate,
+        eventStore: (any ActivityEventStoring)? = nil
+    ) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
         let suite = "AppModelRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
@@ -84,7 +279,7 @@ final class AppModelRecoveryTests: XCTestCase {
             systemActions: .inert,
             activityMonitor: monitor,
             activitySizeProvider: { _ in 4_096 },
-            activityEventStore: nil,
+            activityEventStore: eventStore,
             longTermWatchTargets: LongTermWatchTargetStore(persistence: persistence),
             activityBaselineService: ActivityBaselineService(
                 measurementProvider: { _ in
@@ -101,8 +296,12 @@ final class AppModelRecoveryTests: XCTestCase {
         return (model, persistence, root)
     }
 
-    private func eventually(_ description: String, _ predicate: @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    private func eventually(
+        _ description: String,
+        timeout: Duration = .seconds(2),
+        _ predicate: @MainActor () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while !predicate() {
             guard ContinuousClock.now < deadline else {
                 XCTFail("Timed out waiting for \(description)")
@@ -118,6 +317,7 @@ private enum RecoveryTestError: Error { case timedOut }
 private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<DiskActivityStreamEvent>.Continuation?
+    private var sinceEventIDs: [UInt64?] = []
 
     var isSubscribed: Bool {
         lock.lock()
@@ -125,12 +325,16 @@ private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Send
         return continuation != nil
     }
 
+    var subscriptionCount: Int { lock.withLock { sinceEventIDs.count } }
+    var mostRecentSinceEventID: UInt64? { lock.withLock { sinceEventIDs.last ?? nil } }
+
     func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         AsyncStream { continuation in
             lock.lock()
             self.continuation = continuation
+            sinceEventIDs.append(eventID)
             lock.unlock()
-            continuation.yield(.historyCaughtUp(eventID: 1))
+            continuation.yield(.historyCaughtUp(eventID: eventID ?? 1))
         }
     }
 
@@ -139,6 +343,11 @@ private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Send
         let current = continuation
         lock.unlock()
         current?.yield(event)
+    }
+
+    func finish() {
+        let current = lock.withLock { continuation }
+        current?.finish()
     }
 }
 
@@ -181,4 +390,83 @@ private final class RecoveryTestLoginService: LaunchAtLoginControlling {
     func currentStatus() -> LaunchAtLoginStatus { .disabled }
     func setEnabled(_ enabled: Bool) throws {}
     func openLoginItemsSettings() {}
+}
+
+private final class BlockingRecoveryEventStore: ActivityEventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = false
+    private var appendContinuation: CheckedContinuation<Void, Never>?
+
+    var appendStarted: Bool { lock.withLock { started } }
+
+    func append(_ events: [DiskActivityEvent]) async throws {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                started = true
+                appendContinuation = continuation
+            }
+        }
+    }
+
+    func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] { [] }
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
+
+    func release() {
+        let continuation = lock.withLock {
+            let current = appendContinuation
+            appendContinuation = nil
+            return current
+        }
+        continuation?.resume()
+    }
+}
+
+private final class FailOnceRecoveryEventStore: ActivityEventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private var persisted = 0
+
+    var appendCallCount: Int { lock.withLock { calls } }
+    var persistedEventCount: Int { lock.withLock { persisted } }
+
+    func append(_ events: [DiskActivityEvent]) async throws {
+        let call = lock.withLock {
+            calls += 1
+            return calls
+        }
+        if call == 1 { throw RecoveryStoreError.injectedFailure }
+        lock.withLock { persisted += events.count }
+    }
+
+    func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] { [] }
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
+}
+
+private enum RecoveryStoreError: Error { case injectedFailure }
+
+private final class UnknownCommitRecoveryEventStore: ActivityEventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var appendCallCount: Int { lock.withLock { calls } }
+
+    func append(_ events: [DiskActivityEvent]) async throws {
+        lock.withLock { calls += 1 }
+        throw ActivityEventStoreError.commitStateUnknown
+    }
+
+    func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] { [] }
+    func enforceStoragePolicy(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) async throws {}
 }
