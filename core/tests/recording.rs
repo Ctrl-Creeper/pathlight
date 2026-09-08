@@ -1,12 +1,11 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use pathlight_core::evidence::{EvidenceJournal, EvidencePayload, EvidenceRecord, NativePath};
+use pathlight_core::evidence::{EvidenceJournal, EvidencePayload, NativePath};
 use pathlight_core::monitor::ChangeKind;
-use pathlight_core::recording::record_for;
+use pathlight_core::recording::{record_for, record_session};
 
 #[test]
 fn records_real_changes_and_two_interval_snapshots_to_an_external_journal() {
@@ -14,16 +13,14 @@ fn records_real_changes_and_two_interval_snapshots_to_an_external_journal() {
     let output = tempfile::tempdir().unwrap();
     let journal_path = output.path().join("evidence.jsonl");
     fs::write(root.path().join("original"), b"retained object").unwrap();
-    let writer_root = root.path().to_owned();
-    let writer_journal = journal_path.clone();
-    let writer = thread::spawn(move || {
-        wait_for_first_snapshot(&writer_journal);
-        fs::rename(writer_root.join("original"), writer_root.join("renamed")).unwrap();
-        fs::write(writer_root.join("added"), vec![1; 4096]).unwrap();
-    });
 
-    let summary = record_for(root.path(), &journal_path, Duration::from_secs(3)).unwrap();
-    writer.join().unwrap();
+    // Mutating from `on_live` puts the changes inside the interval the two
+    // snapshots bracket, without racing the recorder from another thread.
+    let summary = record_session(root.path(), &journal_path, Duration::from_secs(3), || {
+        fs::rename(root.path().join("original"), root.path().join("renamed")).unwrap();
+        fs::write(root.path().join("added"), vec![1; 4096]).unwrap();
+    })
+    .unwrap();
     let records = EvidenceJournal::open(&journal_path)
         .unwrap()
         .read_records()
@@ -114,21 +111,59 @@ fn an_idle_session_records_its_scope_and_a_terminal_state_without_claiming_compl
     );
 }
 
-fn wait_for_first_snapshot(journal: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if fs::read_to_string(journal).is_ok_and(|text| {
-            text.lines().any(|line| {
-                serde_json::from_str::<EvidenceRecord>(line)
-                    .is_ok_and(|record| matches!(record.payload, EvidencePayload::Snapshot { .. }))
-            })
-        }) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "recorder never wrote its initial snapshot"
-        );
-        thread::sleep(Duration::from_millis(20));
+#[test]
+fn snapshots_persist_native_bindings_instead_of_only_aggregate_totals() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let existing = root.path().join("existing-file");
+    fs::write(&existing, b"measured contents").unwrap();
+    let observed_existing = existing.canonicalize().unwrap();
+    let journal_path = output.path().join("evidence.jsonl");
+
+    record_for(root.path(), &journal_path, Duration::from_millis(1)).unwrap();
+    let records = EvidenceJournal::open(&journal_path)
+        .unwrap()
+        .read_records()
+        .unwrap();
+
+    assert!(records.iter().any(|record| match &record.payload {
+        EvidencePayload::SnapshotEntries { entries, .. } => entries.iter().any(|entry| {
+            entry.path == NativePath::from_path(&observed_existing)
+                && entry.measurement.logical_bytes == 17
+        }),
+        _ => false,
+    }));
+}
+
+#[test]
+fn large_snapshot_manifests_are_chunked_instead_of_consuming_one_record_per_path() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    for index in 0..300 {
+        fs::write(root.path().join(format!("file-{index}")), b"x").unwrap();
     }
+    let journal_path = output.path().join("evidence.jsonl");
+
+    record_for(root.path(), &journal_path, Duration::from_millis(1)).unwrap();
+    let records = EvidenceJournal::open(&journal_path)
+        .unwrap()
+        .read_records()
+        .unwrap();
+    let manifests: Vec<_> = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            EvidencePayload::SnapshotEntries {
+                snapshot_id,
+                entries,
+            } => Some((*snapshot_id, entries.len())),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(manifests.iter().map(|(_, count)| count).sum::<usize>(), 602);
+    assert_eq!(manifests.len(), 4);
+    assert!(
+        records.len() < 20,
+        "chunking should keep the journal index small"
+    );
 }

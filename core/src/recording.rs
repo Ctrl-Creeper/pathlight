@@ -13,15 +13,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::evidence::{
-    EvidenceJournal, EvidencePayload, EvidenceRecord, NativePath, SourceIdentity,
+    EvidenceJournal, EvidencePayload, EvidenceRecord, NativePath, SnapshotBinding, SourceIdentity,
+    CURRENT_SCHEMA_VERSION, MAX_BATCH_BYTES, MAX_BATCH_RECORDS,
 };
 use crate::measurement::measure_file;
 use crate::monitor::{watcher_capabilities, ActivityListener, StreamEvent, Watcher};
 
 const QUEUE_CAPACITY: usize = 4096;
-const MAX_PENDING_RECORDS: usize = 256;
-const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+const SNAPSHOT_CHUNK_TARGET_BYTES: usize = 512 * 1024;
+const SNAPSHOT_CHUNK_MAX_ENTRIES: usize = 256;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default)]
@@ -56,6 +57,7 @@ struct Recorder {
     journal: EvidenceJournal,
     source: SourceIdentity,
     sequence: u64,
+    next_snapshot_id: u64,
     summary: RecordingSummary,
     pending: Vec<EvidenceRecord>,
     pending_bytes: usize,
@@ -71,7 +73,7 @@ impl Recorder {
     ) -> io::Result<()> {
         self.sequence += 1;
         let record = EvidenceRecord {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             source: self.source.clone(),
             sequence: self.sequence,
             source_cursor,
@@ -79,14 +81,14 @@ impl Recorder {
             payload,
         };
         let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?.len() + 1;
-        if self.pending_bytes + bytes > MAX_PENDING_BYTES {
+        if self.pending_bytes + bytes > MAX_BATCH_BYTES {
             self.flush()?;
         }
         self.pending.push(record);
         self.pending_bytes += bytes;
         self.flush_due
             .get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
-        if self.pending.len() >= MAX_PENDING_RECORDS || self.pending_bytes >= MAX_PENDING_BYTES {
+        if self.pending.len() >= MAX_BATCH_RECORDS || self.pending_bytes >= MAX_BATCH_BYTES {
             self.flush()?;
         }
         Ok(())
@@ -137,12 +139,25 @@ impl Recorder {
         let capabilities = watcher_capabilities();
         let (payload, cursor, ready) = match received.event {
             StreamEvent::Change { change, event_id } => {
+                let native_path = NativePath::from_path(Path::new(&change.path));
+                let native_previous_path = match &change.kind {
+                    crate::monitor::ChangeKind::Renamed {
+                        previous_path: Some(previous_path),
+                    } => Some(NativePath::from_path(Path::new(previous_path))),
+                    _ => None,
+                };
                 let (measurement, measurement_error) = match measure_file(Path::new(&change.path)) {
                     Ok(measurement) => (Some(measurement), None),
                     Err(error) => (None, Some(error.to_string())),
                 };
                 (
-                    EvidencePayload::Observation { change, measurement, measurement_error },
+                    EvidencePayload::Observation {
+                        change,
+                        native_path,
+                        native_previous_path,
+                        measurement,
+                        measurement_error,
+                    },
                     event_id,
                     false,
                 )
@@ -173,12 +188,23 @@ impl Recorder {
     }
 
     fn snapshot(&mut self, root: &Path) -> io::Result<()> {
+        self.next_snapshot_id += 1;
+        let snapshot_id = self.next_snapshot_id;
+        self.append(
+            EvidencePayload::SnapshotStarted {
+                snapshot_id,
+                root: NativePath::from_path(root),
+            },
+            SystemTime::now(),
+            None,
+        )?;
         self.flush()?;
         let snapshot = match crate::snapshot::scan(root) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 self.append(
                     EvidencePayload::SnapshotError {
+                        snapshot_id,
                         path: NativePath::from_path(root),
                         kind: format!("{:?}", error.kind()),
                         message: error.to_string(),
@@ -191,8 +217,60 @@ impl Recorder {
             }
         };
         let totals = snapshot.totals();
+        let mut chunk = Vec::new();
+        let mut chunk_bytes = 0;
+        for (path, measurement) in snapshot.entries {
+            let binding = SnapshotBinding {
+                path: NativePath::from_path(&path),
+                measurement,
+            };
+            let binding_bytes = serde_json::to_vec(&binding)
+                .map_err(io::Error::other)?
+                .len()
+                + 1;
+            if !chunk.is_empty()
+                && (chunk.len() >= SNAPSHOT_CHUNK_MAX_ENTRIES
+                    || chunk_bytes + binding_bytes > SNAPSHOT_CHUNK_TARGET_BYTES)
+            {
+                self.append(
+                    EvidencePayload::SnapshotEntries {
+                        snapshot_id,
+                        entries: std::mem::take(&mut chunk),
+                    },
+                    snapshot.finished_at,
+                    None,
+                )?;
+                chunk_bytes = 0;
+            }
+            chunk.push(binding);
+            chunk_bytes += binding_bytes;
+        }
+        if !chunk.is_empty() {
+            self.append(
+                EvidencePayload::SnapshotEntries {
+                    snapshot_id,
+                    entries: chunk,
+                },
+                snapshot.finished_at,
+                None,
+            )?;
+        }
+        for error in snapshot.errors {
+            self.append(
+                EvidencePayload::SnapshotError {
+                    snapshot_id,
+                    path: NativePath::from_path(&error.path),
+                    kind: format!("{:?}", error.kind),
+                    message: error.message,
+                },
+                snapshot.finished_at,
+                None,
+            )?;
+        }
         self.append(
             EvidencePayload::Snapshot {
+                snapshot_id,
+                root: NativePath::from_path(&snapshot.root),
                 started_at: snapshot.started_at,
                 finished_at: snapshot.finished_at,
                 logical_bytes: totals.logical_bytes,
@@ -204,17 +282,6 @@ impl Recorder {
             snapshot.finished_at,
             None,
         )?;
-        for error in snapshot.errors {
-            self.append(
-                EvidencePayload::SnapshotError {
-                    path: NativePath::from_path(&error.path),
-                    kind: format!("{:?}", error.kind),
-                    message: error.message,
-                },
-                snapshot.finished_at,
-                None,
-            )?;
-        }
         self.flush()
     }
 
@@ -239,6 +306,21 @@ impl Recorder {
 /// active. The journal must be outside the monitored tree to prevent feedback.
 /// This starts a new source epoch; it does not resume earlier recording sessions.
 pub fn record_for(root: &Path, journal: &Path, duration: Duration) -> io::Result<RecordingSummary> {
+    record_session(root, journal, duration, || {})
+}
+
+/// As `record_for`, but runs `on_live` once the watcher is armed and the
+/// opening snapshot is written, before the live interval starts counting.
+/// The journal holds an exclusive lock for the whole session, so watching it
+/// from outside is not a portable way to learn that a session went live.
+/// `on_live` runs on the caller thread while the bounded queue fills, so it
+/// belongs to setup work, not to anything long-running.
+pub fn record_session(
+    root: &Path,
+    journal: &Path,
+    duration: Duration,
+    on_live: impl FnOnce(),
+) -> io::Result<RecordingSummary> {
     if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -291,6 +373,7 @@ pub fn record_for(root: &Path, journal: &Path, duration: Duration) -> io::Result
             ),
         },
         sequence: 0,
+        next_snapshot_id: 0,
         summary: RecordingSummary::default(),
         pending: Vec::new(),
         pending_bytes: 0,
@@ -323,6 +406,7 @@ pub fn record_for(root: &Path, journal: &Path, duration: Duration) -> io::Result
         Instant::now() + Duration::from_secs(10),
     )?;
     recorder.snapshot(&root)?;
+    on_live();
     let deadline = Instant::now().checked_add(duration).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "duration is not representable")
     })?;
@@ -433,6 +517,7 @@ mod tests {
                 epoch: "overflow".into(),
             },
             sequence: 0,
+            next_snapshot_id: 0,
             summary: RecordingSummary::default(),
             pending: Vec::new(),
             pending_bytes: 0,
@@ -472,6 +557,7 @@ mod tests {
                 epoch: "deadline".into(),
             },
             sequence: 0,
+            next_snapshot_id: 0,
             summary: RecordingSummary::default(),
             pending: Vec::new(),
             pending_bytes: 0,

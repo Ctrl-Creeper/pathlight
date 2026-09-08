@@ -11,6 +11,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceIdentity {
     pub backend: String,
@@ -37,6 +39,24 @@ pub enum NativePath {
     UnixBytes(Vec<u8>),
     WindowsWide(Vec<u16>),
     Utf8(String),
+}
+
+impl Default for NativePath {
+    fn default() -> Self {
+        // Schema v1 did not persist native paths. Keep the compatibility
+        // sentinel distinguishable from every path emitted by a v2 recorder.
+        Self::Utf8(String::new())
+    }
+}
+
+impl NativePath {
+    fn is_missing(&self) -> bool {
+        match self {
+            Self::UnixBytes(units) => units.is_empty(),
+            Self::WindowsWide(units) => units.is_empty(),
+            Self::Utf8(path) => path.is_empty(),
+        }
+    }
 }
 
 impl NativePath {
@@ -67,14 +87,33 @@ pub enum EvidencePayload {
     /// The recorder stopped and drained its accepted queue. This does not
     /// assert an OS delivery barrier, absence of gaps, or complete history.
     SessionEnded,
+    /// Begins a native binding manifest. A missing matching `Snapshot` record
+    /// means the manifest was interrupted and must not be treated as complete.
+    SnapshotStarted {
+        #[serde(default)]
+        snapshot_id: u64,
+        #[serde(default)]
+        root: NativePath,
+    },
+    SnapshotEntries {
+        #[serde(default)]
+        snapshot_id: u64,
+        entries: Vec<SnapshotBinding>,
+    },
     /// Scope that could not be measured; separate records keep lines bounded.
     SnapshotError {
+        #[serde(default)]
+        snapshot_id: u64,
         path: NativePath,
         kind: String,
         message: String,
     },
     Observation {
         change: Change,
+        #[serde(default)]
+        native_path: NativePath,
+        #[serde(default)]
+        native_previous_path: Option<NativePath>,
         measurement: Option<FileMeasurement>,
         measurement_error: Option<String>,
     },
@@ -84,6 +123,10 @@ pub enum EvidencePayload {
     /// Completed traversal over an interval, never an atomic snapshot or proof
     /// that an earlier history gap was repaired. Totals may be unavailable.
     Snapshot {
+        #[serde(default)]
+        snapshot_id: u64,
+        #[serde(default)]
+        root: NativePath,
         started_at: SystemTime,
         finished_at: SystemTime,
         logical_bytes: Option<u64>,
@@ -98,9 +141,17 @@ pub enum EvidencePayload {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotBinding {
+    pub path: NativePath,
+    pub measurement: FileMeasurement,
+}
+
 type RecordKey = (SourceIdentity, u64);
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_INDEXED_RECORDS: usize = 1_000_000;
+pub const MAX_BATCH_RECORDS: usize = 256;
+pub const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct EvidenceJournal {
     file: File,
@@ -124,31 +175,54 @@ impl EvidenceJournal {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(path)?;
+        let mut file = options.open(path)?;
+        // `sync_data` makes appended bytes durable, but a newly created file can
+        // still disappear after power loss unless its parent directory entry is
+        // also synchronized. This runs once per open, not once per batch.
+        sync_parent_directory(path)?;
         file.try_lock().map_err(|error| {
             io::Error::other(format!(
                 "evidence journal already in use or cannot be locked: {error}"
             ))
         })?;
-        let mut journal = Self {
+        let index = Self::read_index(&mut file)?;
+        Ok(Self {
             file,
-            index: HashMap::new(),
+            index,
             poisoned: false,
-        };
+        })
+    }
+
+    fn read_index(file: &mut File) -> io::Result<HashMap<RecordKey, u64>> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut reader = BufReader::new(file);
+        let mut index = HashMap::new();
+        let mut bytes = Vec::new();
         let mut offset = 0;
-        while let Some((record, length)) = journal.read_at(offset)? {
-            let key = (record.source.clone(), record.sequence);
-            if journal.index.insert(key, offset).is_some() {
+        loop {
+            bytes.clear();
+            let count = reader
+                .by_ref()
+                .take((MAX_RECORD_BYTES + 1) as u64)
+                .read_until(b'\n', &mut bytes)?;
+            if count == 0 {
+                break;
+            }
+            let record = decode_record(&bytes)?;
+            if index
+                .insert((record.source, record.sequence), offset)
+                .is_some()
+            {
                 return Err(invalid("duplicate source key in persisted evidence"));
             }
-            if journal.index.len() > MAX_INDEXED_RECORDS {
+            if index.len() > MAX_INDEXED_RECORDS {
                 return Err(invalid(
                     "evidence journal record limit reached; rotate the file",
                 ));
             }
-            offset += length;
+            offset += count as u64;
         }
-        Ok(journal)
+        Ok(index)
     }
 
     fn read_at(&mut self, offset: u64) -> io::Result<Option<(EvidenceRecord, u64)>> {
@@ -161,12 +235,7 @@ impl EvidenceJournal {
         if count == 0 {
             return Ok(None);
         }
-        if count > MAX_RECORD_BYTES || bytes.last() != Some(&b'\n') {
-            return Err(invalid("oversized or incomplete evidence record"));
-        }
-        let record: EvidenceRecord =
-            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
-        validate(&record)?;
+        let record = decode_record(&bytes)?;
         Ok(Some((record, count as u64)))
     }
 
@@ -185,7 +254,7 @@ impl EvidenceJournal {
                 "evidence journal has an unresolved write failure; reopen for recovery",
             ));
         }
-        if records.len() > 256 {
+        if records.len() > MAX_BATCH_RECORDS {
             return Err(invalid("evidence batch exceeds 256 records"));
         }
         let mut batch_index: HashMap<RecordKey, usize> = HashMap::new();
@@ -222,7 +291,7 @@ impl EvidenceJournal {
             if line.len() > MAX_RECORD_BYTES {
                 return Err(invalid("evidence record too large"));
             }
-            if bytes.len() + line.len() > 8 * 1024 * 1024 {
+            if bytes.len() + line.len() > MAX_BATCH_BYTES {
                 return Err(invalid("evidence batch exceeds 8 MiB"));
             }
             relative_offsets.push(bytes.len() as u64);
@@ -261,22 +330,102 @@ impl EvidenceJournal {
     }
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn decode_record(bytes: &[u8]) -> io::Result<EvidenceRecord> {
+    if bytes.len() > MAX_RECORD_BYTES || bytes.last() != Some(&b'\n') {
+        return Err(invalid("oversized or incomplete evidence record"));
+    }
+    let record = serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+    validate(&record)?;
+    Ok(record)
+}
+
 fn validate(record: &EvidenceRecord) -> io::Result<()> {
-    if record.schema_version != 1 {
+    if !(1..=CURRENT_SCHEMA_VERSION).contains(&record.schema_version) {
         return Err(invalid("unsupported evidence schema version"));
     }
     if record.source.backend.is_empty() || record.source.epoch.is_empty() {
         return Err(invalid("source identity must include backend and epoch"));
     }
-    if let EvidencePayload::Snapshot {
-        started_at,
-        finished_at,
-        ..
-    } = &record.payload
-    {
-        if finished_at < started_at {
+    match &record.payload {
+        EvidencePayload::SnapshotStarted { snapshot_id, .. }
+        | EvidencePayload::SnapshotEntries { snapshot_id, .. }
+        | EvidencePayload::SnapshotError { snapshot_id, .. }
+        | EvidencePayload::Snapshot { snapshot_id, .. }
+            if record.schema_version >= 2 && *snapshot_id == 0 =>
+        {
+            return Err(invalid("snapshot identity must be nonzero"));
+        }
+        EvidencePayload::SnapshotStarted { .. } | EvidencePayload::SnapshotEntries { .. }
+            if record.schema_version == 1 =>
+        {
+            return Err(invalid("evidence payload requires schema version 2"));
+        }
+        EvidencePayload::SessionStarted { root }
+            if record.schema_version >= 2 && root.is_missing() =>
+        {
+            return Err(invalid("session root native path is required"));
+        }
+        EvidencePayload::SnapshotStarted { root, .. }
+            if record.schema_version >= 2 && root.is_missing() =>
+        {
+            return Err(invalid("snapshot root native path is required"));
+        }
+        EvidencePayload::SnapshotEntries { entries, .. }
+            if record.schema_version >= 2
+                && (entries.is_empty() || entries.iter().any(|entry| entry.path.is_missing())) =>
+        {
+            return Err(invalid("snapshot entries require native paths"));
+        }
+        EvidencePayload::SnapshotError { path, .. }
+            if record.schema_version >= 2 && path.is_missing() =>
+        {
+            return Err(invalid("snapshot error native path is required"));
+        }
+        EvidencePayload::Observation {
+            change,
+            native_path,
+            native_previous_path,
+            ..
+        } if record.schema_version >= 2
+            && (native_path.is_missing()
+                || matches!(
+                    &change.kind,
+                    crate::monitor::ChangeKind::Renamed {
+                        previous_path: Some(_)
+                    }
+                ) && native_previous_path
+                    .as_ref()
+                    .is_none_or(NativePath::is_missing)) =>
+        {
+            return Err(invalid("observation native paths are required"));
+        }
+        EvidencePayload::Snapshot { root, .. }
+            if record.schema_version >= 2 && root.is_missing() =>
+        {
+            return Err(invalid("snapshot root native path is required"));
+        }
+        EvidencePayload::Snapshot {
+            started_at,
+            finished_at,
+            ..
+        } if finished_at < started_at => {
             return Err(invalid("snapshot interval is reversed"));
         }
+        _ => {}
     }
     Ok(())
 }
