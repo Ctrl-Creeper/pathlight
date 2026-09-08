@@ -39,7 +39,12 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
         } else {
             sizeSummary = "\(Self.signedSize(snapshot.totalNetByteDelta)) net"
         }
-        summaryText = "\(snapshot.eventCount.formatted()) \(eventLabel) • \(sizeSummary)"
+        // Totals cover all retained history; the lists below only see the
+        // newest page, so say which is which instead of implying both.
+        let truncationNote = snapshot.isTruncated
+            ? " • newest \(snapshot.recentEvents.count.formatted()) listed"
+            : ""
+        summaryText = "\(snapshot.eventCount.formatted()) \(eventLabel) • \(sizeSummary)\(truncationNote)"
 
         let visibleBuckets = Array(snapshot.buckets.suffix(bucketLimit))
         let maxMagnitude = visibleBuckets.map { abs($0.byteDelta) }.max() ?? 0

@@ -110,6 +110,33 @@ struct ActivityEventStoreTests {
         #expect(loaded.map(\.path.lastPathComponent) == ["2.bin", "1.bin"])
     }
 
+    /// The dashboard used to total only the events it displayed, so a busy
+    /// folder read as a fraction of what actually happened.
+    @Test("page totals cover every retained event, not just the listed page")
+    func pageTotalsCoverEveryRetainedEvent() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let events = (0..<10).map { index in
+            makeEvent(
+                root: root,
+                name: "\(index).bin",
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index) * 3_600),
+                byteDelta: 1_000
+            )
+        }
+
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        try await store.append(events)
+
+        let page = try await store.loadEventPage(rootPath: root, limit: 3, bucketInterval: 3_600)
+
+        #expect(page.totalEventCount == 10)
+        #expect(page.totalNetByteDelta == 10_000)
+        #expect(page.buckets.count == 10, "trend buckets span the whole journal, not the page")
+        #expect(page.events.map(\.path.lastPathComponent) == ["9.bin", "8.bin", "7.bin"])
+    }
+
     @Test("encrypted journal hides paths and uses owner-only permissions")
     func encryptedJournalHidesPathsAndUsesOwnerOnlyPermissions() async throws {
         let tempDirectory = try makeTemporaryDirectory()

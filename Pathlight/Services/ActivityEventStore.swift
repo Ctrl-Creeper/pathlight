@@ -11,11 +11,34 @@ nonisolated protocol ActivityEventStoring: Sendable {
     /// is retryable unless it is `commitStateUnknown`.
     func append(_ events: [DiskActivityEvent]) async throws
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
+    /// Newest `limit` events plus totals over *everything* retained for the
+    /// root, so a capped page can never understate the dashboard.
+    func loadEventPage(
+        rootPath: URL,
+        limit: Int,
+        bucketInterval: TimeInterval
+    ) async throws -> ActivityEventPage
     func enforceStoragePolicy(
         _ preferences: ActivityStoragePreferences,
         eventJournalLimitBytes: Int64,
         now: Date
     ) async throws
+}
+
+extension ActivityEventStoring {
+    /// Stores without their own single-pass reader still answer correctly; they
+    /// just pay for materializing every event first.
+    func loadEventPage(
+        rootPath: URL,
+        limit: Int,
+        bucketInterval: TimeInterval
+    ) async throws -> ActivityEventPage {
+        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
+        for event in try await loadEvents(rootPath: rootPath, limit: .max) {
+            builder.add(event)
+        }
+        return builder.page()
+    }
 }
 
 actor JSONLActivityEventStore: ActivityEventStoring {
@@ -169,6 +192,33 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             }
             .prefix(limit)
             .map { $0 }
+    }
+
+    /// One pass over the journal: totals and trend buckets come from every
+    /// retained line, while only the newest `limit` events are kept in memory.
+    func loadEventPage(
+        rootPath: URL,
+        limit: Int,
+        bucketInterval: TimeInterval
+    ) async throws -> ActivityEventPage {
+        guard FileManager.default.fileExists(atPath: journalURL.path) else {
+            return .empty
+        }
+
+        let root = rootPath.standardizedFileURL.path
+        let data = try Data(contentsOf: journalURL)
+        let contents = String(decoding: data, as: UTF8.self)
+
+        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let lineData = try? lineCodec.decode(line),
+                  let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),
+                  event.rootPath.standardizedFileURL.path == root else {
+                continue
+            }
+            builder.add(event)
+        }
+        return builder.page()
     }
 
     func enforceStoragePolicy(

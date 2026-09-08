@@ -43,6 +43,37 @@ struct ActivityHistoryServiceTests {
         ])
     }
 
+    /// The card used to report only what the list could hold, so 532 events
+    /// and +154 MB rendered as "500 events • +2.1 MB".
+    @Test("totals every retained event while listing only the newest page")
+    func totalsEveryRetainedEventWhileListingOnePage() async throws {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let events = (0..<10).map { index in
+            event(.created, root: root, name: "\(index).bin", timestamp: TimeInterval(index) * 3_600, byteDelta: 1_000)
+        }
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: events))
+
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: 3,
+            bucketInterval: 3_600,
+            generatedAt: Date(timeIntervalSince1970: 100_000)
+        )
+
+        #expect(history.eventCount == 10)
+        #expect(history.totalNetByteDelta == 10_000)
+        #expect(history.recentEvents.count == 3)
+        #expect(history.isTruncated)
+
+        let whole = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: 100,
+            bucketInterval: 3_600,
+            generatedAt: Date(timeIntervalSince1970: 100_000)
+        )
+        #expect(!whole.isTruncated)
+    }
+
     @Test("tracks unknown size events without changing net delta")
     func tracksUnknownSizeEvents() async throws {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
