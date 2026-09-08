@@ -76,6 +76,33 @@ The `RequiresRescan` contract stops at reporting. Deciding whether the root is
 gone for good or merely renamed is the host's job: the Swift app re-probes the
 path and reports `rootMissing` or reconnects.
 
+## Uninstall
+
+A monitor has to be removable without a hunt through the system's data
+directories, and removal is the one operation where a wrong path deletes
+somebody's data. `src/uninstall.rs` owns the per-OS layout. Every entry is
+derived from the platform's data roots and a fixed application name — never
+from a watch target or a journal path a user typed — and
+`tests/uninstall.rs` holds all three layouts to that on every host, because
+they are plain functions rather than `cfg`-gated bodies.
+
+| Platform | Storage removed | Notes |
+|---|---|---|
+| macOS | `~/Library/Application Support/Pathlight` | The Swift host owns the full list: preferences, caches, saved state, the Keychain key, the login item and the app bundle. `Pathlight/Services/UninstallService.swift` is the authority; this module deliberately does not restate it, because two lists that have to agree eventually do not. |
+| Linux | `$XDG_DATA_HOME`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME` (each `/pathlight`) | Unset roots fall back to the specification's defaults under `$HOME`. A root holding a relative path is ignored, per the specification — honouring one would delete relative to whatever the working directory happened to be. |
+| Windows | `%APPDATA%\Pathlight`, `%LOCALAPPDATA%\Pathlight` | Both fall back to their standard place under `%USERPROFILE%` when unset. |
+
+`pathlight-monitor uninstall` lists what exists and removes nothing;
+`--yes` removes it and reports every path that survived. A destructive command
+that needs no confirmation is a command someone runs by accident.
+
+Two things no uninstall can reach. macOS keeps its own record of a granted Full
+Disk Access, and the TCC database is protected from every app including the one
+it names, so the user has to remove that entry themselves; the Swift host says
+so on the uninstall pane. Journals a caller named explicitly — the second
+argument to `pathlight-monitor` — are never guessed at, so a host that stores
+its journal outside the standard layout has to remove that path itself.
+
 ## Platform-specific next steps
 
 1. Replace platform-wide capability constants with a negotiated per-watch

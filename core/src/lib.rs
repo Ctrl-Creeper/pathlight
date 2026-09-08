@@ -23,6 +23,7 @@ mod notify_backend;
 pub mod paths;
 pub mod recording;
 pub mod snapshot;
+pub mod uninstall;
 
 pub use attribution::{AggregationOptions, Attributor, SizeIndex};
 pub use event::{ActivityEvent, Confidence, EventKind};
