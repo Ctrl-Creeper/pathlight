@@ -153,6 +153,11 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
     }
 
     mutating func record(eventID: UInt64) {
+        // Zero is the fresh-start readiness marker, never a resume cursor. A
+        // real FSEvents or Rust event ID is nonzero, so persisting zero as a
+        // checkpoint would make the next launch replay the whole event history
+        // instead of resuming. Leaving the cursor nil resumes from now.
+        guard eventID != 0 else { return }
         lastObservedEventID = max(lastObservedEventID ?? 0, eventID)
     }
 
