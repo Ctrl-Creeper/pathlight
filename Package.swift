@@ -56,6 +56,7 @@ let package = Package(
                 "Services/ScanExclusionMatcher.swift",
                 "Services/StorageAttributionService.swift",
                 "Services/SystemIntegration.swift",
+                "Services/UninstallService.swift",
                 "Services/WatchSessionModel.swift",
                 "ViewModels/AppModel.swift"
             ]

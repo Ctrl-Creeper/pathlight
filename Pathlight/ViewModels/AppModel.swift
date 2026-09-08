@@ -273,6 +273,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Uninstall is a one-way door: stop recording first so nothing writes
+    /// after its files are gone, then remove what the user chose. A successful
+    /// uninstall never returns — the app is quit from under us.
+    func uninstall(scope: UninstallScope) {
+        cleanup()
+        let outcome = dependencies.systemActions.uninstall(scope)
+        let failures: [String]
+        switch outcome {
+        case let .installIntact(reported):
+            // Nothing was removed, so the user still has a Pathlight that is
+            // meant to be recording. Leaving it stopped would be a silent
+            // second failure.
+            failures = reported
+            startEnabledLongTermWatches()
+        case let .removed(reported):
+            failures = reported
+        }
+        guard !failures.isEmpty else { return }
+        lastErrorMessage = "Pathlight could not remove \(failures.joined(separator: ", ")). Remove it by hand, or try again."
+    }
+
     func startShortTermWatch(
         rootPath: URL,
         options: DiskActivityAggregationOptions = .shortTermDefault

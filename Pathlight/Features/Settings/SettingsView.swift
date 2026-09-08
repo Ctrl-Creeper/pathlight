@@ -23,6 +23,12 @@ struct SettingsView: View {
                     Label("Storage", systemImage: "internaldrive")
                 }
                 .tag(SettingsTab.storage.rawValue)
+
+            UninstallSettingsPane()
+                .tabItem {
+                    Label("Uninstall", systemImage: "trash")
+                }
+                .tag(SettingsTab.uninstall.rawValue)
         }
         .scenePadding()
         .frame(width: 560, height: 530)
@@ -33,6 +39,7 @@ private enum SettingsTab: String {
     case general
     case privacy
     case storage
+    case uninstall
 }
 
 private struct GeneralSettingsPane: View {
@@ -246,6 +253,75 @@ private struct ActivityStorageSettingsPane: View {
     private func countText(_ value: Int) -> String {
         value.formatted()
     }
+}
+
+private struct UninstallSettingsPane: View {
+    @EnvironmentObject private var appModel: AppModel
+    @State private var pendingScope: UninstallScope?
+
+    var body: some View {
+        Form {
+            Section("Uninstall Pathlight") {
+                Text("Both options stop monitoring, remove the login item, and move Pathlight to the Trash.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Move Pathlight to the Trash…") {
+                    pendingScope = .appOnly
+                }
+
+                Text("Keeps your activity history, settings, and encryption key, so reinstalling picks up where you left off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                Button("Remove Pathlight and All Its Data…", role: .destructive) {
+                    pendingScope = .everything
+                }
+
+                Text(Self.everythingDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog(
+            pendingScope == .everything ? "Remove Pathlight and All Its Data?" : "Move Pathlight to the Trash?",
+            isPresented: Binding(get: { pendingScope != nil }, set: { if !$0 { pendingScope = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button(
+                pendingScope == .everything ? "Remove Everything" : "Move to Trash",
+                role: .destructive
+            ) {
+                if let scope = pendingScope {
+                    appModel.uninstall(scope: scope)
+                }
+                pendingScope = nil
+            }
+
+            Button("Cancel", role: .cancel) {
+                pendingScope = nil
+            }
+        } message: {
+            Text(
+                pendingScope == .everything
+                    ? "Pathlight quits, and nothing it recorded stays on this Mac. This cannot be undone. The folders you monitored are never touched."
+                    : "Pathlight quits and moves to the Trash. Your activity history and settings stay on this Mac."
+            )
+        }
+    }
+
+    /// Named out loud, because "all its data" is the one claim the user cannot
+    /// verify before agreeing to it.
+    private static let everythingDetail = """
+        Deletes the activity history journal, the size attribution index, all \
+        settings, the Keychain encryption key, and cached files. The folders \
+        you monitored are never touched.
+        """
 }
 
 private struct StatValueRow: View {

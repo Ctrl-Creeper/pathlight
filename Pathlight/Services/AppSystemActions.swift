@@ -15,6 +15,10 @@ struct AppSystemActions {
     var presentSavePanel: (_ suggestedFileName: String) -> URL?
     var prepareAndOpenFullDiskAccessSettings: () -> Bool
     var fullDiskAccessStatus: @Sendable () async -> FullDiskAccessStatus
+    /// Removes Pathlight and quits when nothing is left behind. Reports what
+    /// could not be removed, so a partial uninstall is said out loud instead of
+    /// looking like a silent success.
+    var uninstall: (UninstallScope) -> UninstallOutcome
 
     static let live = AppSystemActions(
         reveal: { url in
@@ -34,6 +38,13 @@ struct AppSystemActions {
             await Task.detached(priority: .utility) {
                 SystemIntegration.fullDiskAccessStatus()
             }.value
+        },
+        uninstall: { scope in
+            let outcome = UninstallService().perform(scope)
+            guard outcome == .removed(failures: []) else { return outcome }
+            // Everything this process would write on its way out is already
+            // gone; a normal terminate would only put some of it back.
+            exit(0)
         }
     )
 
@@ -42,6 +53,7 @@ struct AppSystemActions {
         presentFolderPanel: { _, _ in nil },
         presentSavePanel: { _ in nil },
         prepareAndOpenFullDiskAccessSettings: { true },
-        fullDiskAccessStatus: { .unknown }
+        fullDiskAccessStatus: { .unknown },
+        uninstall: { _ in .removed(failures: []) }
     )
 }

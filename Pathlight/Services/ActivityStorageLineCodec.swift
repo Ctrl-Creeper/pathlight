@@ -74,10 +74,7 @@ nonisolated struct AESGCMActivityStorageCryptor: ActivityStorageLineCrypting {
 
     static let live = AESGCMActivityStorageCryptor(
         keyProvider: CachingActivityStorageKeyProvider(
-            wrapping: KeychainActivityStorageKeyProvider(
-                service: "com.ctrlcreeper.Pathlight.activity-storage",
-                account: "pathlight-aes-gcm-v1"
-            )
+            wrapping: KeychainActivityStorageKeyProvider.live
         )
     )
 
@@ -170,6 +167,11 @@ nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyPro
 }
 
 nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable, ActivityStorageKeyProviding {
+    static let live = KeychainActivityStorageKeyProvider(
+        service: "com.ctrlcreeper.Pathlight.activity-storage",
+        account: "pathlight-aes-gcm-v1"
+    )
+
     private let service: String
     private let account: String
 
@@ -193,6 +195,13 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
             throw ActivityStorageLineCodecError.keychainReadFailed(errSecItemNotFound)
         }
         return storedKey
+    }
+
+    func deleteKey() throws {
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ActivityStorageLineCodecError.keychainWriteFailed(status)
+        }
     }
 
     private func loadKey() throws -> Data? {
