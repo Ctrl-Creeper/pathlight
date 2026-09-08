@@ -488,3 +488,32 @@ fn a_backend_that_cannot_lose_events_is_the_only_one_allowed_to_say_so() {
         "no shipping backend has a lossless queue; {capabilities:#?} claims one"
     );
 }
+
+/// The watch root vanishing is the one failure a host cannot detect on its
+/// own: the stream stays open and silent, so a dead watch looks exactly like a
+/// quiet folder. FSEvents reports it as `RootChanged` only when the watch asks
+/// for it; inotify delivers `IN_DELETE_SELF` and then drops the watch. Both
+/// have to surface as a gap, not as one ordinary change inside a live watch.
+#[test]
+fn losing_the_watch_root_reports_a_gap_instead_of_going_quiet() {
+    let harness = Harness::start(|root| {
+        std::fs::write(root.join("keep.txt"), b"x").unwrap();
+    });
+    std::fs::remove_dir_all(&harness.root).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let events = harness.events();
+        if events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::RequiresRescan { .. }))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a watch whose root is gone must say so; events: {events:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

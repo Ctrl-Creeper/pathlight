@@ -82,6 +82,22 @@ pub(crate) fn forward(emitter: &Emitter, result: notify::Result<notify::Event>, 
         return emitter.emit(StreamEvent::RequiresRescan { event_id });
     }
     let exact = |path: &Path| path.to_str().expect("validated above").to_owned();
+    // inotify's DELETE_SELF and MOVE_SELF name the watch root itself, and the
+    // kernel drops the watch right after: the stream stays open and silent
+    // while the host still believes it is watching. That is what FSEvents'
+    // RootChanged reports on macOS, so report it the same way here instead of
+    // filing it as one ordinary change inside a healthy watch.
+    let names_root = |path: &Path| {
+        path.to_str()
+            .is_some_and(|path| crate::paths::normalize(path) == emitter.root)
+    };
+    if matches!(
+        event.kind,
+        NotifyKind::Remove(_) | NotifyKind::Modify(ModifyKind::Name(_))
+    ) && event.paths.iter().any(names_root)
+    {
+        return emitter.emit(StreamEvent::RequiresRescan { event_id });
+    }
     match event.kind {
         NotifyKind::Access(_) => {}
         NotifyKind::Create(_) => event
