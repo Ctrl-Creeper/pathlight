@@ -65,8 +65,12 @@ nonisolated struct LsofProcessHintService: ProcessHinting {
 
 enum ProcessHintMatcher {
     /// Attaches a process name to each event whose path, or an ancestor below
-    /// the root, is open. When exactly one process has anything open under the
-    /// root, unmatched events fall back to it.
+    /// the root, is actually open.
+    ///
+    /// An event with no matching open path stays unnamed. Naming it after the
+    /// only process that happens to hold something under the root was wrong
+    /// often enough to matter: the guess reached the timeline and the CSV
+    /// export, where it reads as evidence.
     nonisolated static func annotate(
         _ events: [DiskActivityEvent],
         hints: [String: String],
@@ -76,9 +80,6 @@ enum ProcessHintMatcher {
             return events
         }
         let root = rootPath.standardizedFileURL.path
-        let distinctProcesses = Set(hints.values)
-        let soleProcess = distinctProcesses.count == 1 ? distinctProcesses.first : nil
-
         return events.map { event in
             guard event.processName == nil else {
                 return event
@@ -92,7 +93,7 @@ enum ProcessHintMatcher {
                 guard parent != candidate else { break }
                 candidate = parent
             }
-            return soleProcess.map(event.withProcessName) ?? event
+            return event
         }
     }
 }

@@ -6,8 +6,6 @@ struct LiveWatchSessionCoordinator: Sendable {
 
     /// Minimum spacing between `lsof` snapshots while events are flowing.
     nonisolated static let processHintInterval: TimeInterval = 5
-    /// Long-term watches only pay for a snapshot when a change is at least this big.
-    nonisolated static let processHintMinimumByteDelta: Int64 = 1_024 * 1_024
     /// A snapshot older than this no longer annotates events.
     nonisolated static let processHintValidity: TimeInterval = 30
 
@@ -115,11 +113,9 @@ struct LiveWatchSessionCoordinator: Sendable {
         if let lastSnapshotAt, now.timeIntervalSince(lastSnapshotAt) < processHintInterval {
             return false
         }
-        if options.isDetailedFileTimeline {
-            return true
-        }
-        return events.contains { event in
-            abs(event.byteDelta ?? 0) >= processHintMinimumByteDelta
-        }
+        // Only an interactive watch can attribute a process: by the time a
+        // background watch's latency window closes, the writer has exited and
+        // the snapshot would either name nothing or name the wrong thing.
+        return options.isDetailedFileTimeline
     }
 }
