@@ -81,14 +81,19 @@ impl Storage {
 
     /// Appends rows to the shared journal.
     pub fn record(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
-        let _guard = journal_lock().lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = journal_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.journal_handle().append(events)
     }
 
     /// Drops what is too old or over the cap. Returns how many rows went.
     pub fn trim_journal(&self) -> Result<u64, CoreError> {
-        let _guard = journal_lock().lock().unwrap_or_else(PoisonError::into_inner);
-        self.journal_handle().trim(RETENTION_DAYS, JOURNAL_LIMIT_BYTES)
+        let _guard = journal_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.journal_handle()
+            .trim(RETENTION_DAYS, JOURNAL_LIMIT_BYTES)
     }
 
     /// What was recorded for one folder, folded into buckets and totals.

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant, SystemTime};
 use pathlight_core::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
 use pathlight_core::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
 use pathlight_core::monitor::{ActivityListener, Change, StreamEvent, Watcher};
-use pathlight_core::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
+use pathlight_core::snapshot::{
+    self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot,
+};
 use pathlight_core::{paths, ActivityEvent, Confidence, EventKind};
 
 use crate::store::Storage;
@@ -242,12 +244,7 @@ impl Worker {
         }
     }
 
-    fn accept(
-        &self,
-        event: StreamEvent,
-        pending: &mut Vec<Change>,
-        baseline: &Baseline,
-    ) {
+    fn accept(&self, event: StreamEvent, pending: &mut Vec<Change>, baseline: &Baseline) {
         match event {
             StreamEvent::Change { change, .. } => {
                 if !self.excluded(&change.path) {
@@ -327,9 +324,7 @@ impl Worker {
         );
         Some(ActivityEvent {
             kind: match binding.kind {
-                BindingChangeKind::Created | BindingChangeKind::HardLinkAdded => {
-                    EventKind::Created
-                }
+                BindingChangeKind::Created | BindingChangeKind::HardLinkAdded => EventKind::Created,
                 BindingChangeKind::Removed | BindingChangeKind::HardLinkRemoved => {
                     EventKind::Deleted
                 }
@@ -587,10 +582,7 @@ mod tests {
             dropped: Arc::new(AtomicU64::new(0)),
         };
 
-        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
-            &worker.scope,
-            &worker.live,
-        )));
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&worker.scope, &worker.live)));
         assert!(
             baseline.lock().unwrap().is_some(),
             "no baseline: {:?}",

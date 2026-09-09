@@ -297,7 +297,9 @@ impl App {
             .exact_size(300.0)
             .show(ui, |ui| self.watch_list(ui));
 
-        let reload = egui::CentralPanel::default().show(ui, |ui| self.detail(ui)).inner;
+        let reload = egui::CentralPanel::default()
+            .show(ui, |ui| self.detail(ui))
+            .inner;
         if reload {
             if let Some(root) = self.selected.clone() {
                 self.load_history(&root);
@@ -499,11 +501,7 @@ impl App {
             }
             Some(Ok(history)) => {
                 ui.horizontal(|ui| {
-                    metric(
-                        ui,
-                        "Net change",
-                        &human_bytes(history.total_net_byte_delta),
-                    );
+                    metric(ui, "Net change", &human_bytes(history.total_net_byte_delta));
                     metric(ui, "Events", &history.event_count.to_string());
                     metric(
                         ui,
@@ -639,8 +637,9 @@ fn rows<'a>(
                         ui.label(relative_path(&event.path, root));
                         ui.label(match event.byte_delta {
                             Some(delta) => egui::RichText::new(human_bytes(delta)),
-                            None => egui::RichText::new("unknown")
-                                .color(ui.visuals().weak_text_color()),
+                            None => {
+                                egui::RichText::new("unknown").color(ui.visuals().weak_text_color())
+                            }
                         });
                         let mut when = elapsed(event.timestamp);
                         if event.confidence == Confidence::Estimated {
