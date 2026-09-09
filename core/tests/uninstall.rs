@@ -50,10 +50,7 @@ fn xdg_roots_are_honoured_when_absolute() {
 fn relative_or_empty_xdg_roots_are_ignored_rather_than_resolved() {
     let paths = uninstall::xdg_paths(
         Path::new("/home/tester"),
-        env(&[
-            ("XDG_DATA_HOME", "relative/share"),
-            ("XDG_CONFIG_HOME", ""),
-        ]),
+        env(&[("XDG_DATA_HOME", "relative/share"), ("XDG_CONFIG_HOME", "")]),
     );
 
     assert_eq!(
@@ -71,10 +68,7 @@ fn relative_or_empty_xdg_roots_are_ignored_rather_than_resolved() {
 fn windows_uses_both_roaming_and_local_app_data() {
     let configured = uninstall::windows_paths(
         Path::new("C:/Users/tester"),
-        env(&[
-            ("APPDATA", "D:/Roaming"),
-            ("LOCALAPPDATA", "D:/Local"),
-        ]),
+        env(&[("APPDATA", "D:/Roaming"), ("LOCALAPPDATA", "D:/Local")]),
     );
     assert_eq!(
         spellings(&configured),

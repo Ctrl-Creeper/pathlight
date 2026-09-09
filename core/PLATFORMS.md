@@ -63,8 +63,9 @@ helpers remain unverified.
 A watch whose root is deleted, renamed or unmounted is the one failure a host
 cannot detect on its own: the stream stays open and silent, so a dead watch
 looks exactly like a quiet folder. Every backend has to surface it as
-`RequiresRescan`, and `tests/monitor.rs` holds all of them to it by deleting a
-live root.
+`RequiresRescan`, and `tests/monitor.rs` holds every backend that has a signal
+to it by deleting a live root — which is every backend except Windows, for the
+reason in the table below.
 
 | Platform | Kernel signal | Route |
 |---|---|---|

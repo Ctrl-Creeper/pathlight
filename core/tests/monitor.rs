@@ -494,6 +494,10 @@ fn a_backend_that_cannot_lose_events_is_the_only_one_allowed_to_say_so() {
 /// quiet folder. FSEvents reports it as `RootChanged` only when the watch asks
 /// for it; inotify delivers `IN_DELETE_SELF` and then drops the watch. Both
 /// have to surface as a gap, not as one ordinary change inside a live watch.
+/// Not Windows: `ReadDirectoryChangesW` holds an open handle to the watched
+/// directory, so there is no kernel signal to normalize and none is faked. See
+/// `PLATFORMS.md`.
+#[cfg(not(windows))]
 #[test]
 fn losing_the_watch_root_reports_a_gap_instead_of_going_quiet() {
     let harness = Harness::start(|root| {

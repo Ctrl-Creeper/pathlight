@@ -87,14 +87,13 @@ pub(crate) fn forward(emitter: &Emitter, result: notify::Result<notify::Event>, 
     // while the host still believes it is watching. That is what FSEvents'
     // RootChanged reports on macOS, so report it the same way here instead of
     // filing it as one ordinary change inside a healthy watch.
-    let names_root = |path: &Path| {
-        path.to_str()
-            .is_some_and(|path| crate::paths::normalize(path) == emitter.root)
-    };
     if matches!(
         event.kind,
         NotifyKind::Remove(_) | NotifyKind::Modify(ModifyKind::Name(_))
-    ) && event.paths.iter().any(names_root)
+    ) && event
+        .paths
+        .iter()
+        .any(|path| crate::paths::normalize(&exact(path)) == emitter.root)
     {
         return emitter.emit(StreamEvent::RequiresRescan { event_id });
     }

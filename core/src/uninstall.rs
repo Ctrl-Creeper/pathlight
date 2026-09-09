@@ -69,10 +69,9 @@ pub fn macos_paths(home: &Path) -> Vec<PathBuf> {
 /// `%APPDATA%` holds roaming settings, `%LOCALAPPDATA%` the journal and caches.
 /// Both fall back to their standard place under the profile when unset.
 pub fn windows_paths(home: &Path, var: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
-    let app_data = present(var("APPDATA"))
-        .unwrap_or_else(|| home.join("AppData").join("Roaming"));
-    let local_app_data = present(var("LOCALAPPDATA"))
-        .unwrap_or_else(|| home.join("AppData").join("Local"));
+    let app_data = present(var("APPDATA")).unwrap_or_else(|| home.join("AppData").join("Roaming"));
+    let local_app_data =
+        present(var("LOCALAPPDATA")).unwrap_or_else(|| home.join("AppData").join("Local"));
     vec![app_data.join(APP_DIR), local_app_data.join(APP_DIR)]
 }
 
