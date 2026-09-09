@@ -24,6 +24,12 @@ serde_json = "1"
 # Shell_NotifyIcon, NSStatusItem) with no portal or stdlib equivalent, and
 # this is the one crate that speaks all three.
 tray-icon = "0.24.2"
+# Desktop notifications: the only way a watch can speak after its window is
+# closed. Three unrelated APIs underneath (XDG notifications, WinRT toasts,
+# NSUserNotification) and no stdlib anything. `z` is zbus, so the Linux side
+# needs no libdbus headers; the default `serde` and `async` features are not
+# used here. Turning notifications off stays the desktop's own setting.
+notify-rust = { version = "4.18.0", default-features = false, features = ["z"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", default-features = false }

@@ -20,6 +20,7 @@ use pathlight_core::snapshot::{
 };
 use pathlight_core::{paths, ActivityEvent, Confidence, EventKind};
 
+use crate::notify::Alerts;
 use crate::store::Storage;
 
 /// The interactive coalescing window. Wide enough that a save is one event
@@ -108,6 +109,7 @@ impl Session {
             exclusions,
             live: live.clone(),
             dropped,
+            alerts: Mutex::new(Alerts::default()),
         };
         std::thread::Builder::new()
             .name("pathlight-session".into())
@@ -172,6 +174,9 @@ struct Worker {
     exclusions: Option<ExclusionFilter>,
     live: Arc<Mutex<Live>>,
     dropped: Arc<AtomicU64>,
+    /// What the user has already been told, so a background watch can speak
+    /// up without becoming noise.
+    alerts: Mutex<Alerts>,
 }
 
 impl Worker {
@@ -402,6 +407,20 @@ impl Worker {
         if let Some(failure) = failure {
             live.error = Some(format!("Could not write to the journal: {failure}"));
         }
+
+        // While the window is closed nothing repaints, so this has to happen
+        // here on the worker rather than on the paint path: a watch that only
+        // notices anomalies when somebody is looking is a watch that notices
+        // nothing worth notifying about.
+        let news = self
+            .alerts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .news(&live.rows, SystemTime::now());
+        drop(live);
+        for alert in news {
+            alert.post(&self.scope);
+        }
     }
 
     fn live(&self) -> std::sync::MutexGuard<'_, Live> {
@@ -580,6 +599,7 @@ mod tests {
             storage: Storage::at(storage_dir.path()),
             live: Arc::new(Mutex::new(Live::default())),
             dropped: Arc::new(AtomicU64::new(0)),
+            alerts: Mutex::new(Alerts::default()),
         };
 
         let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&worker.scope, &worker.live)));

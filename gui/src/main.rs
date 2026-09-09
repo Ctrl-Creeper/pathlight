@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod export;
+mod notify;
 mod session;
 mod store;
 mod theme;
