@@ -645,6 +645,12 @@ fn rows<'a>(
                         if event.confidence == Confidence::Estimated {
                             when.push_str(" · estimated");
                         }
+                        // Only a privileged watch fills this in, so the column
+                        // stays absent rather than showing an empty promise.
+                        if let Some(process) = &event.process_name {
+                            when.push_str(" · by ");
+                            when.push_str(process);
+                        }
                         ui.label(
                             egui::RichText::new(when)
                                 .small()
@@ -903,7 +909,7 @@ mod tests {
                 confidence: Confidence::Confirmed,
                 previous_path: None,
                 affected_item_count: 1,
-                process_name: None,
+                process_name: Some("rsync".to_owned()),
             }])
             .unwrap();
         let mut harness = harness(app(storage_dir.path(), vec![root.to_owned()]));
@@ -923,5 +929,8 @@ mod tests {
         // are computed from the journal, not from what fits on screen.
         harness.get_by_label("Net change");
         assert_eq!(harness.query_all_by_label("+4.0 KB").count(), 2);
+        // A recorded writer is shown; nothing invents one where the platform
+        // could not tell.
+        harness.get_by_label_contains("by rsync");
     }
 }
