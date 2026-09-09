@@ -1,7 +1,5 @@
 # Live Watch Session Coordinator Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Connect raw disk activity changes to continuously updated watch session timelines.
 
 **Architecture:** `LiveWatchSessionCoordinator` consumes a `DiskActivityMonitoring` stream, processes each change through `StorageAttributionService`, appends attributed events to `WatchSessionModel`, and yields session snapshots. Tests use a fake monitor so behavior stays deterministic.

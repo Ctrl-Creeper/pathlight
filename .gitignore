@@ -14,7 +14,3 @@ core/swift/PathlightRustCoreFFI.xcframework/
 
 # Desktop shell
 gui/target/
-
-# Private agent and tool configuration
-.claude/
-.serena/

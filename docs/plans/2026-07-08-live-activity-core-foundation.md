@@ -1,7 +1,5 @@
 # Live Activity Core Foundation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build the first testable foundation for Pathlight's file-level timeline and storage attribution: event models, filtering, window aggregation, delete-size attribution, and Watch Session summaries.
 
 **Architecture:** Add focused core model and service files inside `Pathlight/Services` so the feature can be exercised by SwiftPM tests before any FSEvents or SwiftUI work. The first slice accepts normalized raw path changes from tests or future monitors, samples sizes through injected closures, emits user-facing `DiskActivityEvent` values, and summarizes short-term sessions.
@@ -450,7 +448,7 @@ Expected: PASS. If unrelated existing tests fail, capture the failures and do no
 - [ ] **Step 3: Commit plan if it is not already committed**
 
 ```bash
-git add docs/superpowers/plans/2026-07-08-live-activity-core-foundation.md
+git add docs/plans/2026-07-08-live-activity-core-foundation.md
 git commit -m "docs: plan live activity core foundation"
 ```
 
