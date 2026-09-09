@@ -63,7 +63,9 @@ fn run() -> io::Result<()> {
         println!("Usage: pathlight-monitor ROOT JOURNAL [SECONDS=10]\n       pathlight-monitor uninstall [--yes]\nRecords an explicit live session and two interval snapshots. JOURNAL must be outside ROOT. Registration and scans add to the duration.\nUninstall lists Pathlight's own storage on this OS and, with --yes, removes it. Journals you named yourself are never guessed at.");
         return Ok(());
     }
-    if args[0] == "uninstall" {
+    // `first`, not `args[0]`: no arguments at all is the most likely way this
+    // binary is ever run, and it used to panic.
+    if args.first().is_some_and(|arg| arg == "uninstall") {
         return uninstall(&args[1..]);
     }
     if !(2..=3).contains(&args.len()) {
