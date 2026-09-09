@@ -10,6 +10,8 @@ pub mod attribution;
 pub mod event;
 pub mod evidence;
 pub mod exclusion;
+#[cfg(target_os = "linux")]
+mod fanotify;
 #[cfg(target_os = "macos")]
 mod fsevents;
 pub mod history;

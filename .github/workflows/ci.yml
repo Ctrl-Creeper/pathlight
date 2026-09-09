@@ -31,6 +31,16 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # fanotify needs CAP_SYS_ADMIN, so the unprivileged run above exercises
+      # inotify and this one exercises the backend nobody can reach on a normal
+      # desktop without sudo. Same contract, both privilege levels. The binary
+      # is run directly: `sudo cargo` would rebuild everything as root.
+      - name: Watcher contract as root (fanotify)
+        if: runner.os == 'Linux'
+        run: |
+          binary=$(cargo test --test monitor --no-run --message-format=json \
+            | python3 -c 'import json,sys; print(next(json.loads(line)["executable"] for line in sys.stdin if line.startswith("{") and json.loads(line).get("executable") and "monitor" in json.loads(line)["target"]["name"]))')
+          sudo "$binary" --test-threads=1
 
   desktop-shell:
     name: Desktop shell (${{ matrix.os }})

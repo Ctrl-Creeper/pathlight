@@ -192,6 +192,11 @@ fn a_rename_inside_the_root_stays_reconstructable() {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn a_cookie_paired_rename_is_reported_once() {
+    // A backend that declares it does not pair rename halves is held to the
+    // portable floor above instead; `pairs_renames` is what says which.
+    if !watcher_capabilities().pairs_renames {
+        return;
+    }
     let harness = Harness::start(|root| std::fs::write(root.join("draft.txt"), b"draft").unwrap());
     std::fs::rename(
         harness.root.join("draft.txt"),
@@ -283,6 +288,11 @@ fn unrepresentable_native_names_report_a_gap_instead_of_a_different_file() {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn successive_cookie_paired_renames_are_distinct() {
+    // A backend that declares it does not pair rename halves is held to the
+    // portable floor above instead; `pairs_renames` is what says which.
+    if !watcher_capabilities().pairs_renames {
+        return;
+    }
     let harness = Harness::start(|root| std::fs::write(root.join("a.txt"), b"draft").unwrap());
     std::fs::rename(harness.root.join("a.txt"), harness.root.join("b.txt")).unwrap();
     std::fs::rename(harness.root.join("b.txt"), harness.root.join("c.txt")).unwrap();
@@ -311,6 +321,11 @@ fn successive_cookie_paired_renames_are_distinct() {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn a_directory_cookie_rename_is_reported_once() {
+    // A backend that declares it does not pair rename halves is held to the
+    // portable floor above instead; `pairs_renames` is what says which.
+    if !watcher_capabilities().pairs_renames {
+        return;
+    }
     let harness = Harness::start(|root| std::fs::create_dir(root.join("old-dir")).unwrap());
     std::fs::rename(harness.root.join("old-dir"), harness.root.join("new-dir")).unwrap();
     harness.wait_for("the directory rename", |changes| {
@@ -447,6 +462,33 @@ fn a_backend_claiming_to_pair_renames_really_does() {
         named(&changes, "final.txt").len(),
         1,
         "duplicate destination: {changes:#?}"
+    );
+}
+
+/// Holds a backend to its own `reports_process` claim. A watch that says it
+/// names the writer and then reports nothing would have the host show an empty
+/// column forever, which is worse than admitting the platform cannot tell.
+#[test]
+fn a_backend_claiming_to_name_the_writer_really_does() {
+    if !watcher_capabilities().reports_process {
+        return;
+    }
+    let harness = Harness::start(|_| {});
+    std::fs::write(harness.root.join("written.txt"), b"by this test").unwrap();
+
+    let changes = harness.wait_for("the write", |changes| {
+        !named(changes, "written.txt").is_empty()
+    });
+    // This process is the writer. Linux truncates a command name to 15
+    // characters, so the reported name is a prefix of this binary's.
+    let exe = std::env::current_exe().unwrap();
+    let expected = exe.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        named(&changes, "written.txt").iter().any(|change| change
+            .process_name
+            .as_deref()
+            .is_some_and(|name| !name.is_empty() && expected.starts_with(name))),
+        "no writer named, or not this one ({expected}): {changes:#?}"
     );
 }
 
