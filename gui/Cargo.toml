@@ -13,12 +13,25 @@ path = "src/main.rs"
 pathlight-core = { path = "../core" }
 # accesskit stays on: it is what exposes the window to a screen reader.
 eframe = "0.36"
-# Native folder picker. `xdg-portal` instead of the default GTK3 bindings so a
-# Linux build needs no gtk development headers.
+# Native folder picker. `xdg-portal` instead of the default GTK3 bindings: the
+# portal is the dialog a sandboxed app gets either way, and the picker has no
+# reason to hold a second gtk stack open just to ask for a folder.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The tray icon that keeps the app reachable after its window closes. A tray
+# item is a different protocol on every desktop (StatusNotifierItem,
+# Shell_NotifyIcon, NSStatusItem) with no portal or stdlib equivalent, and
+# this is the one crate that speaks all three.
+tray-icon = "0.24.2"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", default-features = false }
 tempfile = "3.27.0"
+
+# Only to give tray-icon's Linux widget the gtk main loop it requires; the
+# folder picker still avoids gtk through xdg-portal. tray-icon already pulls
+# gtk 0.18 in via libappindicator, so this follows its pin rather than
+# choosing a second one.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

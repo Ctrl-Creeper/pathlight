@@ -12,6 +12,7 @@ mod export;
 mod session;
 mod store;
 mod theme;
+mod tray;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, EventKind, His
 
 use session::Session;
 use store::Storage;
+use tray::{Tray, Wish};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -68,6 +70,17 @@ struct App {
     /// Whether new rows are written encrypted, mirrored from storage so the
     /// checkbox does not read a file every frame.
     encrypt: bool,
+    /// The tray icon, once the first frame has had a chance to make one, and
+    /// `None` on a desktop that would not give us one.
+    tray: Option<Tray>,
+    /// Set once the tray has been tried, because the answer does not change
+    /// and asking again would mean two icons.
+    tray_tried: bool,
+    /// The window is closed but the app is not: the watches are running and
+    /// the tray is how the user gets back.
+    hidden: bool,
+    /// The user asked to quit, so the next close request is a real one.
+    quitting: bool,
 }
 
 impl App {
@@ -95,6 +108,10 @@ impl App {
             uninstall_targets: uninstall::current_paths().unwrap_or_default(),
             uninstall_prompt: None,
             uninstalled: false,
+            tray: None,
+            tray_tried: false,
+            hidden: false,
+            quitting: false,
         }
     }
 
@@ -311,12 +328,14 @@ impl eframe::App for App {
 impl App {
     /// The whole interface, independent of eframe so a test can drive it.
     fn draw(&mut self, ui: &mut egui::Ui) {
-        // Repaint on a timer only while something is being watched: an idle
-        // window should cost nothing, which is the same promise the watches make.
+        // Repaint on a timer only while something is being watched and there
+        // is a window to draw it in: an idle window should cost nothing, and a
+        // hidden one has nothing to show four times a second.
         let ctx = ui.ctx().clone();
-        if !self.sessions.is_empty() {
+        if !self.sessions.is_empty() && !self.hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        self.watch_the_tray(&ctx);
         self.poll_history();
         if self.history_pending.is_some() {
             // Otherwise the finished read sits in the channel until something
@@ -349,6 +368,17 @@ impl App {
                     egui::RichText::new(text)
                         .small()
                         .color(ui.visuals().weak_text_color()),
+                );
+                // Said out loud, because the two behaviours differ by whether
+                // this desktop gave us a tray icon and nothing else on screen
+                // would tell the user which one they have.
+                ui.label(
+                    egui::RichText::new(match self.closing_keeps_watching() {
+                        true => "· Closing the window keeps the watches running.",
+                        false => "· Closing the window stops the watches.",
+                    })
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Uninstall…").clicked() {
@@ -397,6 +427,62 @@ impl App {
         }
 
         self.notices(&ctx);
+    }
+
+    /// Keeps the app alive behind a closed window, and brings it back.
+    ///
+    /// The tray is built on the first frame rather than at startup: macOS
+    /// requires the event loop to be running already, and every platform
+    /// requires it on this thread.
+    fn watch_the_tray(&mut self, ctx: &egui::Context) {
+        if !self.tray_tried {
+            self.tray_tried = true;
+            self.tray = tray::install(ctx);
+        }
+
+        // Read out before granting: the wishes borrow the tray and granting
+        // one changes the app. An empty answer allocates nothing.
+        let wishes: Vec<Wish> = match &self.tray {
+            Some(tray) => tray.wishes().collect(),
+            None => Vec::new(),
+        };
+        for wish in wishes {
+            self.grant(wish, ctx);
+        }
+
+        if ctx.input(|input| input.viewport().close_requested()) && self.closing_keeps_watching() {
+            self.hide(ctx);
+        }
+    }
+
+    /// Whether closing the window puts the app away or shuts it down. Without
+    /// a tray there is no way back to a hidden window, so then the close is
+    /// honoured; and a quit asked for from the tray is a real close.
+    fn closing_keeps_watching(&self) -> bool {
+        self.tray.is_some() && !self.quitting
+    }
+
+    fn grant(&mut self, wish: Wish, ctx: &egui::Context) {
+        match wish {
+            Wish::Show => {
+                self.hidden = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            Wish::Quit => {
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Closing the window is the ordinary way to put a monitor away, and a
+    /// monitor that stops when you put it away is not monitoring: the watches
+    /// keep running and the tray is the way back.
+    fn hide(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.hidden = true;
     }
 
     fn watch_list(&mut self, ui: &mut egui::Ui) {
@@ -883,6 +969,12 @@ mod tests {
             uninstall_prompt: None,
             uninstalled: false,
             encrypt: false,
+            tray: None,
+            // Never in a test: a tray icon needs the platform's event loop,
+            // and a test that made one would leave it in the tester's tray.
+            tray_tried: true,
+            hidden: false,
+            quitting: false,
         }
     }
 
@@ -922,6 +1014,35 @@ mod tests {
             harness.state().sessions.is_empty(),
             "pressing Stop did not end the watch"
         );
+    }
+
+    /// The promise the tray exists to keep: putting the window away must not
+    /// put the watches away. Driven through the methods the close request and
+    /// the menu drive, because a real tray icon needs the platform's event
+    /// loop and would outlive the test in the tester's own tray.
+    #[test]
+    fn closing_into_the_tray_keeps_the_watch_running() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+        assert!(harness.state().sessions.contains_key(&root));
+
+        let ctx = harness.ctx.clone();
+        harness.state_mut().hide(&ctx);
+        harness.step();
+        assert!(harness.state().hidden, "the window did not go away");
+        assert!(
+            harness.state().sessions.contains_key(&root),
+            "closing the window stopped the watch"
+        );
+
+        harness.state_mut().grant(Wish::Show, &ctx);
+        harness.step();
+        assert!(!harness.state().hidden, "the tray could not bring it back");
+        assert!(harness.state().sessions.contains_key(&root));
     }
 
     /// A destructive button that acts on the first press is a button somebody
