@@ -433,9 +433,10 @@ impl App {
             warn(
                 ui,
                 &format!(
-                    "The system dropped events {} time(s). The numbers above are a floor, \
-                     not a total.",
-                    live.gaps
+                    "The system dropped events {} time(s). Pathlight compared this folder \
+                     against what it last knew and recovered {} change(s) — anything written \
+                     and undone in between is gone, and the times are when they were found.",
+                    live.gaps, live.recovered
                 ),
             );
         }

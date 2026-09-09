@@ -9,13 +9,14 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use pathlight_core::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
 use pathlight_core::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
 use pathlight_core::monitor::{ActivityListener, Change, StreamEvent, Watcher};
-use pathlight_core::ActivityEvent;
+use pathlight_core::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
+use pathlight_core::{paths, ActivityEvent, Confidence, EventKind};
 
 use crate::store::Storage;
 
@@ -45,6 +46,10 @@ pub struct Live {
     /// Times the backend admitted it lost events. A gap means the numbers
     /// below it are a floor, not a total, and the UI says so.
     pub gaps: u64,
+    /// Changes found by comparing the folder against its baseline after a
+    /// gap. Counted apart from [`Self::event_count`]'s share of them because
+    /// a comparison says what is different now, never what happened.
+    pub recovered: u64,
     pub dropped: u64,
     pub started_at: SystemTime,
     /// Set when a row could not be written. The row is still on screen, so
@@ -60,6 +65,7 @@ impl Default for Live {
             total_byte_delta: 0,
             event_count: 0,
             gaps: 0,
+            recovered: 0,
             dropped: 0,
             started_at: SystemTime::now(),
             error: None,
@@ -133,6 +139,26 @@ impl ActivityListener for QueueListener {
     }
 }
 
+/// The last known state of the watched folder, shared with the thread that
+/// takes it.
+type Baseline = Arc<Mutex<Option<ScanSnapshot>>>;
+
+/// What the folder holds now. A folder that cannot be read has no baseline,
+/// which is said out loud: silently having none would turn every later gap
+/// into a gap nobody can reconcile.
+fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>) -> Option<ScanSnapshot> {
+    match snapshot::scan(Path::new(scope)) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            live.lock().unwrap_or_else(PoisonError::into_inner).error = Some(format!(
+                "Could not read {scope} to know what it holds, so a dropped event cannot \
+                 be recovered here: {error}"
+            ));
+            None
+        }
+    }
+}
+
 struct Worker {
     scope: String,
     storage: Storage,
@@ -166,6 +192,29 @@ impl Worker {
             &known_size,
         );
         let mut pending: Vec<Change> = Vec::new();
+        // What the folder looked like when the watch opened. Without it a gap
+        // can only ever be counted; with it the gap becomes a list of files.
+        //
+        // Taken on its own thread, because a whole-disk baseline can take
+        // minutes and a worker busy walking a tree is a worker not draining
+        // the queue — the events that would drop while it walked are exactly
+        // the ones the baseline exists to recover. A gap that arrives before
+        // it lands finds nothing to compare against, and says so.
+        let baseline: Baseline = Arc::new(Mutex::new(None));
+        {
+            let slot = baseline.clone();
+            let scope = self.scope.clone();
+            let live = self.live.clone();
+            let spawned = std::thread::Builder::new()
+                .name("pathlight-baseline".into())
+                .spawn(move || {
+                    let taken = baseline_of(&scope, &live);
+                    *slot.lock().unwrap_or_else(PoisonError::into_inner) = taken;
+                });
+            if let Err(error) = spawned {
+                self.live().error = Some(format!("Could not take a baseline: {error}"));
+            }
+        }
         let mut due = Instant::now() + FLUSH;
         // Before the first row of this watch, so a journal left over the cap
         // by an earlier run does not have to wait an hour to come back under it.
@@ -174,7 +223,7 @@ impl Worker {
         loop {
             let wait = due.saturating_duration_since(Instant::now());
             match receiver.recv_timeout(wait) {
-                Ok(event) => self.accept(event, &mut pending),
+                Ok(event) => self.accept(event, &mut pending, &baseline),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.flush(&attributor, &mut pending);
@@ -193,18 +242,117 @@ impl Worker {
         }
     }
 
-    fn accept(&self, event: StreamEvent, pending: &mut Vec<Change>) {
+    fn accept(
+        &self,
+        event: StreamEvent,
+        pending: &mut Vec<Change>,
+        baseline: &Baseline,
+    ) {
         match event {
             StreamEvent::Change { change, .. } => {
                 if !self.excluded(&change.path) {
                     pending.push(change);
                 }
             }
-            // Nothing to resume from on a fresh watch, so this is only a
-            // marker that the numbers are incomplete from here on.
-            StreamEvent::RequiresRescan { .. } => self.live().gaps += 1,
+            StreamEvent::RequiresRescan { .. } => self.reconcile(baseline),
             StreamEvent::HistoryCaughtUp { .. } => {}
         }
+    }
+
+    /// The backend admitted it lost events. Compare the folder against the
+    /// baseline and record the difference.
+    ///
+    /// This recovers what is different, never what happened: a file written
+    /// and deleted inside the gap leaves nothing to compare, and a rename is
+    /// only a rename because two ends matched an inode that the kernel is
+    /// free to have reused. Every row it writes says `Estimated`.
+    fn reconcile(&self, baseline: &Baseline) {
+        self.live().gaps += 1;
+        let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(previous) = slot.take() else {
+            return;
+        };
+        let Some(current) = baseline_of(&self.scope, &self.live) else {
+            // Keep the old baseline: it is still the last thing known, and a
+            // watch with no baseline can never reconcile again.
+            *slot = Some(previous);
+            return;
+        };
+        let comparison = snapshot::reconcile(&previous, &current, IdentityContinuity::Unknown);
+        let events: Vec<ActivityEvent> = comparison
+            .bindings
+            .iter()
+            .filter_map(|binding| self.recovered_row(binding, &previous, &current))
+            .collect();
+        let incomplete = !previous.is_complete() || !current.is_complete();
+        *slot = Some(current);
+        drop(slot);
+
+        let recovered = events.len() as u64;
+        self.publish(events, 0);
+        let mut live = self.live();
+        live.recovered += recovered;
+        if incomplete {
+            live.error = Some(
+                "Parts of this folder could not be read while catching up, so the recovered \
+                 list may be short."
+                    .to_owned(),
+            );
+        }
+    }
+
+    /// One difference between two observations, as a row — or nothing, when it
+    /// is a path no watch here records.
+    fn recovered_row(
+        &self,
+        binding: &BindingChange,
+        previous: &ScanSnapshot,
+        current: &ScanSnapshot,
+    ) -> Option<ActivityEvent> {
+        let path = paths::normalize(&binding.path.to_string_lossy());
+        if self.excluded(&path) {
+            return None;
+        }
+        let allocated = |snapshot: &ScanSnapshot, at: &Path| {
+            snapshot
+                .entries
+                .get(at)
+                .and_then(|entry| entry.allocated_bytes)
+                .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))
+        };
+        let gained = allocated(current, &binding.path);
+        let lost = allocated(
+            previous,
+            binding.previous_path.as_deref().unwrap_or(&binding.path),
+        );
+        Some(ActivityEvent {
+            kind: match binding.kind {
+                BindingChangeKind::Created | BindingChangeKind::HardLinkAdded => {
+                    EventKind::Created
+                }
+                BindingChangeKind::Removed | BindingChangeKind::HardLinkRemoved => {
+                    EventKind::Deleted
+                }
+                BindingChangeKind::Replaced => EventKind::Modified,
+                BindingChangeKind::Renamed => EventKind::Moved,
+            },
+            path,
+            root_path: self.scope.clone(),
+            // Now, not when it happened: the whole point of a gap is that
+            // nobody knows when inside it anything happened.
+            timestamp: SystemTime::now(),
+            byte_delta: match (gained, lost) {
+                (None, None) => None,
+                (gained, lost) => Some(gained.unwrap_or(0) - lost.unwrap_or(0)),
+            },
+            confidence: Confidence::Estimated,
+            previous_path: binding
+                .previous_path
+                .as_ref()
+                .map(|at| paths::normalize(&at.to_string_lossy())),
+            affected_item_count: 1,
+            process_name: None,
+        })
     }
 
     /// Storage first, then the noise patterns. The two are not the same kind
@@ -234,7 +382,17 @@ impl Worker {
         }
         let events = attributor.process(pending);
         pending.clear();
-        let failure = self.storage.record(events.clone()).err();
+        self.publish(events, dropped);
+    }
+
+    /// Journal first, then the screen. A row on screen that was never written
+    /// is the difference between a record and a display nobody can get back.
+    fn publish(&self, events: Vec<ActivityEvent>, dropped: u64) {
+        let failure = if events.is_empty() {
+            None
+        } else {
+            self.storage.record(events.clone()).err()
+        };
 
         let mut live = self.live();
         live.dropped += dropped;
@@ -407,5 +565,82 @@ mod tests {
             "the stale row survived: {journal}"
         );
         assert!(journal.contains("now.txt"), "journal was {journal:?}");
+    }
+
+    /// The gap path, driven directly: a baseline, then changes the watcher
+    /// never reported, then the reconciliation. What the kernel does under
+    /// load cannot be provoked from a test, so the seam is called by hand —
+    /// but everything under it is the real scan, the real comparison and the
+    /// real journal.
+    #[test]
+    fn a_gap_becomes_a_list_of_what_actually_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        fs::write(root.join("gone.bin"), vec![0u8; 8 * 1024]).unwrap();
+        let scope = paths::normalize(&root.to_string_lossy());
+        let worker = Worker {
+            exclusions: ExclusionFilter::new(DEFAULT_PATTERNS, &scope).unwrap(),
+            scope,
+            storage: Storage::at(storage_dir.path()),
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
+            &worker.scope,
+            &worker.live,
+        )));
+        assert!(
+            baseline.lock().unwrap().is_some(),
+            "no baseline: {:?}",
+            worker.live().error
+        );
+
+        fs::write(root.join("arrived.bin"), vec![7u8; 16 * 1024]).unwrap();
+        fs::write(root.join(".DS_Store"), b"finder").unwrap();
+        fs::remove_file(root.join("gone.bin")).unwrap();
+        worker.reconcile(&baseline);
+
+        let live = worker.live();
+        let recovered: Vec<(&str, Option<i64>)> = live
+            .rows
+            .iter()
+            .map(|row| (row.path.as_str(), row.byte_delta))
+            .collect();
+        assert_eq!(live.gaps, 1);
+        assert_eq!(live.recovered, 2, "recovered: {recovered:?}");
+        let arrived = live
+            .rows
+            .iter()
+            .find(|row| row.path.ends_with("arrived.bin"))
+            .unwrap_or_else(|| panic!("the new file was not recovered: {recovered:?}"));
+        assert_eq!(arrived.kind, EventKind::Created);
+        assert!(arrived.byte_delta.unwrap_or(0) > 0);
+        // A comparison is not an observation, whatever the sizes say.
+        assert_eq!(arrived.confidence, Confidence::Estimated);
+        let gone = live
+            .rows
+            .iter()
+            .find(|row| row.path.ends_with("gone.bin"))
+            .unwrap_or_else(|| panic!("the deletion was not recovered: {recovered:?}"));
+        assert_eq!(gone.kind, EventKind::Deleted);
+        assert!(gone.byte_delta.unwrap_or(0) < 0);
+        assert!(
+            !recovered.iter().any(|(path, _)| path.contains(".DS_Store")),
+            "excluded noise was recovered too: {recovered:?}"
+        );
+        drop(live);
+
+        // The next gap compares against what the last one found, not against
+        // a baseline from before it.
+        fs::write(root.join("later.bin"), b"more").unwrap();
+        worker.reconcile(&baseline);
+        let live = worker.live();
+        assert_eq!(live.recovered, 3, "rows: {:#?}", live.rows);
+
+        let journal = fs::read_to_string(Storage::at(storage_dir.path()).journal()).unwrap();
+        assert!(journal.contains("arrived.bin"), "journal was {journal:?}");
+        assert!(journal.contains("later.bin"), "journal was {journal:?}");
     }
 }
