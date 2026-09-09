@@ -19,6 +19,7 @@ permission boundaries and acceptance gates are in
 | Linux | notify/inotify with Pathlight cookie pairing | Observed rename halves are paired; no persistent cursor or process identity; per-directory watches, registration races and overflow remain. Hitting `fs.inotify.max_user_watches` is reported by name and current value rather than as "No space left on device". |
 | Linux, privileged | `src/fanotify.rs`, opt-in with `PATHLIGHT_PRIVILEGED_WATCH=1` and `CAP_SYS_ADMIN` | One `FAN_MARK_FILESYSTEM` mark instead of per-directory watches, so no watch limit and no registration race, and each change names the writing process. Still no persistent cursor, and queue overflow is reported as a gap. Renames are paired by the kernel where `FAN_RENAME` exists (Linux 5.17); on older kernels the two halves are reported and `pairs_renames` says so. Events arrive for the whole filesystem and are filtered to the root. |
 | Windows | notify/ReadDirectoryChangesW | Recursive event delivery without polling; separate rename halves; no persistent cursor or process identity. |
+| Windows, privileged | `src/usn.rs`, opt-in with `PATHLIGHT_PRIVILEGED_WATCH=1` and an administrator token | The volume's own NTFS change journal: one handle covers the whole volume with no per-directory buffer to overrun, and the USN it numbers records with is monotonic and survives a reboot, so a stored cursor really resumes — the only Windows source where a restart can replay what it missed. A cursor the journal no longer covers is reported as a gap rather than replayed from the middle. Renames are paired by file reference number. USN carries no pid, so `reports_process` stays false. Records arrive for the whole volume and are filtered to the root; a root on a drive with no journal (exFAT, a network share) falls back to `ReadDirectoryChangesW`. |
 | Android | Rust inotify route compiles for Android | No Android host yet. Compiling the core does not prove storage access, background lifetime or cross-app event coverage on a device. |
 | iOS | No monitoring host | Plan a desktop-history viewer and explicitly scoped foreground features; no public API for an arbitrary system-wide privileged monitor. |
 
@@ -147,10 +148,13 @@ its journal outside the standard layout has to remove that path itself.
    helper with its own privilege boundary instead of the whole app running as
    root. Whole-filesystem marks remove per-directory watch registration, not
    every limit or coverage gap.
-3. Windows: add an optional USN reader for persistent recovery on supported local
-   volumes, with journal identity/cursor validation and a file-reference/path
-   index. Keep ReadDirectoryChangesW for ordinary live watches. USN does not
-   identify the writing process; evaluate ETW separately if needed.
+3. Windows: the USN reader is implemented in-process (`src/usn.rs`) with journal
+   identity and cursor validation, and CI runs the watcher contract twice, the
+   second pass on an elevated runner. What is still missing before it can be the
+   default for a root: the measurements below, a path index instead of resolving
+   each parent reference on demand, volume-arrival/removal handling, and a
+   helper holding the administrator boundary instead of the whole app. USN does
+   not identify the writing process; evaluate ETW separately if needed.
 4. macOS: pursue the Endpoint Security entitlement and prototype notification
    events for kernel process attribution. Keep FSEvents replay and reconciliation
    available; detect ES sequence gaps and avoid synchronous authorization events

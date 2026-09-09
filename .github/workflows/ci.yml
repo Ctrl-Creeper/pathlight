@@ -41,6 +41,14 @@ jobs:
           binary=$(cargo test --test monitor --no-run --message-format=json \
             | python3 -c 'import json,sys; print(next(json.loads(line)["executable"] for line in sys.stdin if line.startswith("{") and json.loads(line).get("executable") and json.loads(line)["target"]["name"] == "monitor"))')
           sudo PATHLIGHT_PRIVILEGED_WATCH=1 "$binary" --test-threads=1
+      # The change journal needs a volume handle, which only an administrator
+      # can open. Hosted Windows runners already run elevated, so this is the
+      # same second pass as above with no escalation step.
+      - name: Watcher contract as administrator (USN journal)
+        if: runner.os == 'Windows'
+        env:
+          PATHLIGHT_PRIVILEGED_WATCH: '1'
+        run: cargo test --test monitor -- --test-threads=1
 
   desktop-shell:
     name: Desktop shell (${{ matrix.os }})

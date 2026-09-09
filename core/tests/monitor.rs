@@ -494,6 +494,33 @@ fn a_process_holding_the_capability_gets_the_privileged_backend() {
     );
 }
 
+/// The same argument on Windows: with no journal every capability-gated test
+/// passes by returning early, and only `resumable_cursor` tells the two
+/// Windows backends apart — `ReadDirectoryChangesW` has no cursor to resume
+/// from. The GitHub-hosted runner is already elevated, so CI reaches this.
+#[cfg(windows)]
+#[test]
+fn an_administrator_gets_the_change_journal() {
+    if std::env::var_os("PATHLIGHT_PRIVILEGED_WATCH").is_none() {
+        return;
+    }
+    // The handle the journal needs: opening a volume device is what requires
+    // administrator, so this asks the question the backend asks.
+    let directory = std::env::current_dir().expect("a working directory");
+    let Some(drive) = directory.to_string_lossy().chars().next() else {
+        return;
+    };
+    if std::fs::File::open(format!(r"\\.\{drive}:")).is_err() {
+        return;
+    }
+    assert!(
+        watcher_capabilities().resumable_cursor,
+        "the volume opened as administrator and the journal still did not come \
+         up; if this drive is not NTFS that is the reason: {:?}",
+        watcher_capabilities()
+    );
+}
+
 /// Holds a backend to its own `reports_process` claim. A watch that says it
 /// names the writer and then reports nothing would have the host show an empty
 /// column forever, which is worse than admitting the platform cannot tell.

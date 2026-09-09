@@ -26,6 +26,8 @@ pub mod paths;
 pub mod recording;
 pub mod snapshot;
 pub mod uninstall;
+#[cfg(windows)]
+mod usn;
 
 pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};
 pub use event::{ActivityEvent, Confidence, EventKind};

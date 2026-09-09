@@ -181,12 +181,39 @@ mod platform {
     };
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(windows)))]
 mod platform {
     pub(crate) use crate::notify_backend::start;
 
     pub(crate) fn capabilities() -> super::Capabilities {
         crate::notify_backend::CAPABILITIES
+    }
+}
+
+/// Windows has two answers for the same reason Linux does, and one more
+/// wrinkle: the change journal belongs to a volume, so a root on a drive
+/// without one falls back even in a process that could have read it.
+#[cfg(windows)]
+mod platform {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{Backend, Capabilities, Emitter};
+    use crate::CoreError;
+
+    pub(crate) fn capabilities() -> Capabilities {
+        crate::usn::capabilities().unwrap_or(crate::notify_backend::CAPABILITIES)
+    }
+
+    pub(crate) fn start(
+        emitter: Arc<Emitter>,
+        since_event_id: Option<u64>,
+        latency: Duration,
+    ) -> Result<Box<dyn Backend>, CoreError> {
+        if let Some(backend) = crate::usn::start(Arc::clone(&emitter), since_event_id) {
+            return Ok(backend);
+        }
+        crate::notify_backend::start(emitter, since_event_id, latency)
     }
 }
 
