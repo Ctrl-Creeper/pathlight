@@ -229,10 +229,12 @@ impl<'a> Attributor<'a> {
     }
 }
 
+/// Collapses a window's changes to their parent directory, dropping the file
+/// names along with them — including a change that is alone in its window.
+/// Keeping the full path in that case would make the setting hold only for
+/// folders busy enough to have something to merge with, which is not what
+/// "do not record file names" means.
 fn aggregate_group(mut events: Vec<ActivityEvent>) -> ActivityEvent {
-    if events.len() == 1 {
-        return events.remove(0);
-    }
     events.sort_by(|lhs, rhs| {
         lhs.timestamp
             .cmp(&rhs.timestamp)

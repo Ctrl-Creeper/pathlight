@@ -108,7 +108,11 @@ fn aggregates_same_parent_inside_window() {
     assert_eq!(events[0].path, format!("{ROOT}/a"));
     assert_eq!(events[0].affected_item_count, 2);
     assert_eq!(events[0].byte_delta, Some(2 * 1024 * 1024 * 20));
-    assert_eq!(events[1].kind, EventKind::Created);
+    // `b/3.bin` is alone under its parent and still collapses: the setting is
+    // about the path, not about how busy the folder was.
+    assert_eq!(events[1].kind, EventKind::Aggregate);
+    assert_eq!(events[1].path, format!("{ROOT}/b"));
+    assert_eq!(events[1].affected_item_count, 1);
 }
 
 #[test]
@@ -229,4 +233,31 @@ fn baselines_are_per_watch_not_per_path() {
         Some(2_048),
         "one watch consuming its baseline must not blind the other"
     );
+}
+
+/// With names switched off, a window holding one change still has to collapse.
+/// The path is the whole disclosure, so a threshold on how busy the folder was
+/// is not a privacy rule.
+#[test]
+fn a_lone_change_loses_its_file_name_too() {
+    let size = |_: &str| Some(4096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 0,
+            aggregation_window_secs: 300,
+            records_file_names: false,
+        },
+        &size,
+        &none,
+        &none,
+    );
+
+    let events = attributor.process(&[change(ChangeKind::Created, "secret-report.pdf", 1)]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Aggregate);
+    assert_eq!(events[0].path, ROOT, "the file name survived the setting");
+    assert_eq!(events[0].byte_delta, Some(4096));
+    assert_eq!(events[0].affected_item_count, 1);
 }
