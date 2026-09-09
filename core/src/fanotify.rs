@@ -26,14 +26,20 @@ use crate::monitor::{Backend, Capabilities, ChangeKind, Emitter, StreamEvent};
 use crate::notify_backend::RootIdentity;
 use crate::CoreError;
 
-/// fanotify hands out no cursor and no rename cookie, drops events when its
-/// queue fills, and is the only Linux source that names a process.
-pub(crate) const CAPABILITIES: Capabilities = Capabilities {
-    resumable_cursor: false,
-    pairs_renames: false,
-    reports_process: true,
-    may_drop_events: true,
-};
+/// fanotify hands out no cursor, drops events when its queue fills, and is the
+/// only Linux source that names a process. Whether it pairs renames is the
+/// kernel's answer, not ours.
+pub(crate) fn capabilities() -> Option<Capabilities> {
+    if !requested() {
+        return None;
+    }
+    Some(Capabilities {
+        resumable_cursor: false,
+        pairs_renames: profile()? & FAN_RENAME != 0,
+        reports_process: true,
+        may_drop_events: true,
+    })
+}
 
 const FAN_CLOEXEC: c_uint = 0x0000_0001;
 const FAN_CLASS_NOTIF: c_uint = 0x0000_0000;
@@ -52,13 +58,19 @@ const FAN_MOVED_TO: u64 = 0x0000_0080;
 const FAN_CREATE: u64 = 0x0000_0100;
 const FAN_DELETE: u64 = 0x0000_0200;
 const FAN_Q_OVERFLOW: u64 = 0x0000_4000;
+const FAN_RENAME: u64 = 0x1000_0000;
 const FAN_ONDIR: u64 = 0x4000_0000;
-const WATCHED: u64 =
-    FAN_MODIFY | FAN_ATTRIB | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_CREATE | FAN_DELETE | FAN_ONDIR;
+const WATCHED: u64 = FAN_MODIFY | FAN_ATTRIB | FAN_CREATE | FAN_DELETE | FAN_ONDIR;
+/// Linux 5.17 reports both sides of a rename in one event. Older kernels only
+/// have the two halves, which nothing on the fanotify side can pair: there is
+/// no cookie. Asking for both would report every rename twice.
+const HALVES: u64 = FAN_MOVED_FROM | FAN_MOVED_TO;
 
 const FAN_EVENT_INFO_TYPE_FID: u8 = 1;
 const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
 const FAN_EVENT_INFO_TYPE_DFID: u8 = 3;
+const FAN_EVENT_INFO_TYPE_OLD_DFID_NAME: u8 = 10;
+const FAN_EVENT_INFO_TYPE_NEW_DFID_NAME: u8 = 12;
 
 const AT_FDCWD: c_int = -100;
 const O_RDONLY: c_int = 0;
@@ -146,14 +158,14 @@ fn group() -> std::io::Result<Fd> {
     Ok(Fd(fd))
 }
 
-fn mark(group: &Fd, root: &Path) -> std::io::Result<()> {
+fn mark(group: &Fd, root: &Path, mask: u64) -> std::io::Result<()> {
     let path = CString::new(root.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let marked = unsafe {
         fanotify_mark(
             group.0,
             FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-            WATCHED,
+            mask,
             AT_FDCWD,
             path.as_ptr(),
         )
@@ -172,7 +184,39 @@ fn mark(group: &Fd, root: &Path) -> std::io::Result<()> {
 /// first syscall would promise a backend that cannot start. The probe marks
 /// `/`, which closing the group immediately undoes.
 pub(crate) fn available() -> bool {
-    group().is_ok_and(|group| mark(&group, Path::new("/")).is_ok())
+    requested() && profile().is_some()
+}
+
+/// Whether this run asked for the privileged watch.
+///
+/// PRIVILEGED_BACKENDS.md gates defaulting a root to a privileged source on
+/// power and accuracy measurements that do not exist yet, and one filesystem
+/// mark wakes this process for writes anywhere on the volume. "Monitoring
+/// stays cheap" is a promise, so the backend that could break it is asked for
+/// rather than assumed — by the privileged entry point, which is the only
+/// place it can work at all.
+fn requested() -> bool {
+    std::env::var_os("PATHLIGHT_PRIVILEGED_WATCH").is_some_and(|value| value == "1")
+}
+
+/// The event mask this kernel accepts, or `None` when fanotify is out of
+/// reach. `FAN_RENAME` is the difference between one rename and two loose
+/// halves, and an older kernel rejects the whole mark rather than the one bit,
+/// so it is asked for first and dropped if refused.
+fn profile() -> Option<u64> {
+    // Probed once per process. A host asks what its watcher promises while
+    // drawing a label, and two syscalls per frame is not the price of a label.
+    // ponytail: no re-probe. Nothing in the product gains or drops
+    // CAP_SYS_ADMIN mid-run; a helper that could would call this on start.
+    static PROFILE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *PROFILE.get_or_init(probe)
+}
+
+fn probe() -> Option<u64> {
+    let group = group().ok()?;
+    [WATCHED | FAN_RENAME, WATCHED | HALVES]
+        .into_iter()
+        .find(|mask| mark(&group, Path::new("/"), *mask).is_ok())
 }
 
 pub(crate) fn start(
@@ -180,8 +224,11 @@ pub(crate) fn start(
     since_event_id: Option<u64>,
     _latency: Duration,
 ) -> Result<Box<dyn Backend>, CoreError> {
+    let mask = profile().ok_or_else(|| CoreError::Watch {
+        message: "fanotify is not available to this process".to_owned(),
+    })?;
     let group = group()?;
-    mark(&group, Path::new(&emitter.root))?;
+    mark(&group, Path::new(&emitter.root), mask)?;
     // Any descriptor on the same filesystem resolves the handles the kernel
     // reports; the root is the one we already know is there.
     let root_path = CString::new(emitter.root.as_bytes())
@@ -351,6 +398,16 @@ impl Watch {
                 });
                 continue;
             }
+            if meta.mask & FAN_RENAME != 0 {
+                self.publish_rename(
+                    event,
+                    meta.metadata_len as usize,
+                    meta.pid,
+                    event_id,
+                    process,
+                );
+                continue;
+            }
             let Some(path) = self.path_of(
                 event,
                 meta.metadata_len as usize,
@@ -387,6 +444,71 @@ impl Watch {
                     .named_change(kind, path.clone(), name.clone(), *event_id);
             }
         }
+    }
+
+    /// A kernel that supports `FAN_RENAME` reports both sides of a move in one
+    /// event, as an old and a new directory-handle-plus-name record. That is a
+    /// pairing fanotify cannot do afterwards, since it has no rename cookie —
+    /// so an event missing either side is a gap, not half a rename.
+    fn publish_rename(
+        &self,
+        event: &[u8],
+        metadata_len: usize,
+        pid: i32,
+        event_id: &mut u64,
+        process: &mut Process,
+    ) {
+        let from = self.side(event, metadata_len, FAN_EVENT_INFO_TYPE_OLD_DFID_NAME);
+        let to = self.side(event, metadata_len, FAN_EVENT_INFO_TYPE_NEW_DFID_NAME);
+        *event_id += 1;
+        let (Some(from), Some(to)) = (from, to) else {
+            return self.emitter.emit(StreamEvent::RequiresRescan {
+                event_id: *event_id,
+            });
+        };
+        // A move out of the root is a departure the host still has to see, and
+        // one in is an arrival; only a move that touches this root at all is
+        // ours to report.
+        let (inside_from, inside_to) = (self.inside(&from), self.inside(&to));
+        let (Some(from), Some(to)) = (from.to_str(), to.to_str()) else {
+            return self.emitter.emit(StreamEvent::RequiresRescan {
+                event_id: *event_id,
+            });
+        };
+        let name = process.name(pid);
+        match (inside_from, inside_to) {
+            (_, true) => self.emitter.named_change(
+                ChangeKind::Renamed {
+                    previous_path: Some(crate::paths::normalize(from)),
+                },
+                to.to_owned(),
+                name,
+                *event_id,
+            ),
+            (true, false) => {
+                self.emitter
+                    .named_change(ChangeKind::Deleted, from.to_owned(), name, *event_id)
+            }
+            (false, false) => *event_id -= 1,
+        }
+    }
+
+    /// One named record of a given type.
+    fn side(&self, event: &[u8], metadata_len: usize, wanted: u8) -> Option<PathBuf> {
+        let mut at = metadata_len;
+        while at + mem::size_of::<InfoHeader>() <= event.len() {
+            let header: InfoHeader =
+                unsafe { ptr::read_unaligned(event[at..].as_ptr() as *const InfoHeader) };
+            let len = header.len as usize;
+            if len < mem::size_of::<InfoHeader>() || at + len > event.len() {
+                return None;
+            }
+            if header.info_type == wanted {
+                return self.resolve(&event[at..at + len], true);
+            }
+            at += len;
+        }
+        None
     }
 
     /// Which record names the changed object depends on the event: a created

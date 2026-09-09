@@ -40,7 +40,7 @@ jobs:
         run: |
           binary=$(cargo test --test monitor --no-run --message-format=json \
             | python3 -c 'import json,sys; print(next(json.loads(line)["executable"] for line in sys.stdin if line.startswith("{") and json.loads(line).get("executable") and "monitor" in json.loads(line)["target"]["name"]))')
-          sudo "$binary" --test-threads=1
+          sudo PATHLIGHT_PRIVILEGED_WATCH=1 "$binary" --test-threads=1
 
   desktop-shell:
     name: Desktop shell (${{ matrix.os }})

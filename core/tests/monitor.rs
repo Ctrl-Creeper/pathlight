@@ -475,6 +475,9 @@ fn a_process_holding_the_capability_gets_the_privileged_backend() {
     // CAP_SYS_ADMIN is bit 21 of the effective set. Reading it beats checking
     // for uid 0: a container can be root with the capability dropped, and
     // then the unprivileged backend is the correct answer.
+    if std::env::var_os("PATHLIGHT_PRIVILEGED_WATCH").is_none() {
+        return;
+    }
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let effective = status
         .lines()

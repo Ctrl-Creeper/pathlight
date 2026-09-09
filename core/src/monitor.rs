@@ -203,11 +203,7 @@ mod platform {
     use crate::CoreError;
 
     pub(crate) fn capabilities() -> Capabilities {
-        if crate::fanotify::available() {
-            crate::fanotify::CAPABILITIES
-        } else {
-            crate::notify_backend::CAPABILITIES
-        }
+        crate::fanotify::capabilities().unwrap_or(crate::notify_backend::CAPABILITIES)
     }
 
     pub(crate) fn start(
