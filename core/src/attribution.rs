@@ -72,6 +72,14 @@ impl SizeIndex {
     pub fn take(&self, scope: &str, path: &str) -> Option<i64> {
         self.sizes.lock().unwrap().remove(&key(scope, path))
     }
+
+    /// The last size recorded for `path` in `scope`, left in place. `take` is
+    /// for a path that is gone; a file that was merely modified still needs
+    /// its baseline afterwards, or the next change reports the whole file
+    /// again instead of what was added to it.
+    pub fn peek(&self, scope: &str, path: &str) -> Option<i64> {
+        self.sizes.lock().unwrap().get(&key(scope, path)).copied()
+    }
 }
 
 /// A newline cannot appear in a scope, so no scope can spell another one's key.

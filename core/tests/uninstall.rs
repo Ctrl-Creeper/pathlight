@@ -138,3 +138,48 @@ fn removal_reports_what_survived_instead_of_claiming_success() {
     assert!(!data.exists());
     assert!(!journal.exists());
 }
+
+/// The whole point of `data_dir`: a host writes there, and the uninstall list
+/// has to name it. If these two ever disagree, uninstall reports success while
+/// leaving the journal behind, and nobody finds out by reading either one.
+#[test]
+fn the_directory_a_host_writes_to_is_always_on_the_removal_list() {
+    let home = Path::new("/home/tester");
+    let cases: [&[(&str, &str)]; 3] = [
+        &[],
+        &[("XDG_DATA_HOME", "/data/x"), ("LOCALAPPDATA", "D:/Local")],
+        &[("XDG_DATA_HOME", "relative/ignored"), ("APPDATA", "")],
+    ];
+    for pairs in cases {
+        let target = spellings(&[uninstall::data_dir(home, env(pairs))]);
+        assert!(
+            spellings(&uninstall::paths(home, env(pairs))).contains(&target[0]),
+            "{:?} is written but never removed with {pairs:?}",
+            target[0]
+        );
+    }
+}
+
+/// Each layout's data directory, checked on every host rather than only where
+/// it ships. Roaming is the wrong home for a journal about this disk.
+#[test]
+fn every_layout_puts_the_journal_in_its_platforms_local_place() {
+    let home = Path::new("/home/tester");
+    let vars = env(&[("APPDATA", "D:/Roaming"), ("LOCALAPPDATA", "D:/Local")]);
+    assert_eq!(
+        spellings(&[uninstall::windows_data_dir(home, &vars)]),
+        ["D:/Local/Pathlight"]
+    );
+    assert_eq!(
+        spellings(&uninstall::windows_paths(home, &vars)),
+        ["D:/Roaming/Pathlight", "D:/Local/Pathlight"]
+    );
+    assert_eq!(
+        spellings(&[uninstall::xdg_data_dir(home, env(&[]))]),
+        ["/home/tester/.local/share/pathlight"]
+    );
+    assert_eq!(
+        spellings(&[uninstall::macos_data_dir(home)]),
+        ["/home/tester/Library/Application Support/Pathlight"]
+    );
+}
