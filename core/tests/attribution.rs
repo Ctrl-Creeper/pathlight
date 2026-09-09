@@ -16,6 +16,7 @@ fn change(kind: ChangeKind, name: &str, seconds: u64) -> Change {
         path: format!("{ROOT}/{name}"),
         root_path: ROOT.into(),
         timestamp: UNIX_EPOCH + Duration::from_secs(seconds),
+        process_name: None,
     }
 }
 

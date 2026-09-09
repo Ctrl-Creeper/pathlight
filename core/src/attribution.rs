@@ -188,7 +188,7 @@ impl<'a> Attributor<'a> {
             confidence,
             previous_path,
             affected_item_count: 1,
-            process_name: None,
+            process_name: change.process_name.clone(),
         };
         let sized = |kind, previous_path: Option<String>| {
             let known = (self.known_size)(&change.path);
@@ -306,7 +306,13 @@ fn aggregate_group(mut events: Vec<ActivityEvent>) -> ActivityEvent {
         confidence,
         previous_path: None,
         affected_item_count: events.iter().map(|event| event.affected_item_count).sum(),
-        process_name: None,
+        // One writer only when every change in the group came from the same
+        // program. A mixed group has no single program to name.
+        process_name: events[0].process_name.clone().filter(|name| {
+            events
+                .iter()
+                .all(|event| event.process_name.as_deref() == Some(name.as_str()))
+        }),
     }
 }
 

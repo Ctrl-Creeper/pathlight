@@ -3,7 +3,8 @@
 //!
 //! macOS uses FSEvents directly (real event IDs, resumable via `since_event_id`);
 //! other platforms use `notify` (inotify / ReadDirectoryChangesW) with a
-//! process-local counter.
+//! process-local counter. A privileged Linux process gets fanotify instead,
+//! which covers a whole filesystem with one mark and names the writer.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -24,6 +25,11 @@ pub struct Change {
     pub path: String,
     pub root_path: String,
     pub timestamp: SystemTime,
+    /// The program that caused this change, where the backend knows. Only a
+    /// privileged Linux watch does today, and `Capabilities::reports_process`
+    /// says so before a watch starts, so a host never has to guess whether
+    /// `None` means "nobody" or "this platform cannot tell".
+    pub process_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
@@ -69,7 +75,7 @@ pub struct Capabilities {
 /// cursor is worth trusting.
 #[uniffi::export]
 pub fn watcher_capabilities() -> Capabilities {
-    platform::CAPABILITIES
+    platform::capabilities()
 }
 
 pub(crate) trait Backend: Send {
@@ -88,12 +94,23 @@ impl Emitter {
     }
 
     pub fn change(&self, kind: ChangeKind, path: String, event_id: u64) {
+        self.named_change(kind, path, None, event_id);
+    }
+
+    pub fn named_change(
+        &self,
+        kind: ChangeKind,
+        path: String,
+        process_name: Option<String>,
+        event_id: u64,
+    ) {
         self.emit(StreamEvent::Change {
             change: Change {
                 kind,
                 path: crate::paths::normalize(&path),
                 root_path: self.root.clone(),
                 timestamp: SystemTime::now(),
+                process_name,
             },
             event_id,
         });
@@ -149,6 +166,10 @@ impl Drop for Watcher {
 mod platform {
     pub(crate) use crate::fsevents::start;
 
+    pub(crate) fn capabilities() -> super::Capabilities {
+        CAPABILITIES
+    }
+
     /// FSEvents hands out kernel event IDs and `fsevents.rs` pairs rename halves
     /// by inode. It never names a process, and it drops events when its queue
     /// overflows (reported as `MustScanSubDirs`).
@@ -160,7 +181,43 @@ mod platform {
     };
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 mod platform {
-    pub(crate) use crate::notify_backend::{start, CAPABILITIES};
+    pub(crate) use crate::notify_backend::start;
+
+    pub(crate) fn capabilities() -> super::Capabilities {
+        crate::notify_backend::CAPABILITIES
+    }
+}
+
+/// Linux is the one platform with two answers, and which one applies is a
+/// property of this process, not of this build: fanotify needs a capability
+/// that root has and a container may not. So both the declaration and the
+/// watch probe, and they agree because they ask the same question.
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{Backend, Capabilities, Emitter};
+    use crate::CoreError;
+
+    pub(crate) fn capabilities() -> Capabilities {
+        if crate::fanotify::available() {
+            crate::fanotify::CAPABILITIES
+        } else {
+            crate::notify_backend::CAPABILITIES
+        }
+    }
+
+    pub(crate) fn start(
+        emitter: Arc<Emitter>,
+        since_event_id: Option<u64>,
+        latency: Duration,
+    ) -> Result<Box<dyn Backend>, CoreError> {
+        if crate::fanotify::available() {
+            return crate::fanotify::start(emitter, since_event_id, latency);
+        }
+        crate::notify_backend::start(emitter, since_event_id, latency)
+    }
 }

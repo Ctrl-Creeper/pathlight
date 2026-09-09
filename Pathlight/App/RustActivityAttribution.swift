@@ -39,7 +39,10 @@ nonisolated final class RustActivityAttribution: ActivityAttributing, @unchecked
             kind: kind,
             path: change.path.path,
             rootPath: change.rootPath.path,
-            timestamp: change.timestamp
+            timestamp: change.timestamp,
+            // FSEvents never says who wrote; a privileged Linux watch does,
+            // and this bridge is macOS-only.
+            processName: nil
         )
     }
 
