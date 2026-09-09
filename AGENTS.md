@@ -4,7 +4,7 @@ This file tells coding agents how to work effectively in this repository.
 
 ## Purpose
 
-Pathlight is a native macOS folder-change monitor built in Swift and SwiftUI. This fork keeps only file-change monitoring (live watches, long-term watches, activity history); the original disk analyzer was removed. When developing Pathlight, prioritize Swift/SwiftUI best practices and modern code.
+Pathlight is a folder-change monitor. The macOS app is Swift and SwiftUI; `gui/` is a second host (Rust, egui) covering Windows and Linux from the same core. This fork keeps only file-change monitoring (live watches, long-term watches, activity history); the original disk analyzer was removed. When developing Pathlight, prioritize Swift/SwiftUI best practices and modern code.
 
 ## Commit Guidelines
 
@@ -25,6 +25,7 @@ Pathlight is a native macOS folder-change monitor built in Swift and SwiftUI. Th
 - App UI framework: SwiftUI (always preferred over UIKit/AppKit)
 - Tests: `PathlightCoreTests/`
 - Rust core: `core/` (cargo crate `pathlight-core`, UniFFI bindings; run `cargo test` inside `core/`). The macOS app links it for file watching (`Pathlight/App/RustDiskActivityMonitor.swift`); `cargo test` inside `core/` runs it, and `core/tests/monitor.rs` is the cross-platform watcher contract and `core/PLATFORMS.md` the per-OS route and privilege trade-offs. Each backend declares what it guarantees via `monitor::Capabilities` rather than every platform being forced to behave alike.
+- Desktop shell: `gui/` (cargo crate `pathlight-gui`, binary `pathlight`; run `cargo test` inside `gui/`). A separate crate, not a workspace member, so `core`'s CI and the xcframework pipeline stay untouched. Its interface tests drive the real widgets through accesskit, which is how a Windows window is checked without a Windows machine. `gui/src/store.rs` owns where it records and the rule that keeps every watch out of that directory.
 
 ## Project Structure
 
@@ -64,6 +65,7 @@ Pathlight makes several user-facing promises. Do not casually violate them:
 - Monitoring must stay cheap: wide FSEvents latency for background watches, no polling.
 - The app never mutates user files; it only reads and records.
 - Monitoring keeps running when the window closes or the user quits into the menu bar.
+- No watch ever records Pathlight's own storage. Enforced before attribution, in every host, and not a user setting.
 
 ## Working Agreement For Changes
 

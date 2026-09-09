@@ -21,6 +21,24 @@ permission boundaries and acceptance gates are in
 | Android | Rust inotify route compiles for Android | No Android host yet. Compiling the core does not prove storage access, background lifetime or cross-app event coverage on a device. |
 | iOS | No monitoring host | Plan a desktop-history viewer and explicitly scoped foreground features; no public API for an arbitrary system-wide privileged monitor. |
 
+## Hosts
+
+A backend is only half of a platform; something has to show it to a user.
+
+| Platform | Host | Source in the repository |
+|---|---|---|
+| macOS | SwiftUI app, menu bar extra, full history and dashboard | `Pathlight/` |
+| Windows, Linux | One window: folders, live watches, attributed changes | `gui/` (egui, links this crate directly) |
+| any | `pathlight-monitor`, one recorded session to a JSONL journal | `src/bin/pathlight-monitor.rs` |
+
+Both windowed hosts write the same journal format to the directory
+`uninstall::data_dir` names, so either one reads the other's history and one
+uninstall finds both. Neither ever records inside that directory: the write
+produces an event, attribution measures the file, and measuring it writes
+again — a loop no byte threshold stops, because attribution runs before any
+threshold applies. `gui/src/store.rs` and the macOS `ActivityStorageIsolation`
+each hold that rule with the spelling their watcher reports, symlinks resolved.
+
 `monitor::Capabilities` describes the currently selected implementation.
 `pairs_renames` means ordinary observed halves can be paired within its matching
 window, not that cross-root moves, queue gaps or expired halves have both paths.
