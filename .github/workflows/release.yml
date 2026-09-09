@@ -42,25 +42,35 @@ jobs:
       - name: Build the recorder
         working-directory: core
         run: cargo build --release --bin pathlight-monitor
+      # Two archives per platform: the app, which bundles the command, and the
+      # command on its own. A server that will never open a window should not
+      # have to download a GPU-drawn one to record a folder.
       - name: Stage
         shell: bash
         run: |
           set -euo pipefail
-          dir="pathlight-${TAG}-${{ matrix.slug }}"
-          mkdir "$dir"
-          if [ "$RUNNER_OS" = Windows ]; then
-            cp gui/target/release/pathlight.exe core/target/release/pathlight-monitor.exe "$dir/"
-          else
-            cp gui/target/release/pathlight core/target/release/pathlight-monitor "$dir/"
-          fi
-          cp README.md core/PLATFORMS.md "$dir/"
-          echo "STAGED=$dir" >> "$GITHUB_ENV"
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          app="pathlight-${TAG}-${{ matrix.slug }}"
+          cli="pathlight-cli-${TAG}-${{ matrix.slug }}"
+          mkdir "$app" "$cli"
+          cp "gui/target/release/pathlight$exe" "$app/"
+          cp "core/target/release/pathlight-monitor$exe" "$app/"
+          cp "core/target/release/pathlight-monitor$exe" "$cli/"
+          cp README.md core/PLATFORMS.md "$app/"
+          cp core/PLATFORMS.md "$cli/"
+          echo "APP=$app" >> "$GITHUB_ENV"
+          echo "CLI=$cli" >> "$GITHUB_ENV"
       # `tar` and `Compress-Archive` ship with their platform; an archiver that
       # has to be installed first is a release step that fails on a bad day.
       - if: runner.os != 'Windows'
-        run: tar czf "$STAGED.tar.gz" "$STAGED"
+        run: |
+          tar czf "$APP.tar.gz" "$APP"
+          tar czf "$CLI.tar.gz" "$CLI"
       - if: runner.os == 'Windows'
-        run: Compress-Archive -Path "$env:STAGED" -DestinationPath "$env:STAGED.zip"
+        run: |
+          Compress-Archive -Path $env:APP -DestinationPath "$env:APP.zip"
+          Compress-Archive -Path $env:CLI -DestinationPath "$env:CLI.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.slug }}
@@ -95,13 +105,22 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          dir="pathlight-${TAG}-macos"
-          mkdir "$dir"
-          cp -R build/Build/Products/Release/Pathlight.app "$dir/"
-          cp core/target/release/pathlight-monitor README.md core/PLATFORMS.md "$dir/"
+          app="pathlight-${TAG}-macos"
+          cli="pathlight-cli-${TAG}-macos"
+          mkdir "$app" "$cli"
+          cp -R build/Build/Products/Release/Pathlight.app "$app/"
+          # Inside the bundle, not beside it: dragging the app to
+          # /Applications is the whole macOS install, and a loose binary next
+          # to it does not come along. `pathlight-monitor install-cli` from
+          # there puts it on a PATH. Nothing is signed in this pipeline, so
+          # there is no signature to invalidate.
+          cp core/target/release/pathlight-monitor "$app/Pathlight.app/Contents/MacOS/"
+          cp README.md core/PLATFORMS.md "$app/"
+          cp core/target/release/pathlight-monitor core/PLATFORMS.md "$cli/"
           # `ditto`, not `zip`: it is the one archiver that keeps a bundle's
           # symlinks and resource forks intact.
-          ditto -c -k --sequesterRsrc --keepParent "$dir" "$dir.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$cli" "$cli.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
