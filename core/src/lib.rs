@@ -25,7 +25,7 @@ pub mod recording;
 pub mod snapshot;
 pub mod uninstall;
 
-pub use attribution::{AggregationOptions, Attributor, SizeIndex};
+pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};
 pub use event::{ActivityEvent, Confidence, EventKind};
 pub use exclusion::ExclusionFilter;
 pub use history::{HistoryBucket, HistorySnapshot};

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::monitor::{Change, ChangeKind};
@@ -85,6 +85,45 @@ impl SizeIndex {
 /// A newline cannot appear in a scope, so no scope can spell another one's key.
 fn key(scope: &str, path: &str) -> String {
     format!("{scope}\n{path}")
+}
+
+/// The three size lookups attribution needs, implemented by the host.
+///
+/// A shell owns its own size index because that is storage policy, not
+/// attribution: the macOS app persists and encrypts one, so a long-term watch
+/// still has baselines after a relaunch. What the host must not own is the
+/// arithmetic below, which is the same on every platform.
+#[uniffi::export(with_foreign)]
+pub trait SizeLookup: Send + Sync {
+    /// Current allocated size. Implementations record it for later lookups.
+    fn size(&self, path: String) -> Option<i64>;
+    /// Last known size of a path that just vanished; consumed on use.
+    fn prior_size(&self, path: String) -> Option<i64>;
+    /// Last known size of a path that still exists, read before `size` so a
+    /// modification reports growth instead of the whole file again.
+    fn known_size(&self, path: String) -> Option<i64>;
+}
+
+/// [`Attributor`] for a host: the same logic, reached across the FFI.
+#[derive(uniffi::Object)]
+pub struct ActivityAttributor {
+    options: AggregationOptions,
+    sizes: Arc<dyn SizeLookup>,
+}
+
+#[uniffi::export]
+impl ActivityAttributor {
+    #[uniffi::constructor]
+    pub fn new(options: AggregationOptions, sizes: Arc<dyn SizeLookup>) -> Arc<Self> {
+        Arc::new(Self { options, sizes })
+    }
+
+    pub fn process(&self, changes: Vec<Change>) -> Vec<ActivityEvent> {
+        let size = |path: &str| self.sizes.size(path.to_owned());
+        let prior = |path: &str| self.sizes.prior_size(path.to_owned());
+        let known = |path: &str| self.sizes.known_size(path.to_owned());
+        Attributor::new(self.options, &size, &prior, &known).process(&changes)
+    }
 }
 
 pub type SizeProvider<'a> = dyn Fn(&str) -> Option<i64> + Send + Sync + 'a;

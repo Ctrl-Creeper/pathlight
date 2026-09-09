@@ -1,7 +1,11 @@
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use pathlight_core::monitor::{Change, ChangeKind};
-use pathlight_core::{AggregationOptions, Attributor, Confidence, EventKind, SizeIndex};
+use pathlight_core::{
+    ActivityAttributor, AggregationOptions, Attributor, Confidence, EventKind, SizeIndex,
+    SizeLookup,
+};
 
 const SCOPE: &str = "short-term:/Users/example/Downloads";
 const ROOT: &str = "/Users/example/Downloads";
@@ -260,4 +264,33 @@ fn a_lone_change_loses_its_file_name_too() {
     assert_eq!(events[0].path, ROOT, "the file name survived the setting");
     assert_eq!(events[0].byte_delta, Some(4096));
     assert_eq!(events[0].affected_item_count, 1);
+}
+
+/// The surface a host reaches over the FFI: same arithmetic, sizes supplied by
+/// the host because its index is storage policy (the macOS app persists and
+/// encrypts one). Three lookups is three chances to wire the wrong one.
+#[test]
+fn the_ffi_attributor_measures_through_the_hosts_lookups() {
+    struct HostSizes;
+    impl SizeLookup for HostSizes {
+        fn size(&self, _path: String) -> Option<i64> {
+            Some(5_000)
+        }
+        fn prior_size(&self, path: String) -> Option<i64> {
+            path.ends_with("gone.zip").then_some(2_048)
+        }
+        fn known_size(&self, path: String) -> Option<i64> {
+            path.ends_with("report.pdf").then_some(3_000)
+        }
+    }
+
+    let attributor = ActivityAttributor::new(AggregationOptions::SHORT_TERM, Arc::new(HostSizes));
+    let events = attributor.process(vec![
+        change(ChangeKind::Modified, "report.pdf", 1),
+        change(ChangeKind::Deleted, "gone.zip", 2),
+    ]);
+
+    let deltas: Vec<Option<i64>> = events.iter().map(|event| event.byte_delta).collect();
+    assert_eq!(deltas, [Some(2_000), Some(-2_048)]);
+    assert_eq!(events[0].path, format!("{ROOT}/report.pdf"));
 }
