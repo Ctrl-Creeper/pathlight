@@ -22,7 +22,11 @@ fn event(name: &str, days_ago: u64) -> ActivityEvent {
 }
 
 fn at(dir: &std::path::Path) -> std::sync::Arc<Journal> {
-    Journal::new(dir.join("activity-events.jsonl").to_string_lossy().into_owned())
+    Journal::new(
+        dir.join("activity-events.jsonl")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn lines(dir: &std::path::Path) -> Vec<String> {
@@ -56,7 +60,11 @@ fn a_cap_drops_the_oldest_until_the_file_fits() {
     let dir = tempfile::tempdir().unwrap();
     let journal = at(dir.path());
     journal
-        .append((0..10).map(|n| event(&format!("f{n}.bin"), 10 - n)).collect())
+        .append(
+            (0..10)
+                .map(|n| event(&format!("f{n}.bin"), 10 - n))
+                .collect(),
+        )
         .unwrap();
     let one_row = lines(dir.path())[0].len() as u64 + 1;
 

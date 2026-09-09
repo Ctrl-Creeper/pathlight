@@ -53,7 +53,6 @@ impl Journal {
         Ok(())
     }
 
-
     /// Drops rows that are older than `retention_days`, then, if the file
     /// still would not fit in `limit_bytes`, the oldest of what is left.
     /// Returns how many rows went. Zero means unlimited, for either.
@@ -168,7 +167,9 @@ fn dated(line: &str) -> Option<SystemTime> {
     if line.starts_with(ENCRYPTED_PREFIX) {
         return None;
     }
-    ActivityEvent::from_json_line(line).ok().map(|event| event.timestamp)
+    ActivityEvent::from_json_line(line)
+        .ok()
+        .map(|event| event.timestamp)
 }
 
 #[cfg(unix)]
