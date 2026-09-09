@@ -32,6 +32,39 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  desktop-shell:
+    name: Desktop shell (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+      # The windowing libraries eframe links against. Present on the macOS and
+      # Windows images already.
+      - name: Install Linux windowing libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # The interface tests drive the real widgets through accesskit, so this is
+      # where a Windows or Linux window is shown to work without one to look at.
+      - run: cargo test
+      # Release only here: it is the profile that ships, and the one where
+      # `windows_subsystem` decides whether a console window appears.
+      - if: runner.os == 'Windows'
+        run: cargo build --release
+
   swift-package:
     name: Swift package tests
     runs-on: macos-latest
