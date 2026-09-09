@@ -44,6 +44,7 @@ private enum SettingsTab: String {
 
 private struct GeneralSettingsPane: View {
     @EnvironmentObject private var appModel: AppModel
+    @State private var commandLineReport: String?
 
     var body: some View {
         Form {
@@ -67,12 +68,41 @@ private struct GeneralSettingsPane: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Command Line") {
+                Text("pathlight-monitor records a folder from a terminal and reads the same history this app does. Installing puts it in your own home directory — no administrator, nothing outside your account.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Install Command Line Tool") {
+                    commandLineReport = Self.installCommandLineTool()
+                }
+
+                if let commandLineReport {
+                    Text(commandLineReport)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Section("About") {
                 LabeledContent("Monitoring core", value: "Rust \(coreVersion())")
                 LabeledContent("Watcher guarantees", value: Self.watcherGuarantees)
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The command's own words, whether it worked or not: it knows where it
+    /// went and what a shell still needs, and this pane has no better sentence
+    /// than the one it prints — including the line to paste into a profile.
+    private static func installCommandLineTool() -> String {
+        do {
+            return try CommandLineToolInstaller.live.install()
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// What this platform's watcher promises. The guarantees differ per OS by

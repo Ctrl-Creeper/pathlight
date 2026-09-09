@@ -38,11 +38,38 @@ struct UninstallServiceTests {
             let path = item.standardizedFileURL.path
             #expect(
                 path == service.dataDirectory.standardizedFileURL.path
+                    || path == service.installedCommandURL.standardizedFileURL.path
                     || path.hasPrefix("/Users/tester/Library/"),
                 "\(path) is outside Pathlight's own storage"
             )
-            #expect(path.contains("Pathlight") || path.contains("com.example.Pathlight"))
+            #expect(path.lowercased().contains("pathlight"))
         }
+    }
+
+    /// The installed command is a symlink into the app bundle, and the bundle
+    /// is already in the Trash by the time removal reaches it. `fileExists`
+    /// answers for the target, so it would report the litter as absent.
+    @Test("a dangling symlink still counts as something to remove")
+    func seesALinkWhoseTargetIsGone() throws {
+        let home = URL(
+            filePath: "/tmp/pathlight-link-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let service = makeService(home: home)
+        let link = service.installedCommandURL
+        try FileManager.default.createDirectory(
+            at: link.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: home.appending(path: "Pathlight.app/Contents/MacOS/pathlight-monitor")
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: link.path), "the target is meant to be gone")
+        #expect(service.exists(link))
+        #expect(service.removableDataItems().contains(link))
     }
 
     /// The app bundle goes first precisely so this case exists: when it cannot

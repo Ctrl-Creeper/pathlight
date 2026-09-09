@@ -41,11 +41,20 @@ nonisolated struct UninstallService {
     var appBundleURL: URL? = Bundle.main.bundleURL
     var dataDirectory: URL = JSONLActivityEventStore.defaultJournalURL().deletingLastPathComponent()
 
+    /// The command `install-cli` puts in the user's own bin directory. Not
+    /// storage, but a binary left on somebody's `PATH` after an uninstall is
+    /// the one piece of litter nobody ever finds — and after the bundle is in
+    /// the Trash it is a dangling link to an app that is gone.
+    var installedCommandURL: URL {
+        home.appending(path: ".local/bin/pathlight-monitor")
+    }
+
     /// Everything Pathlight wrote outside the folders the user chose to watch.
     func removableDataItems() -> [URL] {
         let library = home.appending(path: "Library", directoryHint: .isDirectory)
         return [
             dataDirectory,
+            installedCommandURL,
             library.appending(path: "Preferences/\(bundleID).plist"),
             library.appending(path: "Caches/\(bundleID)", directoryHint: .isDirectory),
             library.appending(path: "HTTPStorages/\(bundleID)", directoryHint: .isDirectory),
@@ -94,7 +103,7 @@ nonisolated struct UninstallService {
         UserDefaults.standard.synchronize()
 
         let fileManager = FileManager.default
-        for item in removableDataItems() where fileManager.fileExists(atPath: item.path) {
+        for item in removableDataItems() where exists(item) {
             do {
                 try fileManager.removeItem(at: item)
             } catch {
@@ -112,6 +121,16 @@ nonisolated struct UninstallService {
         }
 
         return .removed(failures: failures)
+    }
+
+    /// Whether there is something here to remove, symlink or not.
+    ///
+    /// `fileExists` follows a symlink and answers for its target, so it says
+    /// "no" for the installed command the moment the app bundle it points at
+    /// reaches the Trash — which is the state this runs in, since the bundle
+    /// goes first. `attributesOfItem` asks about the link itself.
+    func exists(_ url: URL) -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
     }
 
     /// ponytail: the user's own Trash only. An app installed by another admin
