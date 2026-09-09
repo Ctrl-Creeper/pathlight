@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use pathlight_core::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
+use pathlight_core::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
 use pathlight_core::monitor::{ActivityListener, Change, StreamEvent, Watcher};
 use pathlight_core::{ActivityEvent, Journal};
 
@@ -71,6 +72,10 @@ pub struct Session {
 
 impl Session {
     pub fn start(root: &str, storage: Storage) -> Result<Self, String> {
+        // Built before the watch opens: a filter that failed to compile after
+        // events started arriving would record the noise it exists to drop.
+        let exclusions =
+            ExclusionFilter::new(DEFAULT_PATTERNS, root).map_err(|error| error.to_string())?;
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
@@ -88,6 +93,7 @@ impl Session {
         let worker = Worker {
             scope: root.to_owned(),
             storage,
+            exclusions,
             live: live.clone(),
             dropped,
         };
@@ -126,6 +132,12 @@ impl ActivityListener for QueueListener {
 struct Worker {
     scope: String,
     storage: Storage,
+    /// The noise nobody asked to be told about: `.DS_Store`, trashes,
+    /// caches, half-finished downloads.
+    // ponytail: the shipped defaults, not per-watch patterns. Add an editor
+    // and a list in `watches.json` when somebody needs a rule of their own;
+    // until then one list is the whole feature.
+    exclusions: Option<ExclusionFilter>,
     live: Arc<Mutex<Live>>,
     dropped: Arc<AtomicU64>,
 }
@@ -173,7 +185,7 @@ impl Worker {
     fn accept(&self, event: StreamEvent, pending: &mut Vec<Change>) {
         match event {
             StreamEvent::Change { change, .. } => {
-                if !self.storage.is_own(&change.path) {
+                if !self.excluded(&change.path) {
                     pending.push(change);
                 }
             }
@@ -182,6 +194,17 @@ impl Worker {
             StreamEvent::RequiresRescan { .. } => self.live().gaps += 1,
             StreamEvent::HistoryCaughtUp { .. } => {}
         }
+    }
+
+    /// Storage first, then the noise patterns. The two are not the same kind
+    /// of rule: the storage guard is what stops the feedback loop and is not
+    /// negotiable, the patterns are a convenience.
+    fn excluded(&self, path: &str) -> bool {
+        self.storage.is_own(path)
+            || self
+                .exclusions
+                .as_ref()
+                .is_some_and(|filter| filter.excludes(path))
     }
 
     fn flush(&self, attributor: &Attributor<'_>, journal: &Journal, pending: &mut Vec<Change>) {
@@ -302,5 +325,31 @@ mod tests {
             "Pathlight recorded its own storage: {:#?}",
             live.rows
         );
+    }
+
+    /// The noise the shipped patterns exist for. Written in the same batch as
+    /// an ordinary file, so a filter that dropped everything cannot pass:
+    /// `keep.txt` has to arrive, and the other two must not.
+    #[test]
+    fn the_noise_the_default_patterns_name_is_not_recorded() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let session = watch(root.path(), storage_dir.path());
+
+        fs::write(root.path().join(".DS_Store"), b"finder").unwrap();
+        fs::write(root.path().join("movie.mp4.crdownload"), b"half").unwrap();
+        fs::write(root.path().join("keep.txt"), b"hello").unwrap();
+
+        eventually(&session, "the ordinary file to be recorded", |live| {
+            live.rows.iter().any(|row| row.path.ends_with("keep.txt"))
+        });
+        let live = session.live();
+        let noise: Vec<&str> = live
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .filter(|path| path.contains(".DS_Store") || path.contains(".crdownload"))
+            .collect();
+        assert!(noise.is_empty(), "recorded excluded paths: {noise:?}");
     }
 }
