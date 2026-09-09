@@ -2,6 +2,7 @@ import Foundation
 
 struct LiveWatchSessionCoordinator: Sendable {
     private let monitor: any DiskActivityMonitoring
+    private let attribution: ActivityAttributionFactory
     private let processHints: (any ProcessHinting)?
 
     /// Minimum spacing between `lsof` snapshots while events are flowing.
@@ -11,9 +12,11 @@ struct LiveWatchSessionCoordinator: Sendable {
 
     init(
         monitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        attribution: @escaping ActivityAttributionFactory,
         processHints: (any ProcessHinting)? = nil
     ) {
         self.monitor = monitor
+        self.attribution = attribution
         self.processHints = processHints
     }
 
@@ -24,9 +27,7 @@ struct LiveWatchSessionCoordinator: Sendable {
         options: DiskActivityAggregationOptions = .default,
         monitorLatency: TimeInterval = 0.25,
         exclusionFilter: ActivityExclusionFilter? = nil,
-        sizeProvider: @escaping StorageAttributionService.SizeProvider,
-        priorSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil },
-        knownSizeProvider: @escaping StorageAttributionService.SizeProvider = { _ in nil }
+        sizeProviders: ActivitySizeProviders
     ) -> AsyncStream<WatchSessionModel> {
         let standardizedRoot = rootPath.standardizedFileURL
         return AsyncStream { continuation in
@@ -39,12 +40,7 @@ struct LiveWatchSessionCoordinator: Sendable {
                 )
                 continuation.yield(session)
 
-                let attributionService = StorageAttributionService(
-                    options: options,
-                    sizeProvider: sizeProvider,
-                    priorSizeProvider: priorSizeProvider,
-                    knownSizeProvider: knownSizeProvider
-                )
+                let attributionService = attribution(options, sizeProviders)
                 var hintCache: [String: String] = [:]
                 var lastHintSnapshotAt: Date?
                 for await streamEvent in monitor.events(for: standardizedRoot, since: sinceEventID, latency: monitorLatency) {

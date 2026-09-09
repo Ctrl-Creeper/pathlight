@@ -21,6 +21,7 @@ final class AppModelJournalTests: XCTestCase {
             dependencies: AppDependencies(
                 systemActions: .inert,
                 activityMonitor: monitor,
+                activityAttribution: stubActivityAttribution,
                 activitySizeProviders: { _ in
                     ActivitySizeProviders(
                         size: { sizes.next(for: $0) },

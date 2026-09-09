@@ -28,6 +28,7 @@ let package = Package(
                 "Shared"
             ],
             sources: [
+                "Services/ActivityAttribution.swift",
                 "Services/ActivityBaselineService.swift",
                 "Services/ActivityDashboardPresentation.swift",
                 "Services/ActivityEventStore.swift",
@@ -54,7 +55,6 @@ let package = Package(
                 "Services/MonitoringPresets.swift",
                 "Services/ProcessHintService.swift",
                 "Services/ScanExclusionMatcher.swift",
-                "Services/StorageAttributionService.swift",
                 "Services/SystemIntegration.swift",
                 "Services/UninstallService.swift",
                 "Services/WatchSessionModel.swift",

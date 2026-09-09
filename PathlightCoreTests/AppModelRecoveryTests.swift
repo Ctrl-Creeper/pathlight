@@ -351,6 +351,7 @@ final class AppModelRecoveryTests: XCTestCase {
         let model = AppModel(dependencies: AppDependencies(
             systemActions: .inert,
             activityMonitor: monitor,
+            activityAttribution: stubActivityAttribution,
             activitySizeProviders: { _ in ActivitySizeProviders(size: { _ in 4_096 }) },
             activityEventStore: eventStore,
             longTermWatchTargets: LongTermWatchTargetStore(persistence: persistence),

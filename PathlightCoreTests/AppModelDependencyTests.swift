@@ -12,7 +12,10 @@ final class AppModelDependencyTests: XCTestCase {
         let sizeIndex = ActivitySizeIndex()
         let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: root)
         sizeIndex.recordKnownSize(4_096, for: file, scope: scope)
-        let dependencies = AppDependencies.live(activitySizeIndex: sizeIndex)
+        let dependencies = AppDependencies.live(
+            activityAttribution: stubActivityAttribution,
+            activitySizeIndex: sizeIndex
+        )
 
         let baseline = await dependencies.activityBaselineService.captureBaseline(rootPath: root)
 
@@ -92,6 +95,7 @@ final class AppModelDependencyTests: XCTestCase {
     ) -> AppDependencies {
         AppDependencies(
             systemActions: .inert,
+            activityAttribution: stubActivityAttribution,
             activityEventStore: nil,
             longTermWatchTargets: longTermWatchTargets ?? LongTermWatchTargetStore(
                 persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())

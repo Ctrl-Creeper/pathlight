@@ -5,23 +5,13 @@
 
 import Foundation
 
-/// The three byte-attribution lookups one watch needs, already scoped to it.
-nonisolated struct ActivitySizeProviders: Sendable {
-    var size: StorageAttributionService.SizeProvider
-    var prior: StorageAttributionService.SizeProvider = { _ in nil }
-    var known: StorageAttributionService.SizeProvider = { _ in nil }
-
-    /// Stable scope for a watch: live and background watches over one root are
-    /// separate observers, so they must not share a baseline either.
-    nonisolated static func scope(kind: String, rootPath: URL) -> String {
-        "\(kind):\(rootPath.standardizedFileURL.path)"
-    }
-}
-
 @MainActor
 struct AppDependencies {
     var systemActions: AppSystemActions
     var activityMonitor: any DiskActivityMonitoring
+    /// Byte attribution for one watch. Lives in the Rust core, so only a host
+    /// that links it can supply one.
+    var activityAttribution: ActivityAttributionFactory
     /// Byte-attribution providers for one watch. Each watch asks for its own
     /// scope so overlapping watches cannot consume each other's measurements.
     var activitySizeProviders: @Sendable (_ scope: String) -> ActivitySizeProviders
@@ -39,6 +29,7 @@ struct AppDependencies {
     init(
         systemActions: AppSystemActions,
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activityAttribution: @escaping ActivityAttributionFactory,
         activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
             ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
         },
@@ -56,6 +47,7 @@ struct AppDependencies {
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
+        self.activityAttribution = activityAttribution
         self.activitySizeProviders = activitySizeProviders
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
@@ -69,9 +61,11 @@ struct AppDependencies {
     }
 
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
-    /// passes the Rust-backed monitor instead.
+    /// passes the Rust-backed monitor instead, and has to pass attribution
+    /// because this package holds no implementation of it.
     static func live(
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activityAttribution: @escaping ActivityAttributionFactory,
         activitySizeIndex: ActivitySizeIndex? = nil
     ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
@@ -82,6 +76,7 @@ struct AppDependencies {
         return AppDependencies(
             systemActions: .live,
             activityMonitor: activityMonitor,
+            activityAttribution: activityAttribution,
             activitySizeProviders: { scope in
                 ActivitySizeProviders(
                     size: { url in

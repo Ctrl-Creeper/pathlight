@@ -80,7 +80,9 @@ final class AppModel: ObservableObject {
     /// really unavailable and the user deserves to hear about it.
     private static let journalFlushFailureReportThreshold = 3
 
-    init(dependencies: AppDependencies = .live()) {
+    /// No default: a live `AppDependencies` needs an attributor, and only a
+    /// host that links the Rust core has one.
+    init(dependencies: AppDependencies) {
         self.dependencies = dependencies
 
         let activityStoragePreferences = dependencies.activityStoragePreferences.loadPreferences()
@@ -311,6 +313,7 @@ final class AppModel: ObservableObject {
         liveWatchTaskID = taskID
         let coordinator = LiveWatchSessionCoordinator(
             monitor: dependencies.activityMonitor,
+            attribution: dependencies.activityAttribution,
             processHints: dependencies.processHints
         )
         let sizeProviders = dependencies.activitySizeProviders(
@@ -330,9 +333,7 @@ final class AppModel: ObservableObject {
             let stream = coordinator.sessions(
                 rootPath: rootPath,
                 options: options,
-                sizeProvider: sizeProviders.size,
-                priorSizeProvider: sizeProviders.prior,
-                knownSizeProvider: sizeProviders.known
+                sizeProviders: sizeProviders
             )
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
@@ -994,6 +995,7 @@ final class AppModel: ObservableObject {
         )
         let coordinator = LiveWatchSessionCoordinator(
             monitor: dependencies.activityMonitor,
+            attribution: dependencies.activityAttribution,
             processHints: dependencies.processHints
         )
         let sizeProviders = dependencies.activitySizeProviders(
@@ -1029,9 +1031,7 @@ final class AppModel: ObservableObject {
                         patterns: currentTarget.options.exclusionPatterns,
                         rootPath: currentTarget.rootPath
                     ),
-                    sizeProvider: sizeProviders.size,
-                    priorSizeProvider: sizeProviders.prior,
-                    knownSizeProvider: sizeProviders.known
+                    sizeProviders: sizeProviders
                 )
                 var capturedInitialBaseline = false
                 var lastGapCount: UInt64 = 0

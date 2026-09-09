@@ -16,7 +16,8 @@ struct LiveWatchSessionCoordinatorTests {
             timestamp: Date(timeIntervalSince1970: 110)
         )
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 301)])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 301)]),
+            attribution: stubActivityAttribution
         )
 
         var iterator = coordinator.sessions(
@@ -27,9 +28,9 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            sizeProvider: { url in
+            sizeProviders: ActivitySizeProviders(size: { url in
                 url.path == file.path ? 2_048 : nil
-            }
+            })
         ).makeAsyncIterator()
 
         let initialSession = await iterator.next()
@@ -65,8 +66,12 @@ struct LiveWatchSessionCoordinatorTests {
             rootPath: root,
             timestamp: Date(timeIntervalSince1970: 110)
         )
+        let attribution = StubActivityAttribution { change in
+            [stubActivityEvent(for: change, byteDelta: 4_096)]
+        }
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 305)])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 305)]),
+            attribution: { _, _ in attribution }
         )
 
         var iterator = coordinator.sessions(
@@ -81,15 +86,19 @@ struct LiveWatchSessionCoordinatorTests {
                 patterns: [".DS_Store"],
                 rootPath: root
             ),
-            sizeProvider: { _ in 4_096 }
+            sizeProviders: ActivitySizeProviders(size: { _ in 4_096 })
         ).makeAsyncIterator()
 
         _ = await iterator.next()
         let updatedSession = await iterator.next()
         #expect(updatedSession?.events.isEmpty == true)
         #expect(updatedSession?.lastObservedEventID == 305)
+        #expect(attribution.observedChanges.isEmpty, "an excluded change was measured anyway")
     }
 
+    /// Whether a change is worth recording is attribution's call, and the
+    /// answer can be nothing at all. The cursor still has to move past it, or
+    /// the next reconnect replays a change that was already judged.
     @Test("publishes the cursor after filtered changes")
     func publishesCursorAfterFilteredChanges() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
@@ -101,7 +110,8 @@ struct LiveWatchSessionCoordinatorTests {
             timestamp: Date(timeIntervalSince1970: 120)
         )
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 302)])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 302)]),
+            attribution: { _, _ in StubActivityAttribution() }
         )
 
         var iterator = coordinator.sessions(
@@ -112,8 +122,7 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            sizeProvider: { _ in 512 },
-            knownSizeProvider: { _ in 0 }
+            sizeProviders: ActivitySizeProviders(size: { _ in 512 }, known: { _ in 0 })
         ).makeAsyncIterator()
 
         let initialSession = await iterator.next()
@@ -143,10 +152,13 @@ struct LiveWatchSessionCoordinatorTests {
             rootPath: root,
             timestamp: Date(timeIntervalSince1970: 130)
         )
+        let attribution = StubActivityAttribution { change in
+            [stubActivityEvent(for: change, byteDelta: 4_096)]
+        }
         let coordinator = LiveWatchSessionCoordinator(
-            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 306)])
+            monitor: StaticDiskActivityMonitor(events: [.change(change, eventID: 306)]),
+            attribution: { _, _ in attribution }
         )
-        nonisolated(unsafe) var measuredJournal = false
 
         var iterator = coordinator.sessions(
             rootPath: root,
@@ -156,10 +168,7 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            sizeProvider: { _ in
-                measuredJournal = true
-                return 4_096
-            }
+            sizeProviders: ActivitySizeProviders(size: { _ in 4_096 })
         ).makeAsyncIterator()
 
         _ = await iterator.next()
@@ -167,7 +176,7 @@ struct LiveWatchSessionCoordinatorTests {
         #expect(updatedSession?.events.isEmpty == true)
         #expect(updatedSession?.lastObservedEventID == 306)
         #expect(
-            measuredJournal == false,
+            attribution.observedChanges.isEmpty,
             "measuring the journal is what appends to the size index, which is the next event"
         )
     }

@@ -32,7 +32,10 @@ struct ActivityMonitoringIntegrationTests {
                 eventID: 404
             )
         ])
-        let coordinator = LiveWatchSessionCoordinator(monitor: monitor)
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: monitor,
+            attribution: stubActivityAttribution
+        )
 
         var observedHistoryStates: [WatchSessionHistoryState] = []
         var lastSession: WatchSessionModel?
@@ -45,12 +48,10 @@ struct ActivityMonitoringIntegrationTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            sizeProvider: { url in
-                url.path == createdFile.path ? 4_096 : nil
-            },
-            priorSizeProvider: { url in
-                url.path == deletedFile.path ? 2_048 : nil
-            }
+            sizeProviders: ActivitySizeProviders(
+                size: { url in url.path == createdFile.path ? 4_096 : nil },
+                prior: { url in url.path == deletedFile.path ? 2_048 : nil }
+            )
         ) {
             observedHistoryStates.append(session.historyState)
             lastSession = session
@@ -85,14 +86,17 @@ struct ActivityMonitoringIntegrationTests {
     func flagsHistoryGapWhenMonitorRequiresRescan() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let monitor = RecordingDiskActivityMonitor(events: [.requiresRescan(eventID: 501)])
-        let coordinator = LiveWatchSessionCoordinator(monitor: monitor)
+        let coordinator = LiveWatchSessionCoordinator(
+            monitor: monitor,
+            attribution: stubActivityAttribution
+        )
 
         var lastSession: WatchSessionModel?
         for await session in coordinator.sessions(
             rootPath: root,
             sinceEventID: 500,
             options: .default,
-            sizeProvider: { _ in nil }
+            sizeProviders: ActivitySizeProviders(size: { _ in nil })
         ) {
             lastSession = session
         }
