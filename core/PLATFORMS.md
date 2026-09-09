@@ -113,7 +113,19 @@ they are plain functions rather than `cfg`-gated bodies.
 
 `pathlight-monitor uninstall` lists what exists and removes nothing;
 `--yes` removes it and reports every path that survived. A destructive command
-that needs no confirmation is a command someone runs by accident.
+that needs no confirmation is a command someone runs by accident. The list
+includes a command installed by `install-cli`, which is not storage — but a
+binary left on somebody's PATH is exactly the litter an uninstall is for.
+
+`install-cli` is how the command reaches a shell at all: no platform's install
+touches PATH, since one is a dragged bundle and the others are unpacked
+archives. It links the running binary into the user's own home —
+`~/.local/bin`, or `%LOCALAPPDATA%\Programs\Pathlight` on Windows, which
+copies because a symlink there needs privilege — and prints how to add that
+directory to PATH when it is not there. Never `/usr/local/bin`: it needs an
+administrator on a clean macOS. `tests/cli.rs` drives the real binary for each
+of these, with the home directory and every data root redirected at a temporary
+directory, because uninstall derives what it deletes from them.
 
 Two things no uninstall can reach. macOS keeps its own record of a granted Full
 Disk Access, and the TCC database is protected from every app including the one
