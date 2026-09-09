@@ -8,14 +8,18 @@ use std::time::{Duration, SystemTime};
 
 use crate::{ActivityEvent, CoreError};
 
-/// Lines Swift wrote with "Encrypt new activity data" on. The key lives in the
-/// macOS Keychain, so other platforms skip them rather than fail the whole load.
-// ponytail: plaintext only; add AES-GCM + a shared key provider when a second platform needs encrypted rows.
-const ENCRYPTED_PREFIX: &str = "pathlight:v1:aes-gcm:";
+/// Rows written with encryption on, by either host. The key is per machine —
+/// Swift's is in the macOS Keychain, this build's is beside the journal — so a
+/// line whose key is somewhere else stays unread rather than failing the load.
+use crate::crypt::PREFIX as ENCRYPTED_PREFIX;
 
 #[derive(Debug, uniffi::Object)]
 pub struct Journal {
     path: PathBuf,
+    /// Whether rows appended from now on are encrypted. Reading does not need
+    /// it: an encrypted line is recognised by its marker either way, which is
+    /// what lets the setting be turned on and off without a migration.
+    encrypt: bool,
 }
 
 #[uniffi::export]
@@ -24,6 +28,16 @@ impl Journal {
     pub fn new(path: String) -> Arc<Self> {
         Arc::new(Self {
             path: PathBuf::from(path),
+            encrypt: false,
+        })
+    }
+
+    /// The same journal, appending encrypted rows.
+    #[uniffi::constructor]
+    pub fn encrypting(path: String) -> Arc<Self> {
+        Arc::new(Self {
+            path: PathBuf::from(path),
+            encrypt: true,
         })
     }
 
@@ -38,9 +52,19 @@ impl Journal {
             set_permissions(parent, 0o700)?;
         }
 
+        // The key is loaded once for the batch, and only when it is needed:
+        // an unencrypted journal must never create one.
+        let key = match self.encrypt {
+            true => Some(crate::crypt::key_or_create(&self.path)?),
+            false => None,
+        };
         let mut payload = String::new();
         for event in &events {
-            payload.push_str(&event.to_json_line()?);
+            let line = event.to_json_line()?;
+            match &key {
+                Some(key) => payload.push_str(&crate::crypt::seal(key, &line)?),
+                None => payload.push_str(&line),
+            }
             payload.push('\n');
         }
 
@@ -77,12 +101,13 @@ impl Journal {
         let contents = fs::read_to_string(&self.path)?;
         let mut kept: Vec<&str> = contents.lines().filter(|line| !line.is_empty()).collect();
         let total = kept.len();
+        let key = self.key_for(&contents);
 
         if retention_days > 0 {
             let cutoff = SystemTime::now()
                 .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400));
             if let Some(cutoff) = cutoff {
-                kept.retain(|line| match dated(line) {
+                kept.retain(|line| match dated(line, key.as_ref()) {
                     Some(timestamp) => timestamp >= cutoff,
                     None => true,
                 });
@@ -126,10 +151,12 @@ impl Journal {
 
         let root = crate::paths::normalize(&root_path);
         let contents = fs::read_to_string(&self.path)?;
+        let key = self.key_for(&contents);
         let mut events: Vec<ActivityEvent> = contents
             .lines()
-            .filter(|line| !line.is_empty() && !line.starts_with(ENCRYPTED_PREFIX))
-            .filter_map(|line| ActivityEvent::from_json_line(line).ok())
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| readable(line, key.as_ref()))
+            .filter_map(|line| ActivityEvent::from_json_line(&line).ok())
             .filter(|event| crate::paths::normalize(&event.root_path) == root)
             .collect();
 
@@ -162,23 +189,41 @@ impl Journal {
     }
 }
 
-/// The timestamp of a row this build can read, or `None` when it cannot.
-fn dated(line: &str) -> Option<SystemTime> {
-    if line.starts_with(ENCRYPTED_PREFIX) {
-        return None;
+impl Journal {
+    /// The key, if this journal has encrypted rows and this machine holds it.
+    /// Nothing is created here: a read must not leave a key behind.
+    fn key_for(&self, contents: &str) -> Option<[u8; 32]> {
+        contents
+            .lines()
+            .any(|line| line.starts_with(ENCRYPTED_PREFIX))
+            .then(|| crate::crypt::key(&self.path))
+            .flatten()
     }
-    ActivityEvent::from_json_line(line)
+}
+
+/// The json behind a line, decrypting when the line is encrypted and this
+/// machine has the key. `None` for a row this build cannot read.
+fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
+    if !line.starts_with(ENCRYPTED_PREFIX) {
+        return Some(line.to_owned());
+    }
+    crate::crypt::open(key?, line)
+}
+
+/// The timestamp of a row this build can read, or `None` when it cannot.
+fn dated(line: &str, key: Option<&[u8; 32]>) -> Option<SystemTime> {
+    ActivityEvent::from_json_line(&readable(line, key)?)
         .ok()
         .map(|event| event.timestamp)
 }
 
 #[cfg(unix)]
-fn set_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_permissions(_path: &Path, _mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_permissions(_path: &Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }

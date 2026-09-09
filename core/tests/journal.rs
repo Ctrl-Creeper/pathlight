@@ -123,3 +123,62 @@ fn nothing_to_drop_leaves_the_file_untouched() {
     let unwritten = at(empty.path());
     assert_eq!(unwritten.trim(180, 1 << 30).unwrap(), 0);
 }
+
+/// The whole point of the setting: what lands on disk is not readable by
+/// looking at it, and Pathlight itself still reads it back whole.
+#[test]
+fn encrypted_rows_are_unreadable_on_disk_and_readable_through_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("activity-events.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let journal = Journal::encrypting(path.clone());
+    journal.append(vec![event("secret.bin", 1)]).unwrap();
+
+    let written = lines(dir.path());
+    assert_eq!(written.len(), 1);
+    assert!(
+        written[0].starts_with("pathlight:v1:aes-gcm:"),
+        "{written:?}"
+    );
+    assert!(!written[0].contains("secret.bin"), "{written:?}");
+
+    // Read back by a journal that was never told about encryption: the marker
+    // on the line is what says how to read it, so turning the setting off
+    // does not hide what was already recorded.
+    let events = Journal::new(path).load(ROOT.to_owned(), 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].path, format!("{ROOT}/secret.bin"));
+
+    // And retention still applies to a row it can read, which is what would
+    // silently stop working if encrypted rows were only ever skipped.
+    assert_eq!(journal.trim(180, 0).unwrap(), 0);
+    journal.append(vec![event("old.bin", 400)]).unwrap();
+    assert_eq!(journal.trim(180, 0).unwrap(), 1);
+}
+
+/// Without the key the rows stay on disk and stay unread. A journal copied
+/// off this machine is the case the setting exists for.
+#[test]
+fn a_journal_without_its_key_reads_nothing_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("activity-events.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    Journal::encrypting(path.clone())
+        .append(vec![event("secret.bin", 400)])
+        .unwrap();
+    fs::remove_file(dir.path().join("activity-events.key")).unwrap();
+
+    let journal = Journal::new(path);
+    assert!(journal.load(ROOT.to_owned(), 10).unwrap().is_empty());
+    assert_eq!(
+        journal.trim(180, 0).unwrap(),
+        0,
+        "a row it cannot date was aged out on a guess"
+    );
+}

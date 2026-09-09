@@ -22,6 +22,11 @@ path = "src/bin/pathlight-monitor.rs"
 cli = ["uniffi/cli"]
 
 [dependencies]
+# The journal's optional encryption. AES-256-GCM to write the same line
+# format the macOS app does, base64 because that format is base64, and neither
+# is a thing to hand-roll in a file that holds someone's activity history.
+aes-gcm = "0.10"
+base64 = "0.22"
 ignore = "0.4"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
@@ -35,10 +40,12 @@ notify = "8"
 
 [target.'cfg(windows)'.dependencies]
 # Security for the attributes argument the event and by-id opens take, IO and
-# Ioctl for the change journal, Threading for the event that ends its wait.
+# Ioctl for the change journal, Threading for the event that ends its wait,
+# Cryptography for the DPAPI wrap around the journal's storage key.
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
   "Win32_System_Ioctl",

@@ -7,6 +7,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod attribution;
+mod crypt;
 pub mod event;
 pub mod evidence;
 pub mod exclusion;
