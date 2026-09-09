@@ -41,6 +41,18 @@ jobs:
           binary=$(cargo test --test monitor --no-run --message-format=json \
             | python3 -c 'import json,sys; print(next(json.loads(line)["executable"] for line in sys.stdin if line.startswith("{") and json.loads(line).get("executable") and json.loads(line)["target"]["name"] == "monitor"))')
           sudo PATHLIGHT_PRIVILEGED_WATCH=1 "$binary" --test-threads=1
+      # A change journal is not a property of NTFS, it is a thing an
+      # administrator turns on, and Windows only keeps one on the system
+      # volume. The runner's work disk is not that volume, so the second pass
+      # below would test the fallback and prove nothing. Creating one is
+      # idempotent; the query prints what the backend is about to read.
+      - name: Give the work volume a change journal
+        if: runner.os == 'Windows'
+        run: |
+          $drive = (Get-Location).Drive.Name + ":"
+          fsutil fsinfo volumeinfo $drive
+          fsutil usn createjournal m=32000000 a=8000000 $drive
+          fsutil usn queryjournal $drive
       # The change journal needs a volume handle, which only an administrator
       # can open. Hosted Windows runners already run elevated, so this is the
       # same second pass as above with no escalation step.
