@@ -114,28 +114,55 @@ impl Storage {
         self.journal_handle().load(root.to_owned(), u32::MAX)
     }
 
+    /// Whether new rows are written encrypted.
+    ///
+    /// Read from the file each time rather than cached: the setting is a
+    /// checkbox, and a watch already running is exactly the writer that has to
+    /// notice it was ticked.
+    // ponytail: one small read per flush. Cache it if a flush ever shows up in
+    // a measurement, not before.
+    pub fn encrypting(&self) -> bool {
+        self.settings().encrypt
+    }
+
+    pub fn set_encrypting(&self, encrypt: bool) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.encrypt = encrypt;
+        self.save(&settings)
+    }
+
     fn journal_handle(&self) -> std::sync::Arc<Journal> {
-        Journal::new(self.journal().to_string_lossy().into_owned())
+        let path = self.journal().to_string_lossy().into_owned();
+        match self.encrypting() {
+            true => Journal::encrypting(path),
+            false => Journal::new(path),
+        }
     }
 
     /// The folders the user chose, dropping any that no longer exist so a
     /// stale entry cannot look like a live watch.
     pub fn load_watches(&self) -> Vec<String> {
-        let text = match fs::read_to_string(self.dir().join(WATCHES_FILE)) {
-            Ok(text) => text,
-            Err(_) => return Vec::new(),
-        };
-        serde_json::from_str::<Watches>(&text)
-            .map(|watches| watches.roots)
-            .unwrap_or_default()
+        self.settings().roots
     }
 
     pub fn save_watches(&self, roots: &[String]) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.roots = roots.to_vec();
+        self.save(&settings)
+    }
+
+    /// What was saved, or the defaults. A file this build cannot parse reads
+    /// as the defaults rather than as an error the user cannot act on.
+    fn settings(&self) -> Settings {
+        fs::read_to_string(self.dir().join(WATCHES_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, settings: &Settings) -> io::Result<()> {
         fs::create_dir_all(self.dir())?;
-        let text = serde_json::to_string_pretty(&Watches {
-            roots: roots.to_vec(),
-        })
-        .map_err(io::Error::other)?;
+        let text = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
         fs::write(self.dir().join(WATCHES_FILE), text)
     }
 }
@@ -159,9 +186,14 @@ fn resolved(dir: &Path) -> PathBuf {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
-struct Watches {
+struct Settings {
     #[serde(default)]
     roots: Vec<String>,
+    /// Off by default. Encryption whose key is lost is history that is lost,
+    /// so this is the user's choice to make and not a default to surprise
+    /// them with.
+    #[serde(default)]
+    encrypt: bool,
 }
 
 #[cfg(test)]

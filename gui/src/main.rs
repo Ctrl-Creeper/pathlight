@@ -65,6 +65,9 @@ struct App {
     uninstall_prompt: Option<Vec<PathBuf>>,
     /// Set once storage is gone, so nothing writes it back afterwards.
     uninstalled: bool,
+    /// Whether new rows are written encrypted, mirrored from storage so the
+    /// checkbox does not read a file every frame.
+    encrypt: bool,
 }
 
 impl App {
@@ -78,7 +81,9 @@ impl App {
             .as_ref()
             .map(Storage::load_watches)
             .unwrap_or_default();
+        let encrypt = storage.as_ref().is_ok_and(Storage::encrypting);
         Self {
+            encrypt,
             selected: roots.first().cloned(),
             storage,
             roots,
@@ -237,6 +242,22 @@ impl App {
         }
     }
 
+    /// Turns encryption of new rows on or off.
+    ///
+    /// Nothing re-writes what is already recorded: encrypting old rows would
+    /// mean rewriting the journal under a key that could then be lost, and
+    /// decrypting them would undo what the user asked for on the rows they
+    /// asked it for.
+    fn set_encryption(&mut self, encrypt: bool) {
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        match storage.set_encrypting(encrypt) {
+            Ok(()) => self.encrypt = encrypt,
+            Err(error) => self.notice = Some(format!("Could not save the setting: {error}")),
+        }
+    }
+
     fn persist(&mut self) {
         if self.uninstalled {
             return;
@@ -338,6 +359,19 @@ impl App {
                                 .cloned()
                                 .collect(),
                         );
+                    }
+                    ui.add_space(12.0);
+                    let mut encrypt = self.encrypt;
+                    ui.checkbox(&mut encrypt, "Encrypt new records")
+                        .on_hover_text(
+                            "New rows are written as ciphertext, so a copy of the journal says \
+                         nothing on its own. The key stays on this machine — locked to this \
+                         Windows account, or a file only you can read — which also means a \
+                         lost key is lost history. Rows already written keep the form they \
+                         were written in either way.",
+                        );
+                    if encrypt != self.encrypt {
+                        self.set_encryption(encrypt);
                     }
                 });
             });
@@ -848,6 +882,7 @@ mod tests {
             uninstall_targets: vec![storage_dir.to_path_buf()],
             uninstall_prompt: None,
             uninstalled: false,
+            encrypt: false,
         }
     }
 
@@ -950,6 +985,41 @@ mod tests {
         let harness = harness(app(storage.path(), Vec::new()));
 
         assert!(harness.query_by_label("Export…").is_none());
+    }
+
+    /// The setting is only worth having if the bytes on disk change, so this
+    /// checks the file and not the flag.
+    #[test]
+    fn ticking_encryption_makes_the_next_row_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let mut harness = harness(app(dir.path(), Vec::new()));
+
+        harness.get_by_label("Encrypt new records").click();
+        harness.run();
+        assert!(harness.state().encrypt, "the checkbox did not take");
+        assert!(storage.encrypting(), "the setting was not saved");
+
+        storage
+            .record(vec![pathlight_core::ActivityEvent {
+                kind: EventKind::Modified,
+                path: "/watched/folder/report.bin".to_owned(),
+                root_path: "/watched/folder".to_owned(),
+                timestamp: SystemTime::now(),
+                byte_delta: Some(1),
+                confidence: Confidence::Confirmed,
+                previous_path: None,
+                affected_item_count: 1,
+                process_name: None,
+            }])
+            .unwrap();
+
+        let written = std::fs::read_to_string(storage.journal()).unwrap();
+        assert!(written.starts_with("pathlight:v1:aes-gcm:"), "{written}");
+        assert!(!written.contains("report.bin"), "{written}");
+        // And the shell still reads it back, which is the half of the promise
+        // that a wrong key would break silently.
+        assert_eq!(storage.rows("/watched/folder").unwrap().len(), 1);
     }
 
     #[test]
