@@ -14,11 +14,12 @@ mod theme;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::{paths, uninstall, Confidence, EventKind};
+use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, EventKind, HistorySnapshot};
 
 use session::Session;
 use store::Storage;
@@ -46,6 +47,14 @@ struct App {
     roots: Vec<String>,
     sessions: HashMap<String, Session>,
     selected: Option<String>,
+    /// What the journal already holds for [`Self::selected`], so a folder that
+    /// was recorded last month is not a blank pane this month. Read on its own
+    /// thread: the journal is as large as the retention cap allows, and
+    /// nothing on the paint path touches the disk.
+    history: Option<Result<HistorySnapshot, String>>,
+    /// Which folder `history` is about, and the read still in flight.
+    history_root: Option<String>,
+    history_pending: Option<Receiver<Result<HistorySnapshot, String>>>,
     notice: Option<String>,
     /// Everywhere an uninstall would look, fixed when the app starts. Held
     /// rather than computed at click time so the button cannot come to point
@@ -73,6 +82,9 @@ impl App {
             storage,
             roots,
             sessions: HashMap::new(),
+            history: None,
+            history_root: None,
+            history_pending: None,
             notice: None,
             uninstall_targets: uninstall::current_paths().unwrap_or_default(),
             uninstall_prompt: None,
@@ -82,6 +94,52 @@ impl App {
 
     fn storage(&self) -> Option<&Storage> {
         self.storage.as_ref().ok()
+    }
+
+    /// Starts reading the journal for `root`. The previous answer is cleared
+    /// first: showing last folder's totals under this folder's name is worse
+    /// than showing none.
+    fn load_history(&mut self, root: &str) {
+        self.history = None;
+        self.history_root = Some(root.to_owned());
+        self.history_pending = None;
+        let Some(storage) = self.storage().cloned() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let root = root.to_owned();
+        // A failed spawn leaves `history` empty, which the pane reads as still
+        // loading — wrong, but a thread that will not start is a machine with
+        // worse problems than a missing panel.
+        if std::thread::Builder::new()
+            .name("pathlight-history".into())
+            .spawn(move || {
+                let _ = sender.send(storage.history(&root).map_err(|error| error.to_string()));
+            })
+            .is_ok()
+        {
+            self.history_pending = Some(receiver);
+        }
+    }
+
+    /// Picks up a finished read, and starts one when the selection moved.
+    fn poll_history(&mut self) {
+        if let Some(pending) = &self.history_pending {
+            if let Ok(result) = pending.try_recv() {
+                self.history = Some(result);
+                self.history_pending = None;
+            }
+        }
+        if self.history_root.as_deref() != self.selected.as_deref() {
+            match self.selected.clone() {
+                Some(root) => self.load_history(&root),
+                None => {
+                    self.history = None;
+                    self.history_root = None;
+                    self.history_pending = None;
+                }
+            }
+        }
     }
 
     fn add_folder(&mut self) {
@@ -186,6 +244,12 @@ impl App {
         if !self.sessions.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        self.poll_history();
+        if self.history_pending.is_some() {
+            // Otherwise the finished read sits in the channel until something
+            // else asks for a frame, and the pane says "reading" forever.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         egui::Panel::top(egui::Id::new("header")).show(ui, |ui| {
             ui.add_space(8.0);
@@ -233,7 +297,12 @@ impl App {
             .exact_size(300.0)
             .show(ui, |ui| self.watch_list(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| self.detail(ui));
+        let reload = egui::CentralPanel::default().show(ui, |ui| self.detail(ui)).inner;
+        if reload {
+            if let Some(root) = self.selected.clone() {
+                self.load_history(&root);
+            }
+        }
 
         self.notices(&ctx);
     }
@@ -320,7 +389,8 @@ impl App {
         }
     }
 
-    fn detail(&self, ui: &mut egui::Ui) {
+    /// Returns true when the user asked for the journal to be read again.
+    fn detail(&self, ui: &mut egui::Ui) -> bool {
         let Some(root) = self.selected.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -328,21 +398,8 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                 );
             });
-            return;
+            return false;
         };
-        let Some(session) = self.sessions.get(&root) else {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
-            ui.label(
-                egui::RichText::new(&root)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
-            ui.add_space(12.0);
-            ui.label("Not being watched. Press Watch to start recording changes here.");
-            return;
-        };
-        let live = session.live();
 
         ui.add_space(16.0);
         ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
@@ -352,6 +409,18 @@ impl App {
                 .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(12.0);
+
+        // Live while it is being watched, the journal when it is not. A folder
+        // recorded last month is the reason the journal exists, and until now
+        // this shell wrote one it could never read back.
+        let Some(session) = self.sessions.get(&root) else {
+            ui.label("Not being watched. Press Watch to start recording changes here.");
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+            return self.recorded_history(ui, &root);
+        };
+        let live = session.live();
 
         ui.horizontal(|ui| {
             metric(ui, "Net change", &human_bytes(live.total_byte_delta));
@@ -395,38 +464,99 @@ impl App {
                 egui::RichText::new("Nothing has changed here yet.")
                     .color(ui.visuals().weak_text_color()),
             );
-            return;
+            return false;
         }
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new("events")
-                    .num_columns(4)
-                    .striped(true)
-                    .spacing([16.0, 6.0])
-                    .show(ui, |ui| {
-                        for event in &live.rows {
-                            ui.label(egui::RichText::new(kind_label(event.kind)).small());
-                            ui.label(relative_path(&event.path, &root));
-                            ui.label(match event.byte_delta {
-                                Some(delta) => egui::RichText::new(human_bytes(delta)),
-                                None => egui::RichText::new("unknown")
-                                    .color(ui.visuals().weak_text_color()),
-                            });
-                            let mut when = elapsed(event.timestamp);
-                            if event.confidence == Confidence::Estimated {
-                                when.push_str(" · estimated");
-                            }
-                            ui.label(
-                                egui::RichText::new(when)
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                            ui.end_row();
-                        }
-                    });
+        rows(ui, "events", live.rows.iter(), &root);
+        false
+    }
+
+    /// What the journal holds for a folder nothing is watching right now.
+    fn recorded_history(&self, ui: &mut egui::Ui, root: &str) -> bool {
+        let mut reload = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Recorded history").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                reload = ui.button("Reload").clicked();
             });
+        });
+        ui.add_space(6.0);
+
+        match &self.history {
+            None => {
+                ui.label(
+                    egui::RichText::new("Reading the journal…")
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            Some(Err(error)) => warn(ui, &format!("Could not read the journal: {error}")),
+            Some(Ok(history)) if history.event_count == 0 => {
+                ui.label(
+                    egui::RichText::new("Nothing has been recorded here yet.")
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            Some(Ok(history)) => {
+                ui.horizontal(|ui| {
+                    metric(
+                        ui,
+                        "Net change",
+                        &human_bytes(history.total_net_byte_delta),
+                    );
+                    metric(ui, "Events", &history.event_count.to_string());
+                    metric(
+                        ui,
+                        "Last change",
+                        &history
+                            .recent_events
+                            .first()
+                            .map(|event| elapsed(event.timestamp))
+                            .unwrap_or_else(|| "—".to_owned()),
+                    );
+                });
+                // The one thing hourly buckets answer that a row list does
+                // not: when the disk was actually busy.
+                if let Some(peak) = history
+                    .buckets
+                    .iter()
+                    .max_by_key(|bucket| bucket.byte_delta.abs())
+                {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Busiest hour: {} · {} · {} event(s)",
+                            elapsed(peak.start),
+                            human_bytes(peak.byte_delta),
+                            peak.event_count
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                if history.unknown_size_event_count > 0 {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} change(s) have no size, so the total is a floor.",
+                            history.unknown_size_event_count
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                if history.is_truncated {
+                    ui.label(
+                        egui::RichText::new(
+                            "Newest changes only. The totals above cover every retained row.",
+                        )
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                ui.add_space(8.0);
+                rows(ui, "history-events", history.recent_events.iter(), root);
+            }
+        }
+        reload
     }
 
     fn notices(&mut self, ctx: &egui::Context) {
@@ -484,6 +614,46 @@ impl App {
             });
         }
     }
+}
+
+/// One list of changes, whether they came from the kernel a second ago or
+/// from the journal. Two of these would drift apart, and the pair a user
+/// compares is exactly the pair that must agree.
+fn rows<'a>(
+    ui: &mut egui::Ui,
+    id: &str,
+    events: impl Iterator<Item = &'a ActivityEvent>,
+    root: &str,
+) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Grid::new(id)
+                .num_columns(4)
+                .striped(true)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    for event in events {
+                        ui.label(egui::RichText::new(kind_label(event.kind)).small());
+                        ui.label(relative_path(&event.path, root));
+                        ui.label(match event.byte_delta {
+                            Some(delta) => egui::RichText::new(human_bytes(delta)),
+                            None => egui::RichText::new("unknown")
+                                .color(ui.visuals().weak_text_color()),
+                        });
+                        let mut when = elapsed(event.timestamp);
+                        if event.confidence == Confidence::Estimated {
+                            when.push_str(" · estimated");
+                        }
+                        ui.label(
+                            egui::RichText::new(when)
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 fn metric(ui: &mut egui::Ui, title: &str, value: &str) {
@@ -602,6 +772,9 @@ mod tests {
             selected: roots.first().cloned(),
             roots,
             sessions: HashMap::new(),
+            history: None,
+            history_root: None,
+            history_pending: None,
             notice: None,
             uninstall_targets: vec![storage_dir.to_path_buf()],
             uninstall_prompt: None,
@@ -710,5 +883,45 @@ mod tests {
         assert_eq!(relative_path("/watched", "/watched"), "/watched");
         assert_eq!(leaf("C:/Users/x/Downloads"), "Downloads");
         assert_eq!(leaf("/"), "/");
+    }
+
+    /// The journal was write-only from this shell's point of view: a folder
+    /// recorded yesterday looked identical to one never watched. Driven
+    /// through the real widgets, including the thread the read happens on.
+    #[test]
+    fn a_folder_nobody_is_watching_still_shows_what_was_recorded() {
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let root = "/watched/folder";
+        storage
+            .record(vec![pathlight_core::ActivityEvent {
+                kind: EventKind::Modified,
+                path: format!("{root}/report.bin"),
+                root_path: root.to_owned(),
+                timestamp: SystemTime::now(),
+                byte_delta: Some(4096),
+                confidence: Confidence::Confirmed,
+                previous_path: None,
+                affected_item_count: 1,
+                process_name: None,
+            }])
+            .unwrap();
+        let mut harness = harness(app(storage_dir.path(), vec![root.to_owned()]));
+
+        // The read is on its own thread, so frames are stepped until it lands
+        // rather than assuming one frame is enough.
+        for _ in 0..200 {
+            if harness.query_by_label_contains("report.bin").is_some() {
+                break;
+            }
+            harness.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        harness.get_by_label_contains("report.bin");
+        // The row and the total both say 4 KB, which is the point: the totals
+        // are computed from the journal, not from what fits on screen.
+        harness.get_by_label("Net change");
+        assert_eq!(harness.query_all_by_label("+4.0 KB").count(), 2);
     }
 }

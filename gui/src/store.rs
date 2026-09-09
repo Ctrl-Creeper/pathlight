@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use pathlight_core::{paths, uninstall, ActivityEvent, CoreError, Journal};
+use pathlight_core::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
 const WATCHES_FILE: &str = "watches.json";
@@ -16,6 +16,10 @@ const WATCHES_FILE: &str = "watches.json";
 // monitor whose retention cannot be changed is a preference.
 const RETENTION_DAYS: u32 = 180;
 const JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+/// One bucket per hour, and the rows one screen can plausibly be scrolled
+/// through. Totals cover every retained row either way.
+const HISTORY_BUCKET_SECS: u64 = 3600;
+const HISTORY_ROWS: u32 = 200;
 
 /// Every append and every trim in this process takes this.
 ///
@@ -85,6 +89,17 @@ impl Storage {
     pub fn trim_journal(&self) -> Result<u64, CoreError> {
         let _guard = journal_lock().lock().unwrap_or_else(PoisonError::into_inner);
         self.journal_handle().trim(RETENTION_DAYS, JOURNAL_LIMIT_BYTES)
+    }
+
+    /// What was recorded for one folder, folded into buckets and totals.
+    ///
+    /// Deliberately without the append lock. `Journal::load` already skips a
+    /// line it cannot parse, and holding the lock across a whole-file read
+    /// would stall every live watch's flush for as long as the read takes: a
+    /// torn line costs this one read a row, the lock would cost the recording.
+    pub fn history(&self, root: &str) -> Result<HistorySnapshot, CoreError> {
+        self.journal_handle()
+            .load_history(root.to_owned(), HISTORY_ROWS, HISTORY_BUCKET_SECS)
     }
 
     fn journal_handle(&self) -> std::sync::Arc<Journal> {
