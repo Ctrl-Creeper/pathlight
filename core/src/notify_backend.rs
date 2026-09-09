@@ -129,6 +129,11 @@ pub(crate) fn forward(emitter: &Emitter, result: notify::Result<notify::Event>, 
     let event = match result {
         Ok(event) => event,
         // A backend error means events may have been lost; the host re-baselines.
+        // ponytail: one gap for every error kind. A watch that runs into the
+        // inotify limit mid-run stays permanently partial, and reconciling
+        // still finds the changes, but the stream cannot say coverage shrank.
+        // Saying that needs the per-watch coverage descriptor PLATFORMS.md
+        // proposes; add it when a host has somewhere to show it.
         Err(_) => return emitter.emit(StreamEvent::RequiresRescan { event_id }),
     };
     if event.need_rescan() {

@@ -64,13 +64,50 @@ impl From<serde_json::Error> for CoreError {
 impl From<notify::Error> for CoreError {
     fn from(error: notify::Error) -> Self {
         CoreError::Watch {
-            message: error.to_string(),
+            message: match error.kind {
+                // inotify needs one kernel watch per directory and the per-user
+                // limit is small on many distributions. What notify passes on is
+                // "No space left on device", which sends people looking at their
+                // free disk. Name the limit that was actually reached, its current
+                // value, and who can raise it.
+                notify::ErrorKind::MaxFilesWatch => format!(
+                    "this folder has more directories than one user may watch at once \
+                     (fs.inotify.max_user_watches is {}). Watch a smaller folder, or \
+                     raise the limit with `sudo sysctl -w fs.inotify.max_user_watches=<larger>`; \
+                     Pathlight does not change system settings itself.",
+                    watch_limit()
+                ),
+                _ => error.to_string(),
+            },
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn watch_limit() -> String {
+    std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_else(|_| "unreadable".to_owned())
 }
 
 /// Crate version, handy for proving the host actually linked this library.
 #[uniffi::export]
 pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hitting_the_inotify_watch_limit_says_which_limit_and_how_to_raise_it() {
+        let error = CoreError::from(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+        let CoreError::Watch { message } = error else {
+            panic!("the watch limit is a watch error");
+        };
+        assert!(message.contains("fs.inotify.max_user_watches"), "{message}");
+        assert!(message.contains("sysctl"), "{message}");
+        assert!(!message.contains("No space left"), "{message}");
+    }
 }
