@@ -8,6 +8,7 @@
 // Debug builds keep the console, because that is where panics are readable.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod export;
 mod session;
 mod store;
 mod theme;
@@ -168,6 +169,50 @@ impl App {
         self.selected = Some(root);
     }
 
+    /// Writes what was recorded for the selected folder where the user asks.
+    ///
+    /// Reading the journal rather than the pane's snapshot: the pane lists the
+    /// newest rows, and an export missing the older ones is the one thing a
+    /// person exports records for.
+    fn export(&mut self) {
+        let Some(root) = self.selected.clone() else {
+            return;
+        };
+        let Some(storage) = self.storage().cloned() else {
+            self.notice = self.storage.clone().err();
+            return;
+        };
+        let events = match storage.rows(&root) {
+            Ok(events) => events,
+            Err(error) => {
+                self.notice = Some(format!("Could not read the journal: {error}"));
+                return;
+            }
+        };
+        if events.is_empty() {
+            self.notice = Some(format!("Nothing has been recorded for {root} yet."));
+            return;
+        }
+        // ponytail: on the ui thread, like the folder picker already is. The
+        // read is a file the retention cap bounds, and the dialog blocks
+        // anyway.
+        let Some(target) = rfd::FileDialog::new()
+            .set_title("Export recorded changes")
+            .set_file_name(format!("{}-changes.csv", leaf(&root)))
+            .save_file()
+        else {
+            return;
+        };
+        self.notice = Some(match std::fs::write(&target, export::csv(&events)) {
+            Ok(()) => format!(
+                "Exported {} change(s) to {}.",
+                events.len(),
+                target.display()
+            ),
+            Err(error) => format!("Could not write {}: {error}", target.display()),
+        });
+    }
+
     fn forget(&mut self, root: &str) {
         self.sessions.remove(root);
         self.roots.retain(|existing| existing != root);
@@ -227,6 +272,13 @@ impl App {
             )
         });
     }
+}
+
+/// What the detail pane wants done once it is out of the way. It draws from
+/// `&self`, and both of these change the app.
+enum Ask {
+    Reload,
+    Export,
 }
 
 impl eframe::App for App {
@@ -297,13 +349,17 @@ impl App {
             .exact_size(300.0)
             .show(ui, |ui| self.watch_list(ui));
 
-        let reload = egui::CentralPanel::default()
+        let ask = egui::CentralPanel::default()
             .show(ui, |ui| self.detail(ui))
             .inner;
-        if reload {
-            if let Some(root) = self.selected.clone() {
-                self.load_history(&root);
+        match ask {
+            Some(Ask::Reload) => {
+                if let Some(root) = self.selected.clone() {
+                    self.load_history(&root);
+                }
             }
+            Some(Ask::Export) => self.export(),
+            None => {}
         }
 
         self.notices(&ctx);
@@ -391,8 +447,7 @@ impl App {
         }
     }
 
-    /// Returns true when the user asked for the journal to be read again.
-    fn detail(&self, ui: &mut egui::Ui) -> bool {
+    fn detail(&self, ui: &mut egui::Ui) -> Option<Ask> {
         let Some(root) = self.selected.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -400,11 +455,19 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                 );
             });
-            return false;
+            return None;
         };
 
+        let mut ask = None;
         ui.add_space(16.0);
-        ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Export…").clicked() {
+                    ask = Some(Ask::Export);
+                }
+            });
+        });
         ui.label(
             egui::RichText::new(&root)
                 .small()
@@ -420,7 +483,7 @@ impl App {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(8.0);
-            return self.recorded_history(ui, &root);
+            return self.recorded_history(ui, &root).or(ask);
         };
         let live = session.live();
 
@@ -467,15 +530,15 @@ impl App {
                 egui::RichText::new("Nothing has changed here yet.")
                     .color(ui.visuals().weak_text_color()),
             );
-            return false;
+            return ask;
         }
 
         rows(ui, "events", live.rows.iter(), &root);
-        false
+        ask
     }
 
     /// What the journal holds for a folder nothing is watching right now.
-    fn recorded_history(&self, ui: &mut egui::Ui, root: &str) -> bool {
+    fn recorded_history(&self, ui: &mut egui::Ui, root: &str) -> Option<Ask> {
         let mut reload = false;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Recorded history").strong());
@@ -555,7 +618,7 @@ impl App {
                 rows(ui, "history-events", history.recent_events.iter(), root);
             }
         }
-        reload
+        reload.then_some(Ask::Reload)
     }
 
     fn notices(&mut self, ctx: &egui::Context) {
@@ -865,6 +928,28 @@ mod tests {
         let harness = harness(app);
 
         harness.get_by_label_contains("no home directory here");
+    }
+
+    /// The button exists on the pane for the selected folder, watched or
+    /// not. Not clicked: the click opens the platform's save dialog, and a
+    /// test that opens one waits for a person. What it writes is checked in
+    /// `export`'s own tests.
+    #[test]
+    fn a_selected_folder_can_be_exported() {
+        let storage = tempfile::tempdir().unwrap();
+        let harness = harness(app(storage.path(), vec!["/watched/folder".to_owned()]));
+
+        harness.get_by_label("Export…");
+    }
+
+    /// Nothing selected is nothing to export, and a button that acts on the
+    /// last selection is worse than an absent one.
+    #[test]
+    fn nothing_selected_offers_no_export() {
+        let storage = tempfile::tempdir().unwrap();
+        let harness = harness(app(storage.path(), Vec::new()));
+
+        assert!(harness.query_by_label("Export…").is_none());
     }
 
     #[test]

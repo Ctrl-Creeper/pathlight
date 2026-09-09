@@ -107,6 +107,13 @@ impl Storage {
             .load_history(root.to_owned(), HISTORY_ROWS, HISTORY_BUCKET_SECS)
     }
 
+    /// Every retained row for one folder, newest first — the whole record
+    /// rather than the page the pane lists, because an export of the newest
+    /// 200 changes is not an export of what was recorded.
+    pub fn rows(&self, root: &str) -> Result<Vec<ActivityEvent>, CoreError> {
+        self.journal_handle().load(root.to_owned(), u32::MAX)
+    }
+
     fn journal_handle(&self) -> std::sync::Arc<Journal> {
         Journal::new(self.journal().to_string_lossy().into_owned())
     }
