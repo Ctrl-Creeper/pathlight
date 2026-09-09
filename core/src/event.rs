@@ -83,6 +83,14 @@ impl ActivityEvent {
         self
     }
 
+    /// The row's time in the spelling the journal itself stores: whole
+    /// seconds, UTC, RFC 3339. A host that has to show or export an absolute
+    /// time needs one, and a second date format would be one that merely
+    /// looks like this one. `None` for a time RFC 3339 cannot spell.
+    pub fn timestamp_text(&self) -> Option<String> {
+        swift_date::text(self.timestamp)
+    }
+
     pub fn to_json_line(&self) -> serde_json::Result<String> {
         serde_json::to_string(&self.clone().normalize_aggregate_path())
     }
@@ -174,12 +182,19 @@ mod swift_date {
     use time::format_description::well_known::Rfc3339;
     use time::{OffsetDateTime, UtcOffset};
 
-    pub fn serialize<S: Serializer>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
-        let datetime = OffsetDateTime::from(*value)
+    /// `None` for a time RFC 3339 cannot spell, which a `SystemTime` can hold.
+    pub fn text(value: SystemTime) -> Option<String> {
+        OffsetDateTime::from(value)
             .to_offset(UtcOffset::UTC)
             .replace_nanosecond(0)
-            .map_err(S::Error::custom)?;
-        serializer.serialize_str(&datetime.format(&Rfc3339).map_err(S::Error::custom)?)
+            .ok()?
+            .format(&Rfc3339)
+            .ok()
+    }
+
+    pub fn serialize<S: Serializer>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = text(*value).ok_or_else(|| S::Error::custom("timestamp out of range"))?;
+        serializer.serialize_str(&text)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
