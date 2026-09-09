@@ -16,7 +16,8 @@ permission boundaries and acceptance gates are in
 | Platform | Source in the repository | Current guarantees and limits |
 |---|---|---|
 | macOS | Native FSEvents | Kernel cursor and replay while history is retained; inode-based rename pairing; no authoritative process identity; gaps require reconciliation. |
-| Linux | notify/inotify with Pathlight cookie pairing | Observed rename halves are paired; no persistent cursor or process identity; per-directory watches, registration races and overflow remain. |
+| Linux | notify/inotify with Pathlight cookie pairing | Observed rename halves are paired; no persistent cursor or process identity; per-directory watches, registration races and overflow remain. Hitting `fs.inotify.max_user_watches` is reported by name and current value rather than as "No space left on device". |
+| Linux, privileged | `src/fanotify.rs`, opt-in with `PATHLIGHT_PRIVILEGED_WATCH=1` and `CAP_SYS_ADMIN` | One `FAN_MARK_FILESYSTEM` mark instead of per-directory watches, so no watch limit and no registration race, and each change names the writing process. Still no persistent cursor, and queue overflow is reported as a gap. Renames are paired by the kernel where `FAN_RENAME` exists (Linux 5.17); on older kernels the two halves are reported and `pairs_renames` says so. Events arrive for the whole filesystem and are filtered to the root. |
 | Windows | notify/ReadDirectoryChangesW | Recursive event delivery without polling; separate rename halves; no persistent cursor or process identity. |
 | Android | Rust inotify route compiles for Android | No Android host yet. Compiling the core does not prove storage access, background lifetime or cross-app event coverage on a device. |
 | iOS | No monitoring host | Plan a desktop-history viewer and explicitly scoped foreground features; no public API for an arbitrary system-wide privileged monitor. |
@@ -139,10 +140,13 @@ its journal outside the standard layout has to remove that path itself.
 1. Replace platform-wide capability constants with a negotiated per-watch
    coverage descriptor before combining default and privileged sources. Do not
    append two sources independently and recreate the duplicate-recording bug.
-2. Linux: prototype an optional fanotify helper on explicitly tested kernels and
-   filesystems. Probe supported flags, handle overflow and mount changes, and
-   fall back visibly to inotify. Whole-filesystem marks remove per-directory
-   watch registration, not every limit or coverage gap.
+2. Linux: fanotify is implemented in-process (`src/fanotify.rs`) and probed, not
+   version-checked; CI runs the watcher contract twice, once unprivileged and
+   once under `sudo`. What is still missing before it can be the default for a
+   root: the power and accuracy measurements below, mount-change handling, and a
+   helper with its own privilege boundary instead of the whole app running as
+   root. Whole-filesystem marks remove per-directory watch registration, not
+   every limit or coverage gap.
 3. Windows: add an optional USN reader for persistent recovery on supported local
    volumes, with journal identity/cursor validation and a file-reference/path
    index. Keep ReadDirectoryChangesW for ordinary live watches. USN does not
