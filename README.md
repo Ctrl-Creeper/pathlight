@@ -2,11 +2,11 @@
 
 # Pathlight
 
-A native macOS app that watches folders and tells you what changed on disk, when, and by how much. Pick a folder, and Pathlight records every create, modify, delete, and move inside it — live in a floating monitor, or long-term in the background with history, trends, and growth alerts.
+Watches folders and tells you what changed on disk, when, and by how much. A native macOS app, and a window for Windows and Linux. Pick a folder, and Pathlight records every create, modify, delete, and move inside it — live in a floating monitor, or long-term in the background with history, trends, and growth alerts.
 
-This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathlight) that keeps only the file-change monitoring feature. The disk space analyzer (scanning, sunburst chart, file browser, trash actions) has been removed. The monitoring engine lives in a Rust core (`core/`) so the same journal, attribution, and history logic backs every platform; the macOS app sources its FSEvents stream from it, and `gui/` is a second host — one window, the same core — for Windows and Linux.
+This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathlight) that keeps only the file-change monitoring feature. The disk space analyzer (scanning, sunburst chart, file browser, trash actions) has been removed. The monitoring engine lives in a Rust core (`core/`). Two shells sit on top of it: the macOS app, which takes its FSEvents stream from the core and still runs attribution, exclusion, journal and history in Swift; and `gui/`, a window for Windows and Linux that links the core directly and uses all of it. They share a journal format rather than that code, held byte-for-byte by `core/tests/swift_compat.rs`, so either shell reads the other's history.
 
-![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
+![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Windows%20%7C%20Linux-blue)
 ![Swift](https://img.shields.io/badge/Swift-6.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
@@ -42,9 +42,16 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 
 ## Requirements
 
+The macOS app:
+
 - **macOS Sonoma 14** or later
 - **Xcode 26+** with Swift 6.0 toolchain (for building from source)
 - **Rust stable** (`rustup` recommended; add `x86_64-apple-darwin` for universal builds)
+
+The Windows and Linux window:
+
+- **Rust stable**, and nothing else. No Node, no WebView2, no GTK development headers
+- On Linux, the usual windowing libraries: `libxkbcommon`, `libwayland`, `libGL`
 
 ## Building from Source
 
@@ -109,9 +116,9 @@ PathlightCoreTests/       # Swift package tests
 - **Shared core, native shells.** Event sources are per platform because that is where low power comes from: FSEvents on macOS, inotify on Linux, `ReadDirectoryChangesW` on Windows, all kernel-driven with no polling. Everything above the event source (attribution, exclusion, journal, history) is platform-neutral Rust.
 - **Rust `Watcher`** yields typed changes tagged with event IDs. On macOS the IDs are FSEvents' own, so long-term watches resume from a stored checkpoint after a relaunch; other platforms get a counter and ask the host to re-baseline.
 - **Journal format is shared.** Rust writes the same JSONL rows as Swift's `JSONLActivityEventStore` (fixture-tested against `JSONEncoder` output), so any shell can read any other shell's history.
-- **Two hosts, one core.** `gui/` links `pathlight-core` directly, with no FFI layer, so the Windows and Linux window shares attribution, exclusion, journal and history with the macOS app rather than reimplementing them.
+- **Two hosts, one core, different depths.** `gui/` links `pathlight-core` directly with no FFI layer and uses the whole crate — watcher, attribution, journal. The macOS app uses only the watcher and keeps the rest in Swift, so those two implementations exist in parallel and are kept honest by the shared journal format, not by a shared call path.
 - **Pathlight's own storage is excluded from every watch**, in both hosts, before attribution rather than as a setting: recording a journal write produces an event that measures the journal, which writes to it again. No byte threshold stops that, because attribution measures a path before any threshold applies.
-- **The macOS app today** uses the Rust event source via `RustDiskActivityMonitor` and still runs attribution and exclusion in Swift; moving those to the Rust side is the next step.
+- **Moving the macOS app's attribution and exclusion to the Rust side** is the next step; `gui/` already runs that way, which is what makes the Swift versions replaceable rather than load-bearing.
 - **AppModel** is the single `@MainActor` source of truth: it runs live and long-term watches, persists checkpoints, and enforces the storage policy.
 - **Mobile** is not a monitoring target: iOS and Android sandboxes cannot watch user folders in the background. If they get an app, it will be a viewer of a desktop journal.
 - The Swift package has no external dependencies; the Xcode app target adds Sparkle for updates and the local `PathlightRustCore` package.
