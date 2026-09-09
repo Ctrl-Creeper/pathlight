@@ -465,6 +465,32 @@ fn a_backend_claiming_to_pair_renames_really_does() {
     );
 }
 
+/// The privileged Linux backend is the one thing no ordinary run can reach, so
+/// nothing would notice if the probe quietly stopped finding it: every
+/// capability-gated test above would pass by returning early. This fails
+/// instead. CI runs this suite twice, and the second run has the capability.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_process_holding_the_capability_gets_the_privileged_backend() {
+    // CAP_SYS_ADMIN is bit 21 of the effective set. Reading it beats checking
+    // for uid 0: a container can be root with the capability dropped, and
+    // then the unprivileged backend is the correct answer.
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let effective = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+        .unwrap_or(0);
+    if effective & (1 << 21) == 0 {
+        return;
+    }
+    assert!(
+        watcher_capabilities().reports_process,
+        "CAP_SYS_ADMIN is held and fanotify still did not come up: {:?}",
+        watcher_capabilities()
+    );
+}
+
 /// Holds a backend to its own `reports_process` claim. A watch that says it
 /// names the writer and then reports nothing would have the host show an empty
 /// column forever, which is worse than admitting the platform cannot tell.
