@@ -6,8 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 use std::sync::Arc;
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::event::{ModifyKind, RenameMode};
 use notify::EventKind as NotifyKind;
@@ -30,6 +29,59 @@ pub(crate) const CAPABILITIES: super::Capabilities = super::Capabilities {
     may_drop_events: true,
 };
 
+/// How often the root is re-checked, at most. Event-driven, not a timer: a
+/// watch nothing is happening in asks nothing of the disk.
+const ROOT_CHECK_EVERY: Duration = Duration::from_secs(1);
+
+/// Whether the configured path still names the directory this watch opened on.
+///
+/// Windows has no root-loss signal. Our own handle keeps the directory alive,
+/// so it cannot be deleted while watched — but it can be renamed, and the
+/// handle follows it. Events keep arriving, every path in them is the old
+/// spelling, and nothing anywhere says the watch has moved: a silently wrong
+/// history, which is worse than a reported gap. inotify has `MOVE_SELF` and
+/// `DELETE_SELF` and FSEvents has `RootChanged`; here the only thing left is
+/// to ask whether the path still resolves to the same object.
+pub(crate) struct RootIdentity {
+    at: String,
+    /// `None` when the filesystem would not say. Then only disappearance is
+    /// detectable, which is still better than nothing.
+    identity: Option<crate::measurement::ObjectIdentity>,
+    /// Latched: once reported, the watch is already known to be wrong, and
+    /// repeating it every second would bury the report it already made.
+    reported: bool,
+    due: Instant,
+}
+
+impl RootIdentity {
+    pub(crate) fn of(root: &str) -> Self {
+        Self {
+            at: root.to_owned(),
+            identity: crate::measurement::measure_file(Path::new(root))
+                .ok()
+                .and_then(|measurement| measurement.identity),
+            reported: false,
+            due: Instant::now(),
+        }
+    }
+
+    /// True once, when the root has gone or become a different directory.
+    pub(crate) fn drifted(&mut self) -> bool {
+        if self.reported || Instant::now() < self.due {
+            return false;
+        }
+        self.due = Instant::now() + ROOT_CHECK_EVERY;
+        // An unreadable root counts as drifted. A transient failure costs a
+        // rescan the host would have run anyway; treating it as healthy costs
+        // the history.
+        self.reported = match crate::measurement::measure_file(Path::new(&self.at)) {
+            Ok(now) => self.identity.is_some() && now.identity != self.identity,
+            Err(_) => true,
+        };
+        self.reported
+    }
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 struct NotifyBackend(Option<RecommendedWatcher>);
 
@@ -50,9 +102,16 @@ pub fn start(
     // needs a platform backend that exposes the kernel's own cursor.
     let next_id = Arc::new(AtomicU64::new(1));
     let handler_emitter = Arc::clone(&emitter);
+    let mut root = RootIdentity::of(&emitter.root);
     let mut watcher = RecommendedWatcher::new(
         move |result: notify::Result<notify::Event>| {
             let event_id = next_id.fetch_add(1, Ordering::Relaxed);
+            // Before the event, not after: the paths in it are already the
+            // old spelling if the root moved, and the host needs to know that
+            // before it trusts them.
+            if root.drifted() {
+                handler_emitter.emit(StreamEvent::RequiresRescan { event_id });
+            }
             forward(&handler_emitter, result, event_id);
         },
         Config::default().with_poll_interval(latency),
@@ -128,5 +187,43 @@ pub(crate) fn forward(emitter: &Emitter, result: notify::Result<notify::Event>, 
             .paths
             .iter()
             .for_each(|p| emitter.change(ChangeKind::Modified, exact(p), event_id)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The silent failure this exists for: the watch is alive, the events
+    /// keep coming, and the path they are all spelled with names something
+    /// else now. Not compiled on macOS, where FSEvents reports it itself.
+    #[test]
+    fn a_root_that_became_a_different_directory_is_noticed() {
+        let parent = tempfile::tempdir().unwrap();
+        let at = parent.path().join("watched");
+        std::fs::create_dir(&at).unwrap();
+        let spelling = crate::paths::normalize(&at.to_string_lossy());
+        let mut root = RootIdentity::of(&spelling);
+
+        std::fs::rename(&at, parent.path().join("renamed")).unwrap();
+
+        assert!(root.drifted(), "a renamed root went unnoticed");
+        // Latched: the host has been told, and the same report every second
+        // afterwards would bury it.
+        assert!(!root.drifted());
+    }
+
+    #[test]
+    fn a_root_that_is_still_itself_costs_nothing_and_reports_nothing() {
+        let at = tempfile::tempdir().unwrap();
+        let spelling = crate::paths::normalize(&at.path().to_string_lossy());
+        let mut root = RootIdentity::of(&spelling);
+
+        std::fs::write(at.path().join("busy.txt"), b"work").unwrap();
+
+        assert!(!root.drifted());
+        // A second call inside the check window does not go near the disk;
+        // what it must not do is invent a drift.
+        assert!(!root.drifted());
     }
 }

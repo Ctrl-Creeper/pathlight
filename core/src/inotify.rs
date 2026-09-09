@@ -14,7 +14,7 @@ use notify::event::{Flag, ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::monitor::{Backend, Emitter, StreamEvent};
-use crate::notify_backend::forward;
+use crate::notify_backend::{forward, RootIdentity};
 use crate::CoreError;
 
 const PAIR_WINDOW: Duration = Duration::from_millis(250);
@@ -141,6 +141,12 @@ pub(crate) fn start(
             }
             emitter.emit(StreamEvent::HistoryCaughtUp { event_id: 0 });
             let mut renames = RenameBuffer::default();
+            // An ancestor of the root can be renamed without the kernel
+            // saying anything about our watch: `MOVE_SELF` is only for the
+            // watched inode itself. The watch stays alive, every path it
+            // reports keeps the spelling of a directory that no longer exists
+            // under that name, and nothing else would ever notice.
+            let mut root = RootIdentity::of(&emitter.root);
             let mut event_id = 0;
             let mut emit = |event| {
                 event_id += 1;
@@ -169,6 +175,9 @@ pub(crate) fn start(
                     Err(mpsc::RecvTimeoutError::Timeout) => renames.expire(now),
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
+                if root.drifted() {
+                    emit(rescan());
+                }
                 for event in ready {
                     emit(event);
                 }
