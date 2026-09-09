@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crate::{ActivityEvent, CoreError};
 
@@ -52,6 +53,72 @@ impl Journal {
         Ok(())
     }
 
+
+    /// Drops rows that are older than `retention_days`, then, if the file
+    /// still would not fit in `limit_bytes`, the oldest of what is left.
+    /// Returns how many rows went. Zero means unlimited, for either.
+    ///
+    /// A journal nothing ever trims is the one way a monitor that promises to
+    /// be cheap fills a disk — the thing it exists to warn about.
+    ///
+    /// Age is judged per row and the cap positionally, because a row this
+    /// build cannot date (an encrypted line, or a line from a newer format)
+    /// must not be aged out on a guess. It still counts against the cap, and
+    /// the cap drops from the front, which is oldest for an append-only file.
+    // ponytail: no daily rollup. Swift's `retainedEvents` summarizes older
+    // detailed rows into one row per day instead of dropping them; port that
+    // here when a host wants the long tail, not before.
+    pub fn trim(&self, retention_days: u32, limit_bytes: u64) -> Result<u64, CoreError> {
+        if (retention_days == 0 && limit_bytes == 0) || !self.path.exists() {
+            return Ok(0);
+        }
+        // Read whole: the file is what the previous trim left, so it is
+        // bounded by the cap. Stream it if a caller ever passes a cap larger
+        // than it is willing to hold in memory.
+        let contents = fs::read_to_string(&self.path)?;
+        let mut kept: Vec<&str> = contents.lines().filter(|line| !line.is_empty()).collect();
+        let total = kept.len();
+
+        if retention_days > 0 {
+            let cutoff = SystemTime::now()
+                .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400));
+            if let Some(cutoff) = cutoff {
+                kept.retain(|line| match dated(line) {
+                    Some(timestamp) => timestamp >= cutoff,
+                    None => true,
+                });
+            }
+        }
+
+        if limit_bytes > 0 {
+            let mut bytes: u64 = kept.iter().map(|line| line.len() as u64 + 1).sum();
+            let mut oldest = 0;
+            while bytes > limit_bytes && oldest < kept.len() {
+                bytes -= kept[oldest].len() as u64 + 1;
+                oldest += 1;
+            }
+            kept.drain(..oldest);
+        }
+
+        if kept.len() == total {
+            return Ok(0);
+        }
+
+        // Written beside the journal and renamed over it, so a crash halfway
+        // through leaves the old journal rather than half a new one.
+        let temporary = self.path.with_extension("jsonl.trimming");
+        let mut file = fs::File::create(&temporary)?;
+        set_permissions(&temporary, 0o600)?;
+        for line in &kept {
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &self.path)?;
+        Ok((total - kept.len()) as u64)
+    }
+
     /// Newest first, then path descending, limited — the same order Swift returns.
     pub fn load(&self, root_path: String, limit: u32) -> Result<Vec<ActivityEvent>, CoreError> {
         if limit == 0 || !self.path.exists() {
@@ -94,6 +161,14 @@ impl Journal {
             std::time::SystemTime::now(),
         ))
     }
+}
+
+/// The timestamp of a row this build can read, or `None` when it cannot.
+fn dated(line: &str) -> Option<SystemTime> {
+    if line.starts_with(ENCRYPTED_PREFIX) {
+        return None;
+    }
+    ActivityEvent::from_json_line(line).ok().map(|event| event.timestamp)
 }
 
 #[cfg(unix)]

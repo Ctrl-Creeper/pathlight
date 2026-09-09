@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use pathlight_core::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
 use pathlight_core::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
 use pathlight_core::monitor::{ActivityListener, Change, StreamEvent, Watcher};
-use pathlight_core::{ActivityEvent, Journal};
+use pathlight_core::ActivityEvent;
 
 use crate::store::Storage;
 
@@ -27,6 +27,10 @@ const FLUSH: Duration = Duration::from_millis(200);
 /// Bounded so a burst costs memory it cannot exceed. Overflow is counted and
 /// reported, never quietly dropped.
 const QUEUE_CAPACITY: usize = 4096;
+/// How often the journal is trimmed while a watch runs. Once at the start
+/// would leave a months-long watch untrimmed; more often would re-read the
+/// whole file for nothing.
+const TRIM_EVERY: Duration = Duration::from_secs(3600);
 /// Rows the UI keeps. Totals are kept separately and cover every row, because
 /// totalling only what fits on screen makes a busy disk read as a quiet one.
 const MAX_ROWS: usize = 500;
@@ -161,23 +165,30 @@ impl Worker {
             &prior_size,
             &known_size,
         );
-        let journal = Journal::new(self.storage.journal().to_string_lossy().into_owned());
-
         let mut pending: Vec<Change> = Vec::new();
         let mut due = Instant::now() + FLUSH;
+        // Before the first row of this watch, so a journal left over the cap
+        // by an earlier run does not have to wait an hour to come back under it.
+        self.trim();
+        let mut trim_due = Instant::now() + TRIM_EVERY;
         loop {
             let wait = due.saturating_duration_since(Instant::now());
             match receiver.recv_timeout(wait) {
                 Ok(event) => self.accept(event, &mut pending),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.flush(&attributor, &journal, &mut pending);
+                    self.flush(&attributor, &mut pending);
                     return;
                 }
             }
-            if Instant::now() >= due {
-                self.flush(&attributor, &journal, &mut pending);
-                due = Instant::now() + FLUSH;
+            let now = Instant::now();
+            if now >= due {
+                self.flush(&attributor, &mut pending);
+                due = now + FLUSH;
+            }
+            if now >= trim_due {
+                self.trim();
+                trim_due = now + TRIM_EVERY;
             }
         }
     }
@@ -207,14 +218,23 @@ impl Worker {
                 .is_some_and(|filter| filter.excludes(path))
     }
 
-    fn flush(&self, attributor: &Attributor<'_>, journal: &Journal, pending: &mut Vec<Change>) {
+    /// A failed trim is said out loud rather than retried: the journal is
+    /// still readable and still being written, but it is over a limit the
+    /// user was promised, and only they can free the disk it sits on.
+    fn trim(&self) {
+        if let Err(error) = self.storage.trim_journal() {
+            self.live().error = Some(format!("Could not trim the journal: {error}"));
+        }
+    }
+
+    fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>) {
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if pending.is_empty() && dropped == 0 {
             return;
         }
         let events = attributor.process(pending);
         pending.clear();
-        let failure = journal.append(events.clone()).err();
+        let failure = self.storage.record(events.clone()).err();
 
         let mut live = self.live();
         live.dropped += dropped;
@@ -351,5 +371,41 @@ mod tests {
             .filter(|path| path.contains(".DS_Store") || path.contains(".crdownload"))
             .collect();
         assert!(noise.is_empty(), "recorded excluded paths: {noise:?}");
+    }
+
+    /// The retention wiring, not the retention rule — `core/tests/journal.rs`
+    /// owns the rule. What this proves is that a watch actually asks: a
+    /// journal left over from months ago comes back under the limit without
+    /// the user doing anything.
+    #[test]
+    fn starting_a_watch_trims_a_journal_that_kept_rows_too_long() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let stale = pathlight_core::ActivityEvent {
+            kind: pathlight_core::EventKind::Modified,
+            path: "/elsewhere/ancient.bin".to_owned(),
+            root_path: "/elsewhere".to_owned(),
+            timestamp: SystemTime::now() - Duration::from_secs(400 * 86_400),
+            byte_delta: Some(1),
+            confidence: pathlight_core::Confidence::Confirmed,
+            previous_path: None,
+            affected_item_count: 1,
+            process_name: None,
+        };
+        storage.record(vec![stale]).unwrap();
+
+        let session = watch(root.path(), storage_dir.path());
+        fs::write(root.path().join("now.txt"), b"hello").unwrap();
+        eventually(&session, "the new write to be recorded", |live| {
+            live.event_count > 0
+        });
+
+        let journal = fs::read_to_string(storage.journal()).unwrap();
+        assert!(
+            !journal.contains("ancient.bin"),
+            "the stale row survived: {journal}"
+        );
+        assert!(journal.contains("now.txt"), "journal was {journal:?}");
     }
 }

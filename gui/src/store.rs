@@ -3,11 +3,31 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
-use pathlight_core::{paths, uninstall};
+use pathlight_core::{paths, uninstall, ActivityEvent, CoreError, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
 const WATCHES_FILE: &str = "watches.json";
+/// How long a row is kept, and how large the journal may get. The same
+/// numbers the macOS app ships (`ActivityStoragePreferences.defaults`), so one
+/// journal read on either host means the same thing.
+// ponytail: not settings yet. A monitor that fills a disk is the bug; a
+// monitor whose retention cannot be changed is a preference.
+const RETENTION_DAYS: u32 = 180;
+const JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Every append and every trim in this process takes this.
+///
+/// Two watches share one journal file, and a trim rewrites that file: an
+/// append landing between the trim's read and its rename is a row the trim
+/// silently deletes. Poisoning is ignored on purpose — the guarded value is
+/// `()`, so a thread that panicked holding it left nothing inconsistent, and
+/// refusing every later append would lose far more than it protects.
+fn journal_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Pathlight's own storage directory, plus the spelling used to keep every
 /// watch out of it.
@@ -53,6 +73,22 @@ impl Storage {
     /// be pointed here would spend the disk it is supposed to be watching.
     pub fn is_own(&self, path: &str) -> bool {
         path == self.path || paths::is_inside(&self.path, path)
+    }
+
+    /// Appends rows to the shared journal.
+    pub fn record(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
+        let _guard = journal_lock().lock().unwrap_or_else(PoisonError::into_inner);
+        self.journal_handle().append(events)
+    }
+
+    /// Drops what is too old or over the cap. Returns how many rows went.
+    pub fn trim_journal(&self) -> Result<u64, CoreError> {
+        let _guard = journal_lock().lock().unwrap_or_else(PoisonError::into_inner);
+        self.journal_handle().trim(RETENTION_DAYS, JOURNAL_LIMIT_BYTES)
+    }
+
+    fn journal_handle(&self) -> std::sync::Arc<Journal> {
+        Journal::new(self.journal().to_string_lossy().into_owned())
     }
 
     /// The folders the user chose, dropping any that no longer exist so a
