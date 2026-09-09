@@ -10,6 +10,7 @@
 
 mod session;
 mod store;
+mod theme;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +34,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Pathlight",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| {
+            theme::install(&cc.egui_ctx, &theme::system_fonts());
+            Ok(Box::new(App::new()))
+        }),
     )
 }
 
