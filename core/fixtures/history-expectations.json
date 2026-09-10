@@ -10,6 +10,18 @@
     "/Users/example/Downloads/b.dmg",
     "/Users/example/Downloads/a.dmg"
   ],
+  "search": {
+    "note": "Narrowed to paths containing text, biggest change first, with skip rows stepped over. Totals cover every matching row, not the page.",
+    "text": ".dmg",
+    "largestFirst": true,
+    "skip": 1,
+    "limit": 2,
+    "eventCount": 2,
+    "totalNetByteDelta": 4096,
+    "unknownSizeEventCount": 0,
+    "isTruncated": false,
+    "recentPaths": ["/Users/example/Downloads/b.dmg"]
+  },
   "buckets": [
     { "startSecs": 1757203200, "byteDelta": 0, "eventCount": 1, "unknownSizeEventCount": 1 },
     { "startSecs": 1757224800, "byteDelta": 4096, "eventCount": 2, "unknownSizeEventCount": 0 }

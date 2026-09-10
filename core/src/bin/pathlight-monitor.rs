@@ -4,7 +4,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use pathlight_core::store::{Storage, WatchTarget, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS};
+use pathlight_core::history::Query;
+use pathlight_core::store::{
+    Storage, WatchTarget, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS,
+};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
 use pathlight_core::{paths, ActivityEvent};
 
@@ -184,6 +187,84 @@ fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
     Ok(Some(value))
 }
 
+/// A flag that takes a word, removed from `args` so the folder is what is left.
+fn take_value(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<String>> {
+    let Some(at) = args.iter().position(|arg| arg == name) else {
+        return Ok(None);
+    };
+    let value = args
+        .get(at + 1)
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} needs a value after it"),
+            )
+        })?;
+    args.drain(at..=at + 1);
+    Ok(Some(value))
+}
+
+fn take_count(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<u32>> {
+    match take_value(args, name)? {
+        None => Ok(None),
+        Some(value) => value.parse().map(Some).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} needs a count that is zero or more"),
+            )
+        }),
+    }
+}
+
+fn take_switch(args: &mut Vec<OsString>, name: &str) -> bool {
+    match args.iter().position(|arg| arg == name) {
+        Some(at) => {
+            args.remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The narrowing every host offers, read off a command line.
+fn take_query(args: &mut Vec<OsString>) -> io::Result<Query> {
+    Ok(Query {
+        text: take_value(args, "--find")?.unwrap_or_default(),
+        kind: match take_value(args, "--kind")? {
+            None => None,
+            Some(name) => Some(pathlight_core::text::kind_named(&name).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--kind takes one of {}, not {name}",
+                        pathlight_core::text::kind_names()
+                    ),
+                )
+            })?),
+        },
+        largest_first: take_switch(args, "--largest"),
+        skip: take_count(args, "--skip")?.unwrap_or(0),
+    })
+}
+
+/// What was narrowed to, for the line that says how many rows matched. A count
+/// with no such line reads as the whole record.
+fn narrowing(query: &Query) -> String {
+    let mut said = Vec::new();
+    if !query.text.is_empty() {
+        said.push(format!("matching \"{}\"", query.text));
+    }
+    if let Some(kind) = query.kind {
+        said.push(pathlight_core::text::kind_label(kind).to_owned());
+    }
+    match said.is_empty() {
+        true => String::new(),
+        false => format!(" {}", said.join(" and ")),
+    }
+}
+
 const SETTING_VALUES: &str = "
 Change one with `settings KEY VALUE`: latency takes immediate, power-saving or a number
 of milliseconds; the file bounds take a byte count or `any`; encrypt takes on or off;
@@ -202,7 +283,11 @@ Usage: pathlight-monitor <command> [arguments]
   watches enable FOLDER   Switch a folder on, so `watch` picks it up.
   watches disable FOLDER  Switch it off again.
   watches remove FOLDER   Forget it. Nothing already recorded is deleted.
-  history FOLDER          What the journal holds for a folder.
+  history FOLDER          What the journal holds for a folder. Narrow it with
+                          --find TEXT (part of a path), --kind KIND (one of
+                          new, changed, deleted, moved, group), --largest
+                          (biggest change first), --skip N and --limit N. The
+                          totals always cover every row that matched.
   export FOLDER [FILE]    Write that as CSV, to FILE or to standard output.
   report FOLDER [FILE]    Write it as a report to read: totals, where inside
                           the folder the bytes went, and what was running.
@@ -430,22 +515,42 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
 }
 
 fn history(rest: &[OsString]) -> io::Result<()> {
-    let root = one_folder(rest, "usage: pathlight-monitor history FOLDER")?;
+    let mut args: Vec<OsString> = rest.to_vec();
+    let query = take_query(&mut args)?;
+    let limit = take_count(&mut args, "--limit")?.unwrap_or(HISTORY_ROWS);
+    let root = one_folder(
+        &args,
+        "usage: pathlight-monitor history FOLDER [--find TEXT] [--kind KIND] \
+         [--largest] [--skip N] [--limit N]",
+    )?;
     let snapshot = storage()?
-        .history(&root)
+        .search(&root, limit, &query)
         .map_err(|error| io::Error::other(error.to_string()))?;
     println!("{}", snapshot.root_path);
     println!(
-        "{} change(s), net {}{}",
+        "{} change(s){}, net {}{}",
         snapshot.event_count,
+        narrowing(&query),
         human_bytes(snapshot.total_net_byte_delta),
         match snapshot.unknown_size_event_count {
             0 => String::new(),
             unknown => format!(" ({unknown} of unknown size)"),
         }
     );
-    if snapshot.is_truncated {
-        println!("The rows below are the newest; the totals above cover every row.");
+    let shown = snapshot.recent_events.len() as u32;
+    if shown == 0 && snapshot.event_count > 0 {
+        println!("Nothing left past --skip {}.", query.skip);
+    } else if snapshot.is_truncated || query.skip > 0 {
+        println!(
+            "Rows {}–{} of {}{}. The totals above cover every row that matched.",
+            query.skip + 1,
+            query.skip + shown,
+            snapshot.event_count,
+            match query.largest_first {
+                true => ", biggest first",
+                false => ", newest first",
+            }
+        );
     }
     for event in &snapshot.recent_events {
         print_row(event);

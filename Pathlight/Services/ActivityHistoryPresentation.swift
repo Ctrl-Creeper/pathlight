@@ -146,20 +146,7 @@ private extension DiskActivityEvent {
         return "\(kindTitle) \(path.lastPathComponent)"
     }
 
-    var kindTitle: String {
-        switch kind {
-        case .created:
-            return "Created"
-        case .modified:
-            return "Modified"
-        case .deleted:
-            return "Deleted"
-        case .moved:
-            return "Moved"
-        case .aggregate:
-            return "Changed"
-        }
-    }
+    var kindTitle: String { kind.title }
 
     var kindDescription: String {
         switch kind {
@@ -173,6 +160,26 @@ private extension DiskActivityEvent {
             return "moved"
         case .aggregate:
             return "aggregate"
+        }
+    }
+}
+
+extension DiskActivityEventKind {
+    /// The word one kind of change is named with, wherever a person picks or
+    /// reads one. `core/src/text.rs` spells the same list for the other two
+    /// hosts.
+    var title: String {
+        switch self {
+        case .created:
+            return "Created"
+        case .modified:
+            return "Modified"
+        case .deleted:
+            return "Deleted"
+        case .moved:
+            return "Moved"
+        case .aggregate:
+            return "Changed"
         }
     }
 }

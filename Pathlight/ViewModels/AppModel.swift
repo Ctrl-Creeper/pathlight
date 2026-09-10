@@ -21,6 +21,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
+    /// What the selected folder's history is narrowed to. Kept here rather
+    /// than in the view so an event-driven refresh re-asks the same question
+    /// instead of quietly widening the page somebody is reading.
+    @Published private(set) var activityHistoryQuery: ActivityHistoryQuery = .everything
     @Published private(set) var activityDashboardHistories: [String: ActivityHistorySnapshot] = [:]
     @Published private(set) var activityStorageUsage = ActivityStorageUsageSnapshot.empty
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
@@ -663,10 +667,17 @@ final class AppModel: ObservableObject {
         refreshActivityHistory(rootPath: rootPath)
     }
 
+    /// Narrow the selected folder's history, and read it again through the
+    /// narrowing.
+    func narrowActivityHistory(_ query: ActivityHistoryQuery, rootPath: URL) {
+        activityHistoryQuery = query
+        refreshActivityHistory(rootPath: rootPath)
+    }
+
     func refreshActivityHistory(
         rootPath: URL,
         bucketInterval: TimeInterval = 3_600,
-        eventLimit: Int = 500
+        eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityHistoryRefresh(clearHistory: false)
 
@@ -679,6 +690,7 @@ final class AppModel: ObservableObject {
         let taskID = UUID()
         activityHistoryTaskID = taskID
         let service = ActivityHistoryService(store: activityEventStore)
+        let query = activityHistoryQuery
 
         activityHistoryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -693,14 +705,20 @@ final class AppModel: ObservableObject {
                 let history = try await service.loadHistory(
                     rootPath: rootPath,
                     eventLimit: eventLimit,
-                    bucketInterval: bucketInterval
+                    bucketInterval: bucketInterval,
+                    query: query
                 )
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
                 }
                 self.activityHistory = history
                 self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
-                self.evaluateGrowthAlert(history: history)
+                // A narrowed read describes what somebody searched for, not
+                // how much the folder grew, so it is not something to warn
+                // about. The whole-folder pass below still does.
+                if query.isEverything {
+                    self.evaluateGrowthAlert(history: history)
+                }
             } catch {
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
@@ -714,7 +732,7 @@ final class AppModel: ObservableObject {
     func refreshActivityDashboardHistories(
         rootPaths: [URL],
         bucketInterval: TimeInterval = 3_600,
-        eventLimit: Int = 500
+        eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityDashboardHistoryRefresh(clearHistories: false)
 
@@ -770,6 +788,13 @@ final class AppModel: ObservableObject {
                     }
                     self.activityDashboardHistories.removeValue(forKey: root.path)
                 }
+            }
+
+            // Every card is read whole, so this pass just overwrote the
+            // narrowed page the timeline is showing. Ask that one root again
+            // through its narrowing.
+            if !self.activityHistoryQuery.isEverything, let narrowed = self.activityHistory?.rootPath {
+                self.refreshActivityHistory(rootPath: narrowed)
             }
         }
     }

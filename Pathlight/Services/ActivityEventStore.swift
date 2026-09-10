@@ -44,12 +44,14 @@ nonisolated protocol ActivityEventStoring: Sendable {
     func append(_ events: [DiskActivityEvent]) async throws
     /// The newest `limit` events for the root, newest first.
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
-    /// Newest `limit` events plus totals over *everything* retained for the
-    /// root, so a capped page can never understate the dashboard.
+    /// One page of the rows `query` matched, plus totals over *every* matching
+    /// row retained for the root, so a capped page can never understate the
+    /// dashboard and a search box can never overstate what it found.
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery
     ) async throws -> ActivityEventPage
     func enforceStoragePolicy(
         _ preferences: ActivityStoragePreferences,
@@ -64,14 +66,17 @@ extension ActivityEventStoring {
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
-        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
-        // Reversed because the builder's window keeps the last `limit` rows it
-        // is handed — which is the newest only in journal order, and
-        // `loadEvents` answers newest first. Handed the list as it comes, a
-        // store without its own reader paged the *oldest* events.
-        for event in try await loadEvents(rootPath: rootPath, limit: .max).reversed() {
+        var builder = ActivityEventPageBuilder(
+            limit: limit,
+            bucketInterval: bucketInterval,
+            query: query
+        )
+        // Any order will do: the builder sorts the page it kept, so what it was
+        // handed first no longer decides what it lists.
+        for event in try await loadEvents(rootPath: rootPath, limit: .max) {
             builder.add(event)
         }
         return builder.page()
@@ -236,7 +241,8 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
         guard FileManager.default.fileExists(atPath: journalURL.path) else {
             return .empty
@@ -246,7 +252,11 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         let data = try Data(contentsOf: journalURL)
         let contents = String(decoding: data, as: UTF8.self)
 
-        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
+        var builder = ActivityEventPageBuilder(
+            limit: limit,
+            bucketInterval: bucketInterval,
+            query: query
+        )
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = try? lineCodec.decode(line),
                   let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),

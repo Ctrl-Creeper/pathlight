@@ -41,7 +41,8 @@ pub const BACKGROUND_LATENCY_MS: u64 = 30_000;
 /// One bucket per hour, and the rows one screen can plausibly be scrolled
 /// through. Totals cover every retained row either way.
 const HISTORY_BUCKET_SECS: u64 = 3600;
-const HISTORY_ROWS: u32 = 200;
+/// The page a host lists when nobody asked for a different one.
+pub const HISTORY_ROWS: u32 = 200;
 
 /// Every append and every trim in this process takes this.
 ///
@@ -189,8 +190,27 @@ impl Storage {
     /// would stall every live watch's flush for as long as the read takes: a
     /// torn line costs this one read a row, the lock would cost the recording.
     pub fn history(&self, root: &str) -> Result<HistorySnapshot, CoreError> {
-        self.journal_handle()
-            .load_history(root.to_owned(), HISTORY_ROWS, HISTORY_BUCKET_SECS)
+        self.search(root, HISTORY_ROWS, &Default::default())
+    }
+
+    /// The same history, narrowed to what somebody typed in a search box or
+    /// passed on a command line.
+    ///
+    /// One owner for what a match is and how a page is cut, because "find
+    /// every .psd that was deleted, biggest first" has to mean the same thing
+    /// in a window and in a terminal.
+    pub fn search(
+        &self,
+        root: &str,
+        limit: u32,
+        query: &crate::history::Query,
+    ) -> Result<HistorySnapshot, CoreError> {
+        self.journal_handle().load_history(
+            root.to_owned(),
+            limit,
+            HISTORY_BUCKET_SECS,
+            query.clone(),
+        )
     }
 
     /// Every retained row for one folder, newest first — the whole record

@@ -1,6 +1,6 @@
 use std::time::{Duration, UNIX_EPOCH};
 
-use pathlight_core::history::build_history;
+use pathlight_core::history::{build_history, Query};
 use pathlight_core::{ActivityEvent, Confidence, EventKind};
 
 const ROOT: &str = "/Users/example/Downloads";
@@ -30,7 +30,14 @@ fn buckets_totals_and_newest_first_ordering() {
         event("b", 3_650, Some(-40)),
         event("c", 3_700, None),
     ];
-    let history = build_history(&format!("{ROOT}/"), events, 3_600, 100, UNIX_EPOCH);
+    let history = build_history(
+        &format!("{ROOT}/"),
+        events,
+        3_600,
+        100,
+        &Query::default(),
+        UNIX_EPOCH,
+    );
 
     assert_eq!(history.root_path, ROOT);
     assert_eq!(history.total_net_byte_delta, 60);
@@ -62,7 +69,7 @@ fn totals_cover_every_event_while_listing_one_page() {
         .map(|i| event(&format!("f{i}"), i, Some(10)))
         .collect();
 
-    let history = build_history(ROOT, events, 3_600, 3, UNIX_EPOCH);
+    let history = build_history(ROOT, events, 3_600, 3, &Query::default(), UNIX_EPOCH);
 
     assert_eq!(history.event_count, 10);
     assert_eq!(history.total_net_byte_delta, 100);
@@ -95,6 +102,7 @@ fn both_hosts_fold_the_same_rows_into_the_same_history() {
         events,
         expected["bucketIntervalSecs"].as_u64().unwrap(),
         expected["recentLimit"].as_u64().unwrap() as u32,
+        &Query::default(),
         UNIX_EPOCH,
     );
 
@@ -144,4 +152,86 @@ fn both_hosts_fold_the_same_rows_into_the_same_history() {
             wanted["unknownSizeEventCount"].as_u64().unwrap()
         );
     }
+}
+
+/// Searching is the other half of that contract: a filtered view's totals have
+/// to cover what matched, not what the page lists, or the number under a search
+/// box means nothing.
+#[test]
+fn both_hosts_narrow_the_same_rows_the_same_way() {
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/history-expectations.json")).unwrap();
+    let search = &expected["search"];
+    let events: Vec<ActivityEvent> = include_str!("../fixtures/swift-journal.jsonl")
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| ActivityEvent::from_json_line(line).unwrap())
+        .collect();
+
+    let history = build_history(
+        ROOT,
+        events,
+        expected["bucketIntervalSecs"].as_u64().unwrap(),
+        search["limit"].as_u64().unwrap() as u32,
+        &Query {
+            text: search["text"].as_str().unwrap().to_owned(),
+            kind: None,
+            largest_first: search["largestFirst"].as_bool().unwrap(),
+            skip: search["skip"].as_u64().unwrap() as u32,
+        },
+        UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        u64::from(history.event_count),
+        search["eventCount"].as_u64().unwrap()
+    );
+    assert_eq!(
+        history.total_net_byte_delta,
+        search["totalNetByteDelta"].as_i64().unwrap()
+    );
+    assert_eq!(
+        u64::from(history.unknown_size_event_count),
+        search["unknownSizeEventCount"].as_u64().unwrap()
+    );
+    assert_eq!(
+        history.is_truncated,
+        search["isTruncated"].as_bool().unwrap()
+    );
+    let paths: Vec<&str> = history
+        .recent_events
+        .iter()
+        .map(|event| event.path.as_str())
+        .collect();
+    let wanted: Vec<&str> = search["recentPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    assert_eq!(paths, wanted);
+}
+
+/// One kind of change, which is how "what did it delete" gets answered.
+#[test]
+fn one_kind_of_change_can_be_asked_for_on_its_own() {
+    let mut deleted = event("gone.psd", 20, Some(-4_000));
+    deleted.kind = EventKind::Deleted;
+    let events = vec![event("kept.psd", 10, Some(1_000)), deleted];
+
+    let history = build_history(
+        ROOT,
+        events,
+        3_600,
+        10,
+        &Query {
+            kind: Some(EventKind::Deleted),
+            ..Query::default()
+        },
+        UNIX_EPOCH,
+    );
+
+    assert_eq!(history.event_count, 1);
+    assert_eq!(history.total_net_byte_delta, -4_000);
+    assert_eq!(history.recent_events[0].path, format!("{ROOT}/gone.psd"));
 }

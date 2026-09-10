@@ -19,7 +19,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    const CASES: [(EventKind, &'static str); 5] = [
+    pub(crate) const CASES: [(EventKind, &'static str); 5] = [
         (EventKind::Created, "created"),
         (EventKind::Modified, "modified"),
         (EventKind::Deleted, "deleted"),

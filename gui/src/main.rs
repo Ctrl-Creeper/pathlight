@@ -19,8 +19,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use eframe::egui;
+use pathlight_core::history::Query;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::store::{Storage, WatchTarget};
+use pathlight_core::store::{Storage, WatchTarget, HISTORY_ROWS};
 use pathlight_core::text::{elapsed, human_bytes, kind_label, leaf};
 use pathlight_core::watch::Session;
 use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapshot};
@@ -57,6 +58,13 @@ struct App {
     watches: Vec<WatchTarget>,
     sessions: HashMap<String, Session>,
     selected: Option<String>,
+    /// What the history pane was narrowed to, kept while the selection moves
+    /// so a search survives clicking between folders.
+    query: Query,
+    /// What is typed in the search box but not asked for yet. A journal read
+    /// per keystroke is a read of the whole file per keystroke, so the box
+    /// waits for Enter or for the focus to leave.
+    find: String,
     /// What the journal already holds for [`Self::selected`], so a folder that
     /// was recorded last month is not a blank pane this month. Read on its own
     /// thread: the journal is as large as the retention cap allows, and
@@ -123,6 +131,8 @@ impl App {
             storage,
             watches,
             sessions: HashMap::new(),
+            query: Query::default(),
+            find: String::new(),
             history: None,
             history_root: None,
             history_pending: None,
@@ -179,13 +189,18 @@ impl App {
         };
         let (sender, receiver) = mpsc::channel();
         let root = root.to_owned();
+        let query = self.query.clone();
         // A failed spawn leaves `history` empty, which the pane reads as still
         // loading — wrong, but a thread that will not start is a machine with
         // worse problems than a missing panel.
         if std::thread::Builder::new()
             .name("pathlight-history".into())
             .spawn(move || {
-                let _ = sender.send(storage.history(&root).map_err(|error| error.to_string()));
+                let _ = sender.send(
+                    storage
+                        .search(&root, HISTORY_ROWS, &query)
+                        .map_err(|error| error.to_string()),
+                );
             })
             .is_ok()
         {
@@ -444,6 +459,10 @@ impl App {
 /// `&self`, and both of these change the app.
 enum Ask {
     Reload,
+    /// The history pane, narrowed to something else. Read again rather than
+    /// filtered in place: the totals have to cover every row that matched,
+    /// which only the journal knows.
+    Requery(Query),
     /// Every recorded row as a file: a spreadsheet's CSV, or the report a
     /// person reads.
     Export {
@@ -567,6 +586,12 @@ impl App {
             .show(ui, |ui| self.detail(ui))
             .inner;
         match ask {
+            Some(Ask::Requery(query)) => {
+                self.query = query;
+                if let Some(root) = self.selected.clone() {
+                    self.load_history(&root);
+                }
+            }
             Some(Ask::Reload) => {
                 if let Some(root) = self.selected.clone() {
                     self.load_history(&root);
@@ -787,7 +812,7 @@ impl App {
         }
     }
 
-    fn detail(&self, ui: &mut egui::Ui) -> Option<Ask> {
+    fn detail(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
         let Some(root) = self.selected.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -895,14 +920,61 @@ impl App {
     }
 
     /// What the journal holds for a folder nothing is watching right now.
-    fn recorded_history(&self, ui: &mut egui::Ui, root: &str) -> Option<Ask> {
+    fn recorded_history(&mut self, ui: &mut egui::Ui, root: &str) -> Option<Ask> {
         let mut reload = false;
+        let mut query = self.query.clone();
+        let narrowed = query != Query::default();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Recorded history").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 reload = ui.button("Reload").clicked();
             });
         });
+        ui.add_space(6.0);
+
+        let find = &mut self.find;
+        let mut asked = None;
+        ui.horizontal_wrapped(|ui| {
+            let name = ui.label(
+                egui::RichText::new("Find")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            let box_ = ui
+                .add(
+                    egui::TextEdit::singleline(find)
+                        .hint_text("Part of a path")
+                        .desired_width(170.0),
+                )
+                .labelled_by(name.id);
+            if box_.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                asked = Some(find.clone());
+            }
+            egui::ComboBox::from_id_salt("history-kind")
+                .selected_text(query.kind.map(kind_label).unwrap_or("Any change"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut query.kind, None, "Any change");
+                    for kind in pathlight_core::text::kinds() {
+                        ui.selectable_value(&mut query.kind, Some(kind), kind_label(kind));
+                    }
+                });
+            ui.checkbox(&mut query.largest_first, "Biggest first");
+            if narrowed && ui.button("Clear").clicked() {
+                query = Query::default();
+                find.clear();
+                asked = Some(String::new());
+            }
+        });
+        if let Some(text) = asked {
+            query.text = text;
+        }
+        // A different question starts at its own first page, not at the page
+        // the last one happened to be on.
+        if (&query.text, query.kind, query.largest_first)
+            != (&self.query.text, self.query.kind, self.query.largest_first)
+        {
+            query.skip = 0;
+        }
         ui.add_space(6.0);
 
         match &self.history {
@@ -915,8 +987,11 @@ impl App {
             Some(Err(error)) => warn(ui, &format!("Could not read the journal: {error}")),
             Some(Ok(history)) if history.event_count == 0 => {
                 ui.label(
-                    egui::RichText::new("Nothing has been recorded here yet.")
-                        .color(ui.visuals().weak_text_color()),
+                    egui::RichText::new(match narrowed {
+                        true => "Nothing recorded here matches that.",
+                        false => "Nothing has been recorded here yet.",
+                    })
+                    .color(ui.visuals().weak_text_color()),
                 );
             }
             Some(Ok(history)) => {
@@ -962,18 +1037,42 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                     );
                 }
-                if history.is_truncated {
-                    ui.label(
-                        egui::RichText::new(
-                            "Newest changes only. The totals above cover every retained row.",
-                        )
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                    );
+                // The totals above cover every matching row; these buttons
+                // move the list, which is why they say which rows it holds.
+                let shown = history.recent_events.len() as u32;
+                if history.is_truncated || query.skip > 0 {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Rows {}–{} of {}. The totals above cover them all.",
+                                query.skip + 1,
+                                query.skip + shown,
+                                history.event_count
+                            ))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                        if ui
+                            .add_enabled(query.skip > 0, egui::Button::new("Previous page"))
+                            .clicked()
+                        {
+                            query.skip = query.skip.saturating_sub(HISTORY_ROWS);
+                        }
+                        if ui
+                            .add_enabled(history.is_truncated, egui::Button::new("Next page"))
+                            .clicked()
+                        {
+                            query.skip += HISTORY_ROWS;
+                        }
+                    });
                 }
                 ui.add_space(8.0);
                 rows(ui, "history-events", history.recent_events.iter(), root);
             }
+        }
+        if query != self.query {
+            return Some(Ask::Requery(query));
         }
         reload.then_some(Ask::Reload)
     }
@@ -1237,6 +1336,8 @@ mod tests {
                 })
                 .collect(),
             sessions: HashMap::new(),
+            query: Query::default(),
+            find: String::new(),
             history: None,
             history_root: None,
             history_pending: None,
@@ -1453,6 +1554,58 @@ mod tests {
         let harness = harness(app(storage.path(), vec!["/watched/folder".to_owned()]));
 
         harness.get_by_label("Export…");
+    }
+
+    /// The search controls, driven through the real widgets. What they narrow
+    /// to has to become the question the journal is read with — the reading
+    /// itself, and what counts as a match, is pinned in `core/tests/history.rs`.
+    #[test]
+    fn narrowing_the_history_asks_the_journal_the_narrower_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = "/watched/folder".to_owned();
+        let recorded = pathlight_core::history::build_history(
+            &root,
+            vec![pathlight_core::ActivityEvent {
+                kind: EventKind::Modified,
+                path: "/watched/folder/big.psd".to_owned(),
+                root_path: root.clone(),
+                timestamp: SystemTime::now(),
+                byte_delta: Some(8_192),
+                confidence: Confidence::Confirmed,
+                previous_path: None,
+                affected_item_count: 1,
+                process_name: None,
+            }],
+            3_600,
+            HISTORY_ROWS,
+            &Query::default(),
+            SystemTime::now(),
+        );
+        let mut app = app(dir.path(), vec![root.clone()]);
+        // Already read, so the pane draws its rows rather than waiting on the
+        // thread that would read them.
+        app.history_root = Some(root);
+        app.history = Some(Ok(recorded));
+        let mut harness = harness(app);
+
+        harness.get_by_label("Find").focus();
+        harness.step();
+        harness.get_by_label("Find").type_text("psd");
+        harness.step();
+        // Enter is what commits it: a journal read per keystroke is a read of
+        // the whole file per keystroke.
+        harness.key_press(egui::Key::Enter);
+        harness.step();
+        assert_eq!(harness.state().query.text, "psd");
+
+        harness.get_by_label("Biggest first").click();
+        harness.step();
+        assert!(harness.state().query.largest_first);
+        // And clearing puts back the whole record, box included.
+        harness.get_by_label("Clear").click();
+        harness.step();
+        assert_eq!(harness.state().query, Query::default());
+        assert!(harness.state().find.is_empty());
     }
 
     /// Nothing selected is nothing to export, and a button that acts on the

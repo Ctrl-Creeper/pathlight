@@ -184,12 +184,14 @@ impl Journal {
         Ok(events)
     }
 
-    /// Dashboard history for one root: buckets, totals, and the newest rows.
+    /// Dashboard history for one root: buckets, totals, and the page of rows
+    /// `query` asked for.
     pub fn load_history(
         &self,
         root_path: String,
         limit: u32,
         bucket_interval_secs: u64,
+        query: crate::history::Query,
     ) -> Result<crate::HistorySnapshot, CoreError> {
         // Every retained row, not just the page: `limit` cuts the listed rows
         // inside `build_history`, after the totals are known.
@@ -199,6 +201,7 @@ impl Journal {
             events,
             bucket_interval_secs,
             limit,
+            &query,
             std::time::SystemTime::now(),
         ))
     }

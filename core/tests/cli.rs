@@ -6,6 +6,9 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, UNIX_EPOCH};
+
+use pathlight_core::{ActivityEvent, Confidence, EventKind, Journal};
 
 /// The command, run against a throwaway home so nothing touches the tester's
 /// own records. `HOME` (and `USERPROFILE`) is how the store finds its
@@ -196,4 +199,90 @@ fn the_bare_command_says_what_the_commands_are() {
     ] {
         assert!(help.contains(command), "{command} missing from {help}");
     }
+}
+
+/// Where this install keeps its records, as the command itself reports it: the
+/// test writes rows the way the windows do, into the file both hosts share.
+fn records_dir(home: &Path) -> String {
+    let shown = text(&run(home, &["settings"]));
+    shown
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("folder"))
+        .map(|path| path.trim().to_owned())
+        .expect("settings names the folder it keeps records in")
+}
+
+fn recorded(root: &Path, name: &str, seconds: u64, delta: i64, kind: EventKind) -> ActivityEvent {
+    ActivityEvent {
+        kind,
+        path: root.join(name).to_string_lossy().into_owned(),
+        root_path: root.to_string_lossy().into_owned(),
+        timestamp: UNIX_EPOCH + Duration::from_secs(seconds),
+        byte_delta: Some(delta),
+        confidence: Confidence::Confirmed,
+        previous_path: None,
+        affected_item_count: 1,
+        process_name: None,
+    }
+}
+
+/// Searching a history from a terminal. The rule itself is pinned in
+/// `tests/history.rs`; what matters here is that every flag reaches it and that
+/// the counts printed describe what matched rather than the whole record.
+#[test]
+fn a_history_can_be_narrowed_to_what_somebody_is_looking_for() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    let path = root.to_string_lossy().replace('\\', "/");
+
+    let journal = Journal::new(format!(
+        "{}/activity-events.jsonl",
+        records_dir(home.path())
+    ));
+    journal
+        .append(vec![
+            recorded(root, "big.psd", 10, 8_192, EventKind::Created),
+            recorded(root, "small.psd", 20, 16, EventKind::Modified),
+            recorded(root, "notes.txt", 30, -4_096, EventKind::Deleted),
+        ])
+        .unwrap();
+
+    let all = text(&run(home.path(), &["history", &path]));
+    assert!(all.contains("3 change(s), net"), "{all}");
+
+    // Part of a path, without regard to case.
+    let found = text(&run(home.path(), &["history", &path, "--find", "PSD"]));
+    assert!(found.contains(r#"2 change(s) matching "PSD""#), "{found}");
+    assert!(!found.contains("notes.txt"), "{found}");
+
+    // One kind, by the word the rows are printed with.
+    let deleted = text(&run(home.path(), &["history", &path, "--kind", "deleted"]));
+    assert!(deleted.contains("1 change(s) deleted"), "{deleted}");
+    assert!(deleted.contains("notes.txt"), "{deleted}");
+
+    // Biggest first, one row at a time: the page moves, the totals do not.
+    let first = text(&run(
+        home.path(),
+        &["history", &path, "--largest", "--limit", "1"],
+    ));
+    assert!(first.contains("big.psd"), "{first}");
+    assert!(first.contains("Rows 1–1 of 3, biggest first"), "{first}");
+    let second = text(&run(
+        home.path(),
+        &["history", &path, "--largest", "--limit", "1", "--skip", "1"],
+    ));
+    assert!(second.contains("notes.txt"), "{second}");
+    assert!(second.contains("Rows 2–2 of 3"), "{second}");
+    let past_the_end = text(&run(home.path(), &["history", &path, "--skip", "9"]));
+    assert!(
+        past_the_end.contains("Nothing left past --skip 9"),
+        "{past_the_end}"
+    );
+
+    // A kind nobody records is a mistyped flag, not an empty history.
+    let mistyped = run(home.path(), &["history", &path, "--kind", "shredded"]);
+    assert!(!mistyped.status.success());
+    assert!(text(&mistyped).contains("deleted"), "{}", text(&mistyped));
 }

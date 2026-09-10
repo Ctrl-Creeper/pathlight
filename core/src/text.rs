@@ -22,6 +22,28 @@ pub fn kind_label(kind: EventKind) -> &'static str {
     }
 }
 
+/// Every kind of change, in the order a chooser lists them.
+pub fn kinds() -> impl Iterator<Item = EventKind> {
+    EventKind::CASES.iter().map(|(kind, _)| *kind)
+}
+
+/// The reverse of [`kind_label`], for a search box or a command line.
+///
+/// Both the printed word and the journal's own name are accepted: one is what
+/// people see in a list, the other is what they see in the file.
+pub fn kind_named(name: &str) -> Option<EventKind> {
+    let wanted = name.trim().to_lowercase();
+    EventKind::CASES
+        .iter()
+        .find(|(kind, name)| *name == wanted || kind_label(*kind) == wanted)
+        .map(|(kind, _)| *kind)
+}
+
+/// The kinds a person may type, for the message that says they mistyped one.
+pub fn kind_names() -> String {
+    kinds().map(kind_label).collect::<Vec<_>>().join(", ")
+}
+
 /// The last component of a path: what the user calls the folder.
 pub fn leaf(path: &str) -> String {
     path.rsplit('/')
