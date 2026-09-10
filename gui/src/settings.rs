@@ -14,7 +14,7 @@ use pathlight_core::store::{
 };
 use pathlight_core::text::human_bytes;
 
-use crate::BYTES_PER_MB;
+use crate::{show_in_file_manager, BYTES_PER_MB};
 
 /// What the boxes hold while they are being edited. Text, because a
 /// half-typed number is not a setting and must not be saved as one.
@@ -185,7 +185,7 @@ impl Draft {
                 verdict = Some(Verdict::Close);
             }
             if ui.button("Show records folder").clicked() {
-                show_folder(storage.dir());
+                show_in_file_manager(storage.dir());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Apply").clicked() {
@@ -281,23 +281,6 @@ fn recorded_size(journal: &Path) -> String {
         Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
         Err(_) => "nothing recorded yet".to_owned(),
     }
-}
-
-/// Opens the records folder in the desktop's file manager, which is how a
-/// person gets at a journal to copy or delete it by hand. The macOS app calls
-/// this Reveal in Finder.
-// ponytail: the platform's own opener rather than a crate for it. Failure is
-// silent on purpose — there is nothing the user can do about a desktop with no
-// file manager, and the path is on screen beside the button.
-fn show_folder(dir: &Path) {
-    let program = if cfg!(windows) {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(program).arg(dir).spawn();
 }
 
 #[cfg(test)]

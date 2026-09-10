@@ -107,6 +107,23 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     assert!(text(&run(home.path(), &["settings"])).contains("retention-days            30"));
 }
 
+/// The offer has to be a real folder on the machine running it, or it is an
+/// offer to watch nothing.
+#[test]
+fn the_suggested_folders_are_ones_this_machine_has() {
+    let home = tempfile::tempdir().unwrap();
+    let listed = text(&run(home.path(), &["presets"]));
+    let paths: Vec<&str> = listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter(|word| word.starts_with('/') || word.contains(":/"))
+        .collect();
+    assert!(!paths.is_empty(), "{listed}");
+    for path in paths {
+        assert!(Path::new(path).is_dir(), "{path} is not a folder");
+    }
+}
+
 #[test]
 fn nothing_recorded_yet_is_said_rather_than_exported_as_an_empty_file() {
     let home = tempfile::tempdir().unwrap();

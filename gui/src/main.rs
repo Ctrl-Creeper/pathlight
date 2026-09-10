@@ -14,7 +14,7 @@ mod theme;
 mod tray;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -777,6 +777,13 @@ impl App {
                 if ui.button("Export…").clicked() {
                     ask = Some(Ask::Export);
                 }
+                if ui
+                    .button("Show…")
+                    .on_hover_text("Opens this folder in your file manager.")
+                    .clicked()
+                {
+                    show_in_file_manager(Path::new(&root));
+                }
             });
         });
         ui.label(
@@ -1031,7 +1038,23 @@ fn rows<'a>(
                 .show(ui, |ui| {
                     for event in events {
                         ui.label(egui::RichText::new(kind_label(event.kind)).small());
-                        ui.label(relative_path(&event.path, root));
+                        // Clickable, because the question after "this file
+                        // changed" is "where is it", and a deleted file's
+                        // folder is still worth opening.
+                        if ui
+                            .add(
+                                egui::Label::new(relative_path(&event.path, root))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Click to show this in your file manager.")
+                            .clicked()
+                        {
+                            let path = Path::new(&event.path);
+                            show_in_file_manager(match path.is_dir() {
+                                true => path,
+                                false => path.parent().unwrap_or(Path::new(root)),
+                            });
+                        }
                         ui.label(match event.byte_delta {
                             Some(delta) => egui::RichText::new(human_bytes(delta)),
                             None => {
@@ -1109,6 +1132,23 @@ fn relative_path(path: &str, root: &str) -> String {
         .map(|rest| rest.trim_start_matches('/').to_owned())
         .filter(|rest| !rest.is_empty())
         .unwrap_or_else(|| path.to_owned())
+}
+
+/// Opens a folder in the desktop's file manager — the records folder, or a
+/// folder something was recorded in. The macOS app calls this Reveal in
+/// Finder.
+// ponytail: the platform's own opener rather than a crate for it. Failure is
+// silent on purpose — there is nothing the user can do about a desktop with no
+// file manager, and the path is on screen beside the button.
+pub fn show_in_file_manager(path: &Path) {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(path).spawn();
 }
 
 /// What the size boxes count in. Megabytes as a person means them on a

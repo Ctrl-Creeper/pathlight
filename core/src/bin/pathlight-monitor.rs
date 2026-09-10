@@ -195,6 +195,7 @@ Usage: pathlight-monitor <command> [arguments]
 
   watch [FOLDER…]         Watch folders and print what changes, recording it.
                           With no folder, watches the ones that are switched on.
+  presets                 The folders worth watching on this machine, named.
   watches                 List the folders this install remembers.
   watches add FOLDER      Remember a folder, switched off.
   watches enable FOLDER   Switch a folder on, so `watch` picks it up.
@@ -328,6 +329,23 @@ fn print_row(event: &ActivityEvent) {
         kind_label(event.kind),
         event.path,
     );
+}
+
+/// The folders a machine keeps its churn in, which nobody would think to type:
+/// `AppData\Local`, `~/.cache`, the whole disk. The same list the window
+/// offers beside its folder picker.
+fn presets(rest: &[OsString]) -> io::Result<()> {
+    if !rest.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: pathlight-monitor presets",
+        ));
+    }
+    for preset in pathlight_core::presets::available() {
+        println!("{:<20}{}", preset.title, preset.path);
+    }
+    println!("\nAdd one with `watches add FOLDER`.");
+    Ok(())
 }
 
 /// The remembered folders, and the switches the windows show as checkboxes.
@@ -675,6 +693,7 @@ fn run() -> io::Result<()> {
         "install-cli" => return install_cli(&args[1..]),
         "watch" => return watch(&args[1..]),
         "watches" => return watches(&args[1..]),
+        "presets" => return presets(&args[1..]),
         "history" => return history(&args[1..]),
         "export" => return export(&args[1..]),
         "settings" => return settings(&args[1..]),
