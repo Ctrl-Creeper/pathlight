@@ -1,3 +1,7 @@
+# Actions are pinned to commits, with the tag they were at in the comment: a
+# tag is a name its owner can move, and a workflow that signs and notarizes
+# builds is a workflow whose steps must not change under it. Moving a pin is a
+# commit, which is the point.
 # Every artifact is built on the OS it runs on. No cross-compilation, because a
 # Windows window that only ever linked on a Linux runner is a window nobody has
 # seen start.
@@ -29,10 +33,10 @@ jobs:
           - { os: ubuntu-latest, name: Linux x86_64, slug: linux-x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TAG }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install Linux windowing libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
@@ -71,7 +75,7 @@ jobs:
         run: |
           Compress-Archive -Path $env:APP -DestinationPath "$env:APP.zip"
           Compress-Archive -Path $env:CLI -DestinationPath "$env:CLI.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.slug }}
           path: |
@@ -83,13 +87,13 @@ jobs:
     name: macOS app
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TAG }}
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - name: Build universal xcframework
@@ -121,7 +125,7 @@ jobs:
           # symlinks and resource forks intact.
           ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
           ditto -c -k --sequesterRsrc --keepParent "$cli" "$cli.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos
           path: "*.zip"
@@ -132,12 +136,12 @@ jobs:
     needs: [desktop, macos-app]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TAG }}
           sparse-checkout: .github/release-notes.md
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: true
