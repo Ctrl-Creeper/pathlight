@@ -5,7 +5,8 @@
 //! scripting language already reads it, and the journal's own JSON lines
 //! remain there for anything that would rather parse those.
 
-use pathlight_core::{ActivityEvent, Confidence};
+use crate::text::kind_label;
+use crate::{ActivityEvent, Confidence};
 
 /// One header row, then one row per change in the order given.
 pub fn csv(events: &[ActivityEvent]) -> String {
@@ -15,7 +16,7 @@ pub fn csv(events: &[ActivityEvent]) -> String {
             // A row this build cannot date still belongs in the export: the
             // change happened, only its clock reading is unspellable.
             quoted(&event.timestamp_text().unwrap_or_default()),
-            quoted(crate::kind_label(event.kind)),
+            quoted(kind_label(event.kind)),
             filename(&event.path),
             filename(event.previous_path.as_deref().unwrap_or_default()),
             quoted(
@@ -68,7 +69,7 @@ fn filename(text: &str) -> String {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use pathlight_core::EventKind;
+    use crate::EventKind;
 
     use super::*;
 

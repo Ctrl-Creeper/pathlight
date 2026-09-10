@@ -1,5 +1,9 @@
 //! One live watch: kernel events in, attributed rows out, journal on disk.
 //!
+//! Shared by every host that is not the macOS app — the egui window and the
+//! command line both open watches through this, so a folder watched from a
+//! terminal is recorded exactly the way the window would record it.
+//!
 //! The watcher calls back on its own thread and must not be made to wait, so
 //! callbacks only enqueue. A worker thread does the measuring, the attribution
 //! and the file I/O, and the UI thread only ever reads a snapshot behind a
@@ -12,15 +16,13 @@ use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use pathlight_core::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
-use pathlight_core::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
-use pathlight_core::monitor::{ActivityListener, Change, StreamEvent, Watcher};
-use pathlight_core::snapshot::{
-    self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot,
-};
-use pathlight_core::{paths, ActivityEvent, Confidence, EventKind};
+use crate::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
+use crate::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
+use crate::monitor::{ActivityListener, Change, StreamEvent, Watcher};
+use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
+use crate::{paths, ActivityEvent, Confidence, EventKind};
 
-use crate::notify::Alerts;
+use crate::anomaly::{anomalies, Anomaly, AnomalyKind, WINDOW};
 use crate::store::Storage;
 
 /// The interactive coalescing window. Wide enough that a save is one event
@@ -84,7 +86,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start(root: &str, storage: Storage) -> Result<Self, String> {
+    pub fn start(
+        root: &str,
+        storage: Storage,
+        announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         // Built before the watch opens: a filter that failed to compile after
         // events started arriving would record the noise it exists to drop.
         let exclusions =
@@ -120,6 +126,7 @@ impl Session {
             live: live.clone(),
             dropped,
             alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(announce),
         };
         std::thread::Builder::new()
             .name("pathlight-session".into())
@@ -190,6 +197,10 @@ struct Worker {
     /// What the user has already been told, so a background watch can speak
     /// up without becoming noise.
     alerts: Mutex<Alerts>,
+    /// Where a finding goes: a desktop notification from the window, a line on
+    /// stderr from the command line. Which findings are worth saying is
+    /// [`crate::anomaly`]'s decision; saying them is the host's.
+    announce: Box<dyn Fn(&Anomaly, &str) + Send + Sync>,
 }
 
 impl Worker {
@@ -427,12 +438,51 @@ impl Worker {
             .news(&live.rows, SystemTime::now());
         drop(live);
         for alert in news {
-            crate::notify::post(&alert, &self.scope);
+            (self.announce)(&alert, &self.scope);
         }
     }
 
     fn live(&self) -> std::sync::MutexGuard<'_, Live> {
         self.live.lock().expect("session state mutex poisoned")
+    }
+}
+
+/// Remembers what has already been said, so one finding is one notification.
+#[derive(Debug, Default)]
+struct Alerts {
+    /// When each kind was last raised. A folder being emptied stays a folder
+    /// being emptied for as long as it takes; saying so every flush would
+    /// teach the user to ignore it.
+    said: [Option<SystemTime>; 2],
+}
+
+impl Alerts {
+    /// What is worth saying about these rows right now.
+    ///
+    /// `rows` is newest first and bounded, so a long enough burst is measured
+    /// from what was kept: the thresholds are floors, and a floor that is
+    /// crossed is still crossed.
+    fn news(&mut self, rows: &VecDeque<ActivityEvent>, now: SystemTime) -> Vec<Anomaly> {
+        anomalies(rows, now)
+            .into_iter()
+            .filter(|alert| self.once(alert, now))
+            .collect()
+    }
+
+    /// Whether this finding has gone unsaid for a window.
+    fn once(&mut self, alert: &Anomaly, now: SystemTime) -> bool {
+        // Matched rather than indexed by discriminant, so a finding added to
+        // the core's policy fails to compile here instead of silently
+        // borrowing another kind's cooldown.
+        let slot = &mut self.said[match alert.kind {
+            AnomalyKind::Removal => 0,
+            AnomalyKind::Burst => 1,
+        }];
+        if slot.is_some_and(|said| now.duration_since(said).unwrap_or_default() < WINDOW) {
+            return false;
+        }
+        *slot = Some(now);
+        true
     }
 }
 
@@ -463,8 +513,9 @@ mod tests {
     fn watch(root: &std::path::Path, storage: &std::path::Path) -> Session {
         let root = fs::canonicalize(root).unwrap();
         Session::start(
-            &pathlight_core::paths::normalize(&root.to_string_lossy()),
+            &crate::paths::normalize(&root.to_string_lossy()),
             Storage::at(storage),
+            |_, _| {},
         )
         .unwrap()
     }
@@ -588,13 +639,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let storage_dir = tempfile::tempdir().unwrap();
         let storage = Storage::at(storage_dir.path());
-        let stale = pathlight_core::ActivityEvent {
-            kind: pathlight_core::EventKind::Modified,
+        let stale = crate::ActivityEvent {
+            kind: crate::EventKind::Modified,
             path: "/elsewhere/ancient.bin".to_owned(),
             root_path: "/elsewhere".to_owned(),
             timestamp: SystemTime::now() - Duration::from_secs(400 * 86_400),
             byte_delta: Some(1),
-            confidence: pathlight_core::Confidence::Confirmed,
+            confidence: crate::Confidence::Confirmed,
             previous_path: None,
             affected_item_count: 1,
             process_name: None,
@@ -635,6 +686,7 @@ mod tests {
             live: Arc::new(Mutex::new(Live::default())),
             dropped: Arc::new(AtomicU64::new(0)),
             alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
         };
 
         let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&worker.scope, &worker.live)));
@@ -689,5 +741,53 @@ mod tests {
         let journal = fs::read_to_string(Storage::at(storage_dir.path()).journal()).unwrap();
         assert!(journal.contains("arrived.bin"), "journal was {journal:?}");
         assert!(journal.contains("later.bin"), "journal was {journal:?}");
+    }
+
+    fn row(kind: EventKind, delta: i64, items: u32, at: SystemTime) -> ActivityEvent {
+        ActivityEvent {
+            kind,
+            path: "/watched/file.bin".to_owned(),
+            root_path: "/watched".to_owned(),
+            timestamp: at,
+            byte_delta: Some(delta),
+            confidence: Confidence::Confirmed,
+            previous_path: None,
+            affected_item_count: items,
+            process_name: None,
+        }
+    }
+
+    /// The part a host does not decide: a folder being emptied stays a folder
+    /// being emptied for as long as it takes, and saying so on every flush
+    /// would teach the user to ignore it. What counts as emptied is
+    /// `core/tests/anomaly.rs`.
+    #[test]
+    fn a_finding_is_said_once_per_window() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let rows: VecDeque<_> = (0..2)
+            .map(|_| row(EventKind::Deleted, -1, 60, now))
+            .collect();
+        let mut alerts = Alerts::default();
+
+        let news = alerts.news(&rows, now);
+        assert_eq!(news.len(), 1, "120 deleted items went unmentioned");
+        assert_eq!(news[0].kind, AnomalyKind::Removal);
+        assert!(
+            alerts.news(&rows, now + Duration::from_secs(60)).is_empty(),
+            "the same finding was raised twice"
+        );
+        assert_eq!(
+            alerts.news(&rows, now + WINDOW).len(),
+            1,
+            "still happening a window later, and still worth saying"
+        );
+    }
+
+    /// Nothing to say stays nothing to say, without consuming the window.
+    #[test]
+    fn a_quiet_folder_is_never_interrupted() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ordinary = VecDeque::from([row(EventKind::Modified, 4096, 1, now)]);
+        assert!(Alerts::default().news(&ordinary, now).is_empty());
     }
 }

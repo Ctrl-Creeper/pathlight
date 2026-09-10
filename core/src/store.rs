@@ -1,11 +1,18 @@
-//! Where this shell keeps what it wrote, and the one rule about that place.
+//! Where a host keeps what it recorded, the settings it recorded under, and
+//! the one rule about that place.
+//!
+//! Every host that is not the macOS app reads this: the egui window, the
+//! command line, and any test of either. One settings file and one journal per
+//! install, so a folder watched from a terminal is the same watch the window
+//! lists — and the guard that keeps a watch out of Pathlight's own storage is
+//! written once.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use pathlight_core::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
+use crate::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
 const WATCHES_FILE: &str = "watches.json";

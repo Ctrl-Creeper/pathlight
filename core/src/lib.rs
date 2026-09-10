@@ -12,6 +12,7 @@ pub mod crypt;
 pub mod event;
 pub mod evidence;
 pub mod exclusion;
+pub mod export;
 #[cfg(target_os = "linux")]
 mod fanotify;
 #[cfg(target_os = "macos")]
@@ -27,9 +28,12 @@ mod notify_backend;
 pub mod paths;
 pub mod recording;
 pub mod snapshot;
+pub mod store;
+pub mod text;
 pub mod uninstall;
 #[cfg(windows)]
 mod usn;
+pub mod watch;
 
 pub use anomaly::{Anomaly, AnomalyKind};
 pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};

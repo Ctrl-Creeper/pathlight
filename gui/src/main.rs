@@ -8,24 +8,22 @@
 // Debug builds keep the console, because that is where panics are readable.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod export;
 mod notify;
-mod session;
-mod store;
 mod theme;
 mod tray;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use eframe::egui;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, EventKind, HistorySnapshot};
+use pathlight_core::store::Storage;
+use pathlight_core::text::{elapsed, human_bytes, kind_label, leaf};
+use pathlight_core::watch::Session;
+use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapshot};
 
-use session::Session;
-use store::Storage;
 use tray::{Tray, Wish};
 
 fn main() -> eframe::Result<()> {
@@ -237,14 +235,16 @@ impl App {
         else {
             return;
         };
-        self.notice = Some(match std::fs::write(&target, export::csv(&events)) {
-            Ok(()) => format!(
-                "Exported {} change(s) to {}.",
-                events.len(),
-                target.display()
-            ),
-            Err(error) => format!("Could not write {}: {error}", target.display()),
-        });
+        self.notice = Some(
+            match std::fs::write(&target, pathlight_core::export::csv(&events)) {
+                Ok(()) => format!(
+                    "Exported {} change(s) to {}.",
+                    events.len(),
+                    target.display()
+                ),
+                Err(error) => format!("Could not write {}: {error}", target.display()),
+            },
+        );
     }
 
     fn forget(&mut self, root: &str) {
@@ -263,7 +263,7 @@ impl App {
         let Some(storage) = self.storage().cloned() else {
             return;
         };
-        match Session::start(root, storage) {
+        match Session::start(root, storage, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
             }
@@ -981,23 +981,6 @@ fn backend_summary() -> String {
     parts.join(" · ")
 }
 
-fn kind_label(kind: EventKind) -> &'static str {
-    match kind {
-        EventKind::Created => "new",
-        EventKind::Modified => "changed",
-        EventKind::Deleted => "deleted",
-        EventKind::Moved => "moved",
-        EventKind::Aggregate => "group",
-    }
-}
-
-fn leaf(path: &str) -> String {
-    path.rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or(path)
-        .to_owned()
-}
-
 /// The part of `path` below `root`, which is the part the user did not already
 /// read in the header.
 fn relative_path(path: &str, root: &str) -> String {
@@ -1032,44 +1015,14 @@ fn parse_mb(text: &str) -> Option<Option<i64>> {
         .map(Some)
 }
 
-fn human_bytes(bytes: i64) -> String {
-    let sign = if bytes < 0 { "-" } else { "+" };
-    let mut value = bytes.unsigned_abs() as f64;
-    for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if value < 1024.0 || unit == "TB" {
-            let text = if unit == "B" || value >= 100.0 {
-                format!("{value:.0}")
-            } else {
-                format!("{value:.1}")
-            };
-            return format!("{sign}{text} {unit}");
-        }
-        value /= 1024.0;
-    }
-    unreachable!()
-}
-
-/// Relative rather than clock time on purpose: a local time needs a timezone
-/// database, and a timestamp shown in the wrong zone is worse than none.
-fn elapsed(since: SystemTime) -> String {
-    let seconds = SystemTime::now()
-        .duration_since(since)
-        .unwrap_or_default()
-        .as_secs();
-    match seconds {
-        0..=4 => "just now".to_owned(),
-        5..=59 => format!("{seconds}s ago"),
-        60..=3599 => format!("{}m ago", seconds / 60),
-        3600..=86_399 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
+
     use egui_kittest::kittest::Queryable as _;
     use egui_kittest::Harness;
+    use pathlight_core::EventKind;
 
     /// An app with no real install behind it: its own temporary storage, and
     /// an uninstall list that cannot reach anything of the tester's.
@@ -1310,15 +1263,6 @@ mod tests {
     }
 
     #[test]
-    fn sizes_read_the_way_a_person_says_them() {
-        assert_eq!(human_bytes(0), "+0 B");
-        assert_eq!(human_bytes(-2048), "-2.0 KB");
-        assert_eq!(human_bytes(1024 * 1024 * 3 / 2), "+1.5 MB");
-        // The magnitude fits in u64 even at the extreme, which `abs` would not.
-        assert!(human_bytes(i64::MIN).ends_with(" TB"));
-    }
-
-    #[test]
     fn rows_name_the_file_not_the_folder_already_in_the_header() {
         assert_eq!(relative_path("/watched/a/b.txt", "/watched"), "a/b.txt");
         assert_eq!(relative_path("/watched/a/b.txt", "/watched/"), "a/b.txt");
@@ -1329,8 +1273,6 @@ mod tests {
             "/elsewhere/b.txt"
         );
         assert_eq!(relative_path("/watched", "/watched"), "/watched");
-        assert_eq!(leaf("C:/Users/x/Downloads"), "Downloads");
-        assert_eq!(leaf("/"), "/");
     }
 
     /// The journal was write-only from this shell's point of view: a folder
