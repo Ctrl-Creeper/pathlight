@@ -107,6 +107,9 @@ private struct ActivityTimelineRow: View {
             .foregroundStyle(.secondary)
         }
         .help(row.path)
+        .contextMenu {
+            CopyPathButton(path: row.path)
+        }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -1179,14 +1179,22 @@ fn rows<'a>(
                         // Clickable, because the question after "this file
                         // changed" is "where is it", and a deleted file's
                         // folder is still worth opening.
-                        if ui
+                        let clicked = ui
                             .add(
                                 egui::Label::new(relative_path(&event.path, root))
                                     .sense(egui::Sense::click()),
                             )
-                            .on_hover_text("Click to show this in your file manager.")
-                            .clicked()
-                        {
+                            .on_hover_text("Click to show this in your file manager.");
+                        // The row shows a path relative to the watched
+                        // folder; what somebody pastes elsewhere has to be
+                        // the whole one.
+                        clicked.context_menu(|ui| {
+                            if ui.button("Copy path").clicked() {
+                                ui.ctx().copy_text(event.path.clone());
+                                ui.close();
+                            }
+                        });
+                        if clicked.clicked() {
                             let path = Path::new(&event.path);
                             show_in_file_manager(match path.is_dir() {
                                 true => path,

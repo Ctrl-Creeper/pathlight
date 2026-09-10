@@ -832,6 +832,9 @@ private struct ActivityDashboardTopChangeRow: View {
         .onTapGesture {
             onLocate(change.url)
         }
+        .contextMenu {
+            CopyPathButton(path: change.url.path)
+        }
         .help("Click to locate \(change.title) in Pathlight")
     }
 
@@ -882,6 +885,7 @@ private struct ActivityDashboardDeletionsSection: View {
                     Button("Reveal Folder in Finder") {
                         onReveal((deletion.path as NSString).deletingLastPathComponent)
                     }
+                    CopyPathButton(path: deletion.path)
                 }
             }
         }
@@ -1056,6 +1060,7 @@ private struct ActivityDashboardTimelineRow: View {
             Button("Reveal in Finder") {
                 onReveal(row.path)
             }
+            CopyPathButton(path: row.path)
         }
     }
 
