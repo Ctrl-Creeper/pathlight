@@ -419,7 +419,7 @@ impl Worker {
             .news(&live.rows, SystemTime::now());
         drop(live);
         for alert in news {
-            alert.post(&self.scope);
+            crate::notify::post(&alert, &self.scope);
         }
     }
 

@@ -14,9 +14,10 @@ final class AppModelDependencyTests: XCTestCase {
         sizeIndex.recordKnownSize(4_096, for: file, scope: scope)
         let dependencies = AppDependencies.live(
             activityAttribution: stubActivityAttribution,
-            // Nothing is excluded here: the filter lives in the Rust core,
-            // which this package does not link.
+            // Nothing is excluded and nothing is an anomaly here: both live
+            // in the Rust core, which this package does not link.
             activityExclusion: { _, _ in nil },
+            activityAnomalies: { _, _, _ in [] },
             activitySizeIndex: sizeIndex
         )
 

@@ -26,6 +26,10 @@ struct AppDependencies {
     var activityStorageUsageService: ActivityStorageUsageService
     var launchAtLoginService: any LaunchAtLoginControlling
     var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
+    /// Short-window anomaly detection. The thresholds live in the Rust core,
+    /// so a host that does not link it raises no anomalies rather than
+    /// inventing its own idea of one.
+    var activityAnomalies: ActivityAnomalyDetecting
     var processHints: (any ProcessHinting)?
     /// Loads the activity storage key up front; no-op when nothing is encrypted.
     var activityStorageKeyWarmUp: @Sendable () throws -> Void
@@ -47,6 +51,7 @@ struct AppDependencies {
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
         launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService(),
         activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil,
+        activityAnomalies: @escaping ActivityAnomalyDetecting = { _, _, _ in [] },
         processHints: (any ProcessHinting)? = nil,
         activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {}
     ) {
@@ -62,17 +67,20 @@ struct AppDependencies {
         self.activityStorageUsageService = activityStorageUsageService
         self.launchAtLoginService = launchAtLoginService
         self.activityGrowthAlertPoster = activityGrowthAlertPoster
+        self.activityAnomalies = activityAnomalies
         self.processHints = processHints
         self.activityStorageKeyWarmUp = activityStorageKeyWarmUp
     }
 
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
-    /// passes the Rust-backed monitor instead, and has to pass attribution and
-    /// exclusion because this package holds no implementation of either.
+    /// passes the Rust-backed monitor instead, and has to pass attribution,
+    /// exclusion and anomaly detection because this package holds no
+    /// implementation of any of them.
     static func live(
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory,
+        activityAnomalies: @escaping ActivityAnomalyDetecting,
         activitySizeIndex: ActivitySizeIndex? = nil
     ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
@@ -107,6 +115,7 @@ struct AppDependencies {
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
             launchAtLoginService: SystemLaunchAtLoginService(),
             activityGrowthAlertPoster: UserNotificationGrowthAlertPoster(),
+            activityAnomalies: activityAnomalies,
             processHints: LsofProcessHintService(),
             activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() }
         )

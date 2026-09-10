@@ -18,8 +18,12 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
 
     let kind: Kind
     let rootPath: URL
-    let byteDelta: Int64
+    /// Always positive: the size of what happened, not its direction.
+    let bytes: Int64
     let itemCount: Int
+    /// The span the finding was measured over, so the message can say it. The
+    /// core decides how long that is.
+    let windowMinutes: Int
 
     var identifier: String {
         "pathlight-anomaly-\(kind.rawValue)-\(rootPath.standardizedFileURL.path)"
@@ -36,50 +40,29 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
     }
 
     var body: String {
-        let minutes = Int(ActivityAnomalyDetector.window / 60)
         switch kind {
         case .massDeletion:
-            return "\(itemCount.formatted()) items (\(PathlightFormatters.size(abs(byteDelta)))) removed in the last \(minutes) minutes."
+            return "\(itemCount.formatted()) items (\(PathlightFormatters.size(bytes))) removed in the last \(windowMinutes) minutes."
         case .burst:
-            return "\(PathlightFormatters.size(byteDelta)) written in the last \(minutes) minutes."
+            return "\(PathlightFormatters.size(bytes)) written in the last \(windowMinutes) minutes."
         }
     }
 }
 
-/// Short-window anomalies on top of the daily growth threshold: a mass deletion
-/// (mistake or ransomware) and a write burst.
-enum ActivityAnomalyDetector {
-    nonisolated static let window: TimeInterval = 10 * 60
-    nonisolated static let massDeletionMinimumItems = 100
-    nonisolated static let massDeletionMinimumBytes: Int64 = 1_000_000_000
-    nonisolated static let burstMinimumBytes: Int64 = 5_000_000_000
-
-    nonisolated static func anomalies(
-        in history: ActivityHistorySnapshot,
-        now: Date = Date()
-    ) -> [ActivityAnomaly] {
-        let cutoff = now.addingTimeInterval(-window)
-        let recent = history.recentEvents.filter { $0.timestamp >= cutoff && $0.timestamp <= now }
-        guard !recent.isEmpty else {
-            return []
-        }
-        var anomalies: [ActivityAnomaly] = []
-
-        let removals = recent.filter { $0.kind == .deleted || ($0.byteDelta ?? 0) < 0 }
-        let removedBytes = removals.compactMap(\.byteDelta).filter { $0 < 0 }.reduce(Int64(0), +)
-        let removedItems = removals.reduce(0) { $0 + $1.affectedItemCount }
-        if removedItems >= massDeletionMinimumItems || -removedBytes >= massDeletionMinimumBytes {
-            anomalies.append(ActivityAnomaly(kind: .massDeletion, rootPath: history.rootPath, byteDelta: removedBytes, itemCount: removedItems))
-        }
-
-        let written = recent.compactMap(\.byteDelta).filter { $0 > 0 }.reduce(Int64(0), +)
-        if written >= burstMinimumBytes {
-            let items = recent.filter { ($0.byteDelta ?? 0) > 0 }.reduce(0) { $0 + $1.affectedItemCount }
-            anomalies.append(ActivityAnomaly(kind: .burst, rootPath: history.rootPath, byteDelta: written, itemCount: items))
-        }
-        return anomalies
-    }
-}
+/// Finds the short-window anomalies in these events: a mass deletion (mistake
+/// or ransomware) and a write burst.
+///
+/// The window and the thresholds live in the Rust core, which every host
+/// shares — a second definition of "anomaly" means this app stays quiet
+/// through what the Windows and Linux window calls an emergency. This package
+/// does not link the core, so the app injects the detector and a host without
+/// one simply never raises an anomaly. What the notification *says* stays
+/// here: the wording is this platform's, not the policy's.
+typealias ActivityAnomalyDetecting = @Sendable (
+    _ events: [DiskActivityEvent],
+    _ rootPath: URL,
+    _ now: Date
+) -> [ActivityAnomaly]
 
 enum ActivityGrowthAlertEvaluator {
     /// Returns today's growth when it crosses the target's alert threshold and no

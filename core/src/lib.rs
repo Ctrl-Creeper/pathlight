@@ -6,6 +6,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod anomaly;
 pub mod attribution;
 mod crypt;
 pub mod event;
@@ -30,6 +31,7 @@ pub mod uninstall;
 #[cfg(windows)]
 mod usn;
 
+pub use anomaly::{Anomaly, AnomalyKind};
 pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};
 pub use event::{ActivityEvent, Confidence, EventKind};
 pub use exclusion::ExclusionFilter;

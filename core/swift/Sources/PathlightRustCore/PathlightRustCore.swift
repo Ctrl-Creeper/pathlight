@@ -1962,6 +1962,70 @@ public func FfiConverterTypeAggregationOptions_lower(_ value: AggregationOptions
 }
 
 
+public struct Anomaly: Equatable, Hashable {
+    public var kind: AnomalyKind
+    public var items: UInt64
+    /**
+     * Always positive: the size of what happened, not its direction.
+     */
+    public var bytes: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: AnomalyKind, items: UInt64, 
+        /**
+         * Always positive: the size of what happened, not its direction.
+         */bytes: Int64) {
+        self.kind = kind
+        self.items = items
+        self.bytes = bytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Anomaly: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAnomaly: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Anomaly {
+        return
+            try Anomaly(
+                kind: FfiConverterTypeAnomalyKind.read(from: &buf), 
+                items: FfiConverterUInt64.read(from: &buf), 
+                bytes: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Anomaly, into buf: inout [UInt8]) {
+        FfiConverterTypeAnomalyKind.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.items, into: &buf)
+        FfiConverterInt64.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnomaly_lift(_ buf: RustBuffer) throws -> Anomaly {
+    return try FfiConverterTypeAnomaly.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnomaly_lower(_ value: Anomaly) -> RustBuffer {
+    return FfiConverterTypeAnomaly.lower(value)
+}
+
+
 /**
  * What a platform's watcher backend actually guarantees.
  *
@@ -2300,6 +2364,78 @@ public func FfiConverterTypeHistorySnapshot_lift(_ buf: RustBuffer) throws -> Hi
 public func FfiConverterTypeHistorySnapshot_lower(_ value: HistorySnapshot) -> RustBuffer {
     return FfiConverterTypeHistorySnapshot.lower(value)
 }
+
+
+
+public enum AnomalyKind: Equatable, Hashable {
+    
+    /**
+     * A lot of this folder just stopped existing.
+     */
+    case removal
+    /**
+     * A lot of this folder just arrived.
+     */
+    case burst
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AnomalyKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAnomalyKind: FfiConverterRustBuffer {
+    typealias SwiftType = AnomalyKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AnomalyKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .removal
+        
+        case 2: return .burst
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AnomalyKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .removal:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .burst:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnomalyKind_lift(_ buf: RustBuffer) throws -> AnomalyKind {
+    return try FfiConverterTypeAnomalyKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnomalyKind_lower(_ value: AnomalyKind) -> RustBuffer {
+    return FfiConverterTypeAnomalyKind.lower(value)
+}
+
 
 
 
@@ -2847,6 +2983,31 @@ fileprivate struct FfiConverterSequenceTypeActivityEvent: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAnomaly: FfiConverterRustBuffer {
+    typealias SwiftType = [Anomaly]
+
+    public static func write(_ value: [Anomaly], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAnomaly.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Anomaly] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Anomaly]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAnomaly.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeChange: FfiConverterRustBuffer {
     typealias SwiftType = [Change]
 
@@ -2904,6 +3065,28 @@ public func coreVersion() -> String  {
 })
 }
 /**
+ * [`anomalies`] across the FFI.
+ */
+public func activityAnomalies(events: [ActivityEvent], now: Date) -> [Anomaly]  {
+    return try!  FfiConverterSequenceTypeAnomaly.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_activity_anomalies(
+        FfiConverterSequenceTypeActivityEvent.lower(events),
+        FfiConverterTimestamp.lower(now),uniffiCallStatus
+    )
+})
+}
+/**
+ * The window, for a host whose message has to say how long "recently" is.
+ */
+public func activityAnomalyWindowSecs() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_activity_anomaly_window_secs(uniffiCallStatus
+    )
+})
+}
+/**
  * [`normalized_patterns`] across the FFI, for a host that stores what the
  * user typed and wants it stored the way this crate reads it.
  */
@@ -2944,6 +3127,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_pathlight_core_checksum_func_core_version() != 16517) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_activity_anomalies() != 51449) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_activity_anomaly_window_secs() != 38083) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_normalized_exclusion_patterns() != 41574) {

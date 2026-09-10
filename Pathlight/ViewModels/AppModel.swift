@@ -923,7 +923,8 @@ final class AppModel: ObservableObject {
             return
         }
         let now = Date()
-        for anomaly in ActivityAnomalyDetector.anomalies(in: history, now: now) {
+        let found = dependencies.activityAnomalies(history.recentEvents, history.rootPath, now)
+        for anomaly in found {
             let key = anomaly.identifier
             if let last = anomalyAlertLastPostedAt[key], now.timeIntervalSince(last) < Self.anomalyAlertInterval {
                 continue
