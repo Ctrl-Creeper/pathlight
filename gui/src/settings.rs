@@ -18,6 +18,55 @@ use crate::{show_in_file_manager, BYTES_PER_MB};
 /// sessions; the whole file is one button away.
 const LOG_LINES_SHOWN: usize = 200;
 
+/// Where the window was, and how big, when it was last put away.
+///
+/// The macOS app gets this from AppKit without asking; on these two platforms
+/// it is ours to remember, and a monitor that opens 980x660 in the middle of
+/// the screen every morning is one somebody moves every morning. Kept beside
+/// the journal, so an uninstall takes it too.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+pub struct Geometry {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+const GEOMETRY_FILE: &str = "window.json";
+
+impl Geometry {
+    /// A saved size and position, or `None` for the first launch — and for a
+    /// file written by a version that spelled this differently, which is the
+    /// same answer: open where the code says.
+    pub fn read(storage: &Storage) -> Option<Self> {
+        let text = std::fs::read_to_string(storage.dir().join(GEOMETRY_FILE)).ok()?;
+        let geometry: Self = serde_json::from_str(&text).ok()?;
+        // A window that would open off every screen, or with no area, is one
+        // nobody could get back — a monitor's geometry is not worth that.
+        (geometry.width >= 320.0 && geometry.height >= 240.0).then_some(geometry)
+    }
+
+    pub fn save(storage: &Storage, rect: eframe::egui::Rect) {
+        let geometry = Self {
+            x: rect.min.x,
+            y: rect.min.y,
+            width: rect.width(),
+            height: rect.height(),
+        };
+        if let Ok(text) = serde_json::to_string(&geometry) {
+            let _ = std::fs::write(storage.dir().join(GEOMETRY_FILE), text);
+        }
+    }
+
+    pub fn position(&self) -> [f32; 2] {
+        [self.x, self.y]
+    }
+
+    pub fn size(&self) -> [f32; 2] {
+        [self.width, self.height]
+    }
+}
+
 /// What the boxes hold while they are being edited. Text, because a
 /// half-typed number is not a setting and must not be saved as one.
 pub struct Draft {
@@ -475,6 +524,32 @@ fn install_cli() -> String {
 mod tests {
     use super::*;
     use pathlight_core::store::{DEFAULT_JOURNAL_LIMIT_BYTES, DEFAULT_RETENTION_DAYS};
+
+    /// The window opens where it was left, and never somewhere nobody can
+    /// reach: a saved size too small to hold the interface is no answer.
+    #[test]
+    fn the_window_opens_where_it_was_left_unless_that_was_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        assert!(Geometry::read(&storage).is_none(), "nothing saved yet");
+
+        Geometry::save(
+            &storage,
+            egui::Rect::from_min_size(egui::pos2(120.0, 60.0), egui::vec2(1000.0, 700.0)),
+        );
+        let saved = Geometry::read(&storage).expect("a saved window is read back");
+        assert_eq!(saved.position(), [120.0, 60.0]);
+        assert_eq!(saved.size(), [1000.0, 700.0]);
+
+        Geometry::save(
+            &storage,
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+        );
+        assert!(
+            Geometry::read(&storage).is_none(),
+            "a window nobody could use was offered anyway"
+        );
+    }
 
     /// The whole point of the pane: what was typed is what the next watch
     /// reads. Checked through `save`, so the parsing and the units are the

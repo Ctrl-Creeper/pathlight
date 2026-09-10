@@ -28,16 +28,31 @@ use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapsho
 
 use tray::{Tray, Wish};
 
+/// The search box, named so a keyboard shortcut can hand it the focus.
+fn find_box() -> egui::Id {
+    egui::Id::new("find")
+}
+
 fn main() -> eframe::Result<()> {
     // How the login item starts us: watching, with no window in the way of
     // whatever the person actually signed in to do.
     let hidden = std::env::args().any(|argument| argument == settings::HIDDEN);
+    // Where it was last put away, if it was. Read before the window exists,
+    // because a window that opens somewhere and then jumps is worse than one
+    // that opens where it was left.
+    let geometry = Storage::current()
+        .as_ref()
+        .and_then(settings::Geometry::read);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(geometry.map_or([980.0, 660.0], |geometry| geometry.size()))
+        .with_min_inner_size([680.0, 420.0])
+        .with_visible(!hidden)
+        .with_title("Pathlight");
+    if let Some(geometry) = geometry {
+        viewport = viewport.with_position(geometry.position());
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([680.0, 420.0])
-            .with_visible(!hidden)
-            .with_title("Pathlight"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -511,6 +526,7 @@ impl App {
         if !self.sessions.is_empty() && !self.hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        self.shortcuts(&ctx);
         self.watch_the_tray(&ctx);
         self.poll_history();
         if self.history_pending.is_some() {
@@ -675,8 +691,52 @@ impl App {
             self.grant(wish, ctx);
         }
 
-        if ctx.input(|input| input.viewport().close_requested()) && self.closing_keeps_watching() {
-            self.hide(ctx);
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.remember_geometry(ctx);
+            if self.closing_keeps_watching() {
+                self.hide(ctx);
+            }
+        }
+    }
+
+    /// The keys the macOS app answers to, in this platform's modifier:
+    /// `COMMAND` is Ctrl on Windows and Linux and Cmd on a mac, which is the
+    /// whole difference between the two hosts here.
+    ///
+    /// Not while a dialog is open: a shortcut that acted behind a modal would
+    /// change something the user cannot see.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.settings.is_some() || self.notice.is_some() || self.uninstall_prompt.is_some() {
+            return;
+        }
+        // `consume_key`, so a shortcut that did something does not also reach
+        // the widget that has focus.
+        let pressed = |key| ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key));
+        if pressed(egui::Key::O) {
+            self.add_folder();
+        }
+        if pressed(egui::Key::Comma) {
+            self.settings = self.storage().map(settings::Draft::read);
+        }
+        // Where macOS stops the live monitor, this stops every watch: the
+        // same key for the same "that is enough for now".
+        if pressed(egui::Key::Period) {
+            self.set_paused(!self.paused);
+        }
+        if pressed(egui::Key::F) {
+            ctx.memory_mut(|memory| memory.request_focus(find_box()));
+        }
+    }
+
+    /// Writes down where the window is, at the one moment it is worth a disk
+    /// write: it is being put away. Saving as it is dragged would be a write
+    /// per frame of the drag.
+    fn remember_geometry(&self, ctx: &egui::Context) {
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
+            settings::Geometry::save(storage, rect);
         }
     }
 
@@ -998,6 +1058,7 @@ impl App {
             let box_ = ui
                 .add(
                     egui::TextEdit::singleline(find)
+                        .id(find_box())
                         .hint_text("Part of a path")
                         .desired_width(170.0),
                 )
@@ -1458,6 +1519,45 @@ mod tests {
         assert!(
             harness.state().sessions.is_empty(),
             "pressing Stop did not end the watch"
+        );
+    }
+
+    /// The keyboard is the other way to reach what the buttons do, and the
+    /// one a person who watches folders all day uses. Ctrl-. is the macOS
+    /// app's Cmd-. — stop what is running now.
+    #[test]
+    fn the_keyboard_pauses_and_resumes_without_a_button() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            harness.state().paused && harness.state().sessions.is_empty(),
+            "the pause shortcut did not stop the watch"
+        );
+
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            !harness.state().paused && harness.state().sessions.contains_key(&root),
+            "the shortcut did not resume"
+        );
+
+        // The settings shortcut opens the pane the button opens, and while it
+        // is open the other shortcuts stay out of the way.
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+        harness.step();
+        assert!(harness.state().settings.is_some(), "Ctrl-, opened nothing");
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            !harness.state().paused,
+            "a shortcut acted behind an open dialog"
         );
     }
 
