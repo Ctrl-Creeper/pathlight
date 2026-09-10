@@ -118,6 +118,52 @@ impl Storage {
             .trim(days, self.aggregate_retention_days(), limit)
     }
 
+    /// How much has been recorded, for a pane or a terminal that shows it:
+    /// the size of the journal on disk and how many rows are in it.
+    ///
+    /// The count is a streamed read of a file the cap bounds, done when
+    /// somebody asks rather than kept up to date — a counter maintained on
+    /// every flush would be one more thing to get wrong about a file two
+    /// hosts append to.
+    pub fn recorded(&self) -> (u64, u64) {
+        let Ok(file) = std::fs::File::open(self.journal()) else {
+            return (0, 0);
+        };
+        let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let rows = std::io::BufRead::split(std::io::BufReader::new(file), b'\n')
+            .filter(|line| line.as_ref().is_ok_and(|line| !line.is_empty()))
+            .count() as u64;
+        (bytes, rows)
+    }
+
+    /// Deletes everything recorded, leaving the settings alone.
+    ///
+    /// Records are the one thing here nobody can get back, so this exists as
+    /// its own answer rather than only inside "remove Pathlight entirely": a
+    /// person who wants to start the history over should not have to
+    /// uninstall to do it.
+    pub fn forget_records(&self) -> io::Result<()> {
+        let _guard = journal_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match std::fs::remove_file(self.journal()) {
+            // Nothing recorded yet is already the state this asks for.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Every setting back to what shipped, leaving the folder list and the
+    /// records alone: this is the way out of an edit whose effect the user
+    /// cannot find.
+    pub fn restore_default_settings(&self) -> io::Result<()> {
+        let watches = self.settings().roots;
+        self.save(&Settings {
+            roots: watches,
+            ..Settings::default()
+        })
+    }
+
     /// What was recorded for one folder, folded into buckets and totals.
     ///
     /// Deliberately without the append lock. `Journal::load` already skips a
@@ -527,6 +573,51 @@ mod tests {
         assert_eq!(storage.aggregate_retention_days(), 365);
         assert!(storage.set_aggregate_retention_days(0).is_err());
         assert_eq!(storage.aggregate_retention_days(), 365);
+    }
+
+    /// The three answers a person needs about their own records: how much is
+    /// there, start it over, and put the settings back.
+    #[test]
+    fn records_can_be_counted_deleted_and_the_settings_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        assert_eq!(storage.recorded(), (0, 0), "nothing recorded yet");
+
+        storage
+            .record(vec![ActivityEvent {
+                kind: crate::EventKind::Modified,
+                path: "/watched/report.bin".to_owned(),
+                root_path: "/watched".to_owned(),
+                timestamp: std::time::SystemTime::now(),
+                byte_delta: Some(4096),
+                confidence: crate::Confidence::Confirmed,
+                previous_path: None,
+                affected_item_count: 1,
+                process_name: None,
+            }])
+            .unwrap();
+        let (bytes, rows) = storage.recorded();
+        assert_eq!(rows, 1);
+        assert!(bytes > 0);
+
+        // Settings go back without taking the folder list with them, and the
+        // records survive a settings reset.
+        storage.set_watch_enabled("/watched", true).unwrap();
+        storage.set_retention(30, 2_000_000).unwrap();
+        storage.restore_default_settings().unwrap();
+        assert_eq!(
+            storage.retention(),
+            (DEFAULT_RETENTION_DAYS, DEFAULT_JOURNAL_LIMIT_BYTES)
+        );
+        assert_eq!(storage.watches().len(), 1, "the folder list was reset too");
+        assert_eq!(storage.recorded().1, 1, "the records were reset too");
+
+        // And deleting the records leaves the settings alone.
+        storage.forget_records().unwrap();
+        assert_eq!(storage.recorded(), (0, 0));
+        assert_eq!(storage.watches().len(), 1);
+        // Twice is not an error: nothing recorded is the state it asks for.
+        storage.forget_records().unwrap();
     }
 
     /// A sibling whose name merely starts the same way is somebody else's

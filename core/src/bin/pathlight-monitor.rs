@@ -208,6 +208,10 @@ Usage: pathlight-monitor <command> [arguments]
                           the folder the bytes went, and what was running.
   settings                Show every setting, and where records are kept.
   settings KEY VALUE…     Change one. Run `settings` to see the keys.
+  settings defaults       Put every setting back, keeping folders and records.
+  compact                 Drop what is past the retention now, not at the next
+                          watch, and say how many rows went.
+  forget-records [--yes]  Delete everything recorded, keeping the settings.
   autostart [on|off]      Whether the watches start when you sign in.
   record FOLDER JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]
                           One explicit recording into a journal you name, with
@@ -495,6 +499,46 @@ fn export(rest: &[OsString], as_report: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Trims now rather than at the next watch, which is what somebody who just
+/// lowered the retention is asking for.
+fn compact(rest: &[OsString]) -> io::Result<()> {
+    if !rest.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: pathlight-monitor compact",
+        ));
+    }
+    let storage = storage()?;
+    let dropped = storage
+        .trim_journal()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let (bytes, rows) = storage.recorded();
+    println!(
+        "Dropped {dropped} row(s). {rows} row(s) left, {}.",
+        human_bytes(bytes as i64).trim_start_matches('+')
+    );
+    Ok(())
+}
+
+/// Deletes the records, and only on being asked twice: this is the one thing
+/// here nobody can get back.
+fn forget_records(rest: &[OsString]) -> io::Result<()> {
+    let storage = storage()?;
+    let (bytes, rows) = storage.recorded();
+    let size = human_bytes(bytes as i64).trim_start_matches('+').to_owned();
+    if !rest.iter().any(|argument| argument == "--yes") {
+        println!(
+            "{rows} recorded row(s), {size}, in {}",
+            storage.dir().display()
+        );
+        println!("Run `pathlight-monitor forget-records --yes` to delete them. Settings stay.");
+        return Ok(());
+    }
+    storage.forget_records()?;
+    println!("Deleted {rows} recorded row(s) ({size}). Settings and folders are unchanged.");
+    Ok(())
+}
+
 /// Every setting the watches read, and the one command that changes them.
 ///
 /// The same values the windows edit, in the same file: a `settings` change here
@@ -594,6 +638,9 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
             };
             storage.set_patterns(&patterns)?;
         }
+        // Not a key with a value: the way out of an edit whose effect the
+        // user cannot find.
+        "defaults" => storage.restore_default_settings()?,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -614,12 +661,22 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     // is, not settings, and are named as such.
     let say = |key: &str, value: String| println!("{key:<26}{value}");
     say("folder", storage.dir().to_string_lossy().into_owned());
+    let (bytes, rows) = storage.recorded();
     say(
         "recorded",
-        match std::fs::metadata(storage.journal()).map(|meta| meta.len()) {
-            Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
-            Err(_) => "nothing recorded yet".to_owned(),
+        match rows {
+            0 => "nothing recorded yet".to_owned(),
+            rows => format!(
+                "{rows} row(s), {}",
+                human_bytes(bytes as i64).trim_start_matches('+')
+            ),
         },
+    );
+    // Not a setting either: what this platform's watcher promises, which is
+    // what says how much the rows can be trusted.
+    say(
+        "watcher",
+        pathlight_core::text::guarantees(&pathlight_core::monitor::watcher_capabilities()),
     );
     say("retention-days", days.to_string());
     say(
@@ -725,6 +782,8 @@ fn run() -> io::Result<()> {
         "watches" => return watches(&args[1..]),
         "presets" => return presets(&args[1..]),
         "history" => return history(&args[1..]),
+        "compact" => return compact(&args[1..]),
+        "forget-records" => return forget_records(&args[1..]),
         "export" => return export(&args[1..], false),
         "report" => return export(&args[1..], true),
         "settings" => return settings(&args[1..]),

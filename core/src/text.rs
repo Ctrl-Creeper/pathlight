@@ -67,6 +67,27 @@ pub fn elapsed(since: SystemTime) -> String {
     }
 }
 
+/// What this platform's watcher promises, as a sentence — the honest answer
+/// to "how much can I trust these rows", since backends are deliberately not
+/// equal.
+pub fn guarantees(capabilities: &crate::monitor::Capabilities) -> String {
+    let promises = [
+        (capabilities.resumable_cursor, "resumes after a restart"),
+        (capabilities.pairs_renames, "pairs renames"),
+        (capabilities.reports_process, "names processes"),
+        (!capabilities.may_drop_events, "never drops events"),
+    ];
+    let kept: Vec<&str> = promises
+        .iter()
+        .filter(|(held, _)| *held)
+        .map(|(_, what)| *what)
+        .collect();
+    match kept.is_empty() {
+        true => "live changes only".to_owned(),
+        false => kept.join(", "),
+    }
+}
+
 /// A finding's headline, naming the folder it is about.
 pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     let name = leaf(root);

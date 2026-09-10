@@ -110,6 +110,40 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     assert!(text(&run(home.path(), &["settings"])).contains("retention-days            30"));
 }
 
+/// The three answers about somebody's own records, from a terminal: how much
+/// is there, put the settings back, and start the records over. The last one
+/// asks twice, because nothing recorded can be got back. What the counting
+/// itself says about a journal with rows in it is `core/src/store.rs`.
+#[test]
+fn records_are_counted_and_only_deleted_when_asked_twice() {
+    let home = tempfile::tempdir().unwrap();
+
+    let shown = text(&run(home.path(), &["settings"]));
+    assert!(shown.contains("nothing recorded yet"), "{shown}");
+    // What this platform's watcher promises is not a setting, and is still
+    // the thing that says how much the rows can be trusted.
+    assert!(shown.contains("watcher  "), "{shown}");
+
+    run(home.path(), &["settings", "retention-days", "30"]);
+    let restored = text(&run(home.path(), &["settings", "defaults"]));
+    assert!(
+        restored.contains("retention-days            180"),
+        "{restored}"
+    );
+
+    // Asking without --yes says what would go and deletes nothing.
+    let asked = text(&run(home.path(), &["forget-records"]));
+    assert!(asked.contains("--yes"), "{asked}");
+    let compacted = text(&run(home.path(), &["compact"]));
+    assert!(compacted.contains("row(s) left"), "{compacted}");
+
+    let deleted = text(&run(home.path(), &["forget-records", "--yes"]));
+    assert!(
+        deleted.contains("Settings and folders are unchanged"),
+        "{deleted}"
+    );
+}
+
 /// The offer has to be a real folder on the machine running it, or it is an
 /// offer to watch nothing.
 #[test]

@@ -5,8 +5,6 @@
 //! restart once. The macOS app spends a whole Settings scene on the same
 //! values.
 
-use std::path::Path;
-
 use eframe::egui;
 use pathlight_core::exclusion::DEFAULT_PATTERNS;
 use pathlight_core::store::{
@@ -40,6 +38,12 @@ pub struct Draft {
     /// in a way the user has to be told about rather than a silent tick.
     at_login: Option<bool>,
     login_error: Option<String>,
+    /// What the last thing done to the records said. Compacting, deleting and
+    /// installing the command all answer with a sentence rather than a change
+    /// on screen, so there has to be somewhere to put it.
+    message: Option<String>,
+    /// Whether deleting every record has already been asked for once.
+    confirm_forget: bool,
 }
 
 /// What the user did with the modal.
@@ -79,6 +83,8 @@ impl Draft {
             patterns: storage.patterns().join("\n"),
             at_login: item.as_ref().ok().map(|item| item.is_enabled()),
             login_error: item.err().map(|error| error.to_string()),
+            message: None,
+            confirm_forget: false,
         }
     }
 
@@ -192,24 +198,97 @@ impl Draft {
         }
 
         ui.add_space(12.0);
+        ui.label(egui::RichText::new("Records").strong());
+        let (bytes, rows) = storage.recorded();
         ui.label(
             egui::RichText::new(format!(
-                "Records: {} · {}",
-                storage.dir().display(),
-                recorded_size(&storage.journal())
+                "{rows} row(s), {} · {}",
+                human_bytes(bytes as i64).trim_start_matches('+'),
+                storage.dir().display()
             ))
             .small()
             .color(ui.visuals().weak_text_color()),
         );
+        // What this platform's watcher promises: not a setting, and the thing
+        // that says how much the rows can be trusted.
+        ui.label(
+            egui::RichText::new(format!(
+                "This watcher {}.",
+                pathlight_core::text::guarantees(&pathlight_core::monitor::watcher_capabilities())
+            ))
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Show records folder").clicked() {
+                show_in_file_manager(storage.dir());
+            }
+            if ui
+                .button("Compact now")
+                .on_hover_text(
+                    "Drops what is past the retention now, rather than at the next watch.",
+                )
+                .clicked()
+            {
+                self.message = Some(match storage.trim_journal() {
+                    Ok(dropped) => format!("Dropped {dropped} row(s)."),
+                    Err(error) => format!("Could not compact the records: {error}"),
+                });
+            }
+            // Two presses, because this is the one thing here nobody can get
+            // back. The whole-install case is the Uninstall dialog; this is
+            // the same records without the settings and the folder list.
+            let forget = match self.confirm_forget {
+                true => format!("Really delete {rows} row(s)"),
+                false => "Delete every record".to_owned(),
+            };
+            if ui.button(forget).clicked() {
+                match self.confirm_forget {
+                    false => self.confirm_forget = true,
+                    true => {
+                        self.confirm_forget = false;
+                        self.message = Some(match storage.forget_records() {
+                            Ok(()) => format!("Deleted {rows} recorded row(s)."),
+                            Err(error) => format!("Could not delete the records: {error}"),
+                        });
+                    }
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Restore default settings")
+                .on_hover_text("Every setting back to what shipped. Folders and records stay.")
+                .clicked()
+            {
+                match storage.restore_default_settings() {
+                    Ok(()) => {
+                        let message = "Settings are back to the shipped ones.".to_owned();
+                        *self = Self::read(storage);
+                        self.message = Some(message);
+                    }
+                    Err(error) => {
+                        self.message = Some(format!("Could not restore the settings: {error}"))
+                    }
+                }
+            }
+            if ui
+                .button("Install command line tool")
+                .on_hover_text("Puts `pathlight-monitor` in your own home, on your PATH.")
+                .clicked()
+            {
+                self.message = Some(install_cli());
+            }
+        });
+        if let Some(message) = &self.message {
+            ui.label(egui::RichText::new(message).small());
+        }
 
         ui.add_space(12.0);
         let mut verdict = None;
         ui.horizontal(|ui| {
             if ui.button("Cancel").clicked() {
                 verdict = Some(Verdict::Close);
-            }
-            if ui.button("Show records folder").clicked() {
-                show_in_file_manager(storage.dir());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Apply").clicked() {
@@ -311,10 +390,32 @@ fn digits<T: std::str::FromStr>(text: &str, title: &str) -> Result<T, String> {
     Ok(parsed)
 }
 
-fn recorded_size(journal: &Path) -> String {
-    match std::fs::metadata(journal).map(|meta| meta.len()) {
-        Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
-        Err(_) => "nothing recorded yet".to_owned(),
+/// Asks the command that ships beside this one to install itself, which is
+/// how the macOS app does it too: where a command belongs is decided in one
+/// place — by the command — and two answers to that question eventually
+/// disagree about somebody's PATH.
+fn install_cli() -> String {
+    let tool = std::env::current_exe().ok().and_then(|exe| {
+        let tool = exe.with_file_name(match cfg!(windows) {
+            true => "pathlight-monitor.exe",
+            false => "pathlight-monitor",
+        });
+        tool.is_file().then_some(tool)
+    });
+    let Some(tool) = tool else {
+        return "The command line tool is not next to this program, so there is nothing to \
+                install."
+            .to_owned();
+    };
+    match std::process::Command::new(tool).arg("install-cli").output() {
+        Ok(done) if done.status.success() => {
+            String::from_utf8_lossy(&done.stdout).trim().to_owned()
+        }
+        Ok(done) => format!(
+            "Could not install it: {}",
+            String::from_utf8_lossy(&done.stderr).trim()
+        ),
+        Err(error) => format!("Could not run the command line tool: {error}"),
     }
 }
 

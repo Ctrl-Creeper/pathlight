@@ -91,6 +91,10 @@ struct App {
     /// The window is closed but the app is not: the watches are running and
     /// the tray is how the user gets back.
     hidden: bool,
+    /// Whether the window stays above other windows. Not saved: it is what
+    /// somebody wants while they are watching something happen, which is the
+    /// same reason the macOS Live Monitor pins per session.
+    on_top: bool,
     /// The user asked to quit, so the next close request is a real one.
     quitting: bool,
     /// The settings pane, while it is open, holding what has been typed but
@@ -129,6 +133,7 @@ impl App {
             tray: None,
             tray_tried: false,
             hidden: false,
+            on_top: false,
             quitting: false,
             settings: None,
         }
@@ -520,6 +525,20 @@ impl App {
                     ui.add_space(12.0);
                     if ui.button("Settings…").clicked() {
                         self.settings = self.storage().map(settings::Draft::read);
+                    }
+                    ui.add_space(12.0);
+                    let mut on_top = self.on_top;
+                    ui.checkbox(&mut on_top, "Keep in front").on_hover_text(
+                        "The window stays above other windows, so a copy or an installer can \
+                         be watched while it runs.",
+                    );
+                    if on_top != self.on_top {
+                        self.on_top = on_top;
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::WindowLevel(match on_top {
+                                true => egui::WindowLevel::AlwaysOnTop,
+                                false => egui::WindowLevel::Normal,
+                            }));
                     }
                     ui.add_space(12.0);
                     let mut encrypt = self.encrypt;
@@ -1233,6 +1252,7 @@ mod tests {
             // and a test that made one would leave it in the tester's tray.
             tray_tried: true,
             hidden: false,
+            on_top: false,
             quitting: false,
             settings: None,
         }
@@ -1376,6 +1396,40 @@ mod tests {
             "confirming the dialog left the records behind"
         );
         assert!(harness.state().uninstalled);
+    }
+
+    /// Deleting the records is the one thing in the pane nobody can get back,
+    /// so the first press only asks. The settings and the folder list are
+    /// deliberately still there afterwards — that is what makes this a
+    /// different answer from Uninstall.
+    #[test]
+    fn deleting_every_record_takes_two_presses_and_keeps_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        std::fs::write(storage.journal(), b"a row\n").unwrap();
+        storage.set_retention(30, 2_000_000).unwrap();
+        let mut harness = harness(app(dir.path(), vec!["/watched/folder".to_owned()]));
+
+        harness.get_by_label("Settings…").click();
+        harness.run();
+        // Through accesskit rather than a pointer: the pane scrolls in a
+        // window this size, and a real user scrolls to what a test cannot.
+        harness
+            .get_by_label("Delete every record")
+            .click_accesskit();
+        harness.run();
+        assert!(
+            storage.journal().exists(),
+            "the first press deleted the records instead of asking"
+        );
+
+        harness
+            .get_by_label_contains("Really delete")
+            .click_accesskit();
+        harness.run();
+        assert!(!storage.journal().exists(), "the records are still there");
+        assert_eq!(storage.retention(), (30, 2_000_000), "settings went too");
+        assert_eq!(harness.state().watches.len(), 1, "the folder list went too");
     }
 
     /// Nowhere to record to is a thing to say out loud. A window that merely
