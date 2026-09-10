@@ -114,6 +114,80 @@ struct ActivityHistoryServiceTests {
 
         #expect(history.recentEvents.map(\.path.lastPathComponent) == ["new.bin", "old.bin"])
     }
+
+    /// The one place the two aggregations meet.
+    ///
+    /// `core/src/history.rs` folds rows for the Windows and Linux hosts and
+    /// this file folds them for the app, because the journal is Swift's and
+    /// does not cross the FFI — the same rule, written twice. The fixture and
+    /// its expectations are shared with `core/tests/history.rs`: edit one
+    /// implementation's bucket boundary, ordering or unknown-size rule and the
+    /// other host's test fails, which is the only thing standing between two
+    /// dashboards and two different answers for one folder.
+    @Test("folds the shared fixture into the history the Rust core folds it into")
+    func foldsTheSharedFixtureLikeTheCore() async throws {
+        let fixtures = URL(filePath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "core/fixtures", directoryHint: .isDirectory)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let expected = try decoder.decode(
+            SharedHistoryExpectations.self,
+            from: try Data(contentsOf: fixtures.appending(path: "history-expectations.json"))
+        )
+        let rows = try String(contentsOf: fixtures.appending(path: "swift-journal.jsonl"), encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try decoder.decode(DiskActivityEvent.self, from: Data(line.utf8))
+            }
+
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: rows))
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: expected.recentLimit,
+            bucketInterval: TimeInterval(expected.bucketIntervalSecs),
+            generatedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        #expect(history.totalNetByteDelta == expected.totalNetByteDelta)
+        #expect(history.eventCount == expected.eventCount)
+        #expect(history.unknownSizeEventCount == expected.unknownSizeEventCount)
+        #expect(history.isTruncated == expected.isTruncated)
+        #expect(history.recentEvents.map(\.path.path) == expected.recentPaths)
+        #expect(history.buckets == expected.buckets.map { bucket in
+            ActivityHistoryBucket(
+                startDate: Date(timeIntervalSince1970: TimeInterval(bucket.startSecs)),
+                endDate: Date(
+                    timeIntervalSince1970: TimeInterval(bucket.startSecs + expected.bucketIntervalSecs)
+                ),
+                byteDelta: bucket.byteDelta,
+                eventCount: bucket.eventCount,
+                unknownSizeEventCount: bucket.unknownSizeEventCount
+            )
+        })
+    }
+}
+
+/// The numbers both hosts must reach, as `core/fixtures/history-expectations.json`
+/// spells them.
+private struct SharedHistoryExpectations: Decodable {
+    struct Bucket: Decodable {
+        let startSecs: Int
+        let byteDelta: Int64
+        let eventCount: Int
+        let unknownSizeEventCount: Int
+    }
+
+    let bucketIntervalSecs: Int
+    let recentLimit: Int
+    let totalNetByteDelta: Int64
+    let eventCount: Int
+    let unknownSizeEventCount: Int
+    let isTruncated: Bool
+    let recentPaths: [String]
+    let buckets: [Bucket]
 }
 
 private func event(

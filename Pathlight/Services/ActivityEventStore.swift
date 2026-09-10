@@ -42,6 +42,7 @@ nonisolated protocol ActivityEventStoring: Sendable {
     /// Returns only after the whole batch is durably committed. A thrown error
     /// is retryable unless it is `commitStateUnknown`.
     func append(_ events: [DiskActivityEvent]) async throws
+    /// The newest `limit` events for the root, newest first.
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
     /// Newest `limit` events plus totals over *everything* retained for the
     /// root, so a capped page can never understate the dashboard.
@@ -66,7 +67,11 @@ extension ActivityEventStoring {
         bucketInterval: TimeInterval
     ) async throws -> ActivityEventPage {
         var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
-        for event in try await loadEvents(rootPath: rootPath, limit: .max) {
+        // Reversed because the builder's window keeps the last `limit` rows it
+        // is handed — which is the newest only in journal order, and
+        // `loadEvents` answers newest first. Handed the list as it comes, a
+        // store without its own reader paged the *oldest* events.
+        for event in try await loadEvents(rootPath: rootPath, limit: .max).reversed() {
             builder.add(event)
         }
         return builder.page()

@@ -70,3 +70,78 @@ fn totals_cover_every_event_while_listing_one_page() {
     assert_eq!(history.recent_events.len(), 3);
     assert!(history.is_truncated);
 }
+
+/// The one place the two aggregations meet.
+///
+/// macOS folds its own journal in Swift (`ActivityHistoryService`) because the
+/// journal is Swift's and does not cross the FFI, so the same rule is written
+/// twice. The fixture and its expectations are shared with
+/// `PathlightCoreTests/ActivityHistoryServiceTests`: edit one implementation's
+/// bucket boundary, ordering or unknown-size rule and the other host's test
+/// fails, which is the only thing standing between two dashboards and two
+/// different answers for one folder.
+#[test]
+fn both_hosts_fold_the_same_rows_into_the_same_history() {
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/history-expectations.json")).unwrap();
+    let events: Vec<ActivityEvent> = include_str!("../fixtures/swift-journal.jsonl")
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| ActivityEvent::from_json_line(line).unwrap())
+        .collect();
+
+    let history = build_history(
+        ROOT,
+        events,
+        expected["bucketIntervalSecs"].as_u64().unwrap(),
+        expected["recentLimit"].as_u64().unwrap() as u32,
+        UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        history.total_net_byte_delta,
+        expected["totalNetByteDelta"].as_i64().unwrap()
+    );
+    assert_eq!(
+        u64::from(history.event_count),
+        expected["eventCount"].as_u64().unwrap()
+    );
+    assert_eq!(
+        u64::from(history.unknown_size_event_count),
+        expected["unknownSizeEventCount"].as_u64().unwrap()
+    );
+    assert_eq!(
+        history.is_truncated,
+        expected["isTruncated"].as_bool().unwrap()
+    );
+    let paths: Vec<&str> = history
+        .recent_events
+        .iter()
+        .map(|event| event.path.as_str())
+        .collect();
+    let wanted: Vec<&str> = expected["recentPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    assert_eq!(paths, wanted);
+
+    let buckets = expected["buckets"].as_array().unwrap();
+    assert_eq!(history.buckets.len(), buckets.len());
+    for (bucket, wanted) in history.buckets.iter().zip(buckets) {
+        assert_eq!(
+            bucket.start,
+            UNIX_EPOCH + Duration::from_secs(wanted["startSecs"].as_u64().unwrap()),
+        );
+        assert_eq!(bucket.byte_delta, wanted["byteDelta"].as_i64().unwrap());
+        assert_eq!(
+            u64::from(bucket.event_count),
+            wanted["eventCount"].as_u64().unwrap()
+        );
+        assert_eq!(
+            u64::from(bucket.unknown_size_event_count),
+            wanted["unknownSizeEventCount"].as_u64().unwrap()
+        );
+    }
+}
