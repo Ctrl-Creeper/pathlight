@@ -218,7 +218,7 @@ impl Journal {
 
 /// The json behind a line, decrypting when the line is encrypted and this
 /// machine has the key. `None` for a row this build cannot read.
-fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
+pub(crate) fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
     if !line.starts_with(ENCRYPTED_PREFIX) {
         return Some(line.to_owned());
     }

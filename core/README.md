@@ -14,7 +14,7 @@ Swift and Kotlin through [UniFFI](https://mozilla.github.io/uniffi-rs/).
 | `snapshot` | Native-name interval traversal, identity-aware totals and continuity-gated endpoint reconciliation | implemented; explicitly not an atomic snapshot or historical replay |
 | `evidence` | Locked, versioned JSONL evidence with source epochs, native paths, explicit gaps and bounded durable batches | implemented (Rust API) |
 | `recording` | Bounded recording sessions with watcher-first startup, chunked native binding manifests and interval snapshots | implemented as `pathlight-monitor`; no restart resume yet |
-| `attribution` | Byte-delta attribution, threshold, window aggregation, in-memory `SizeIndex` | done (Rust API only, not yet on the FFI surface) |
+| `attribution` | Byte-delta attribution, threshold, window aggregation, `SizeIndex` (persisted beside the journal, sealed with it) | done (Rust API only, not yet on the FFI surface) |
 | `exclusion` | gitignore-style noise filter via the `ignore` crate | done (Rust API only) |
 | `history` | Buckets, totals, newest-first rows for the dashboard | done, exposed as `Journal.load_history` |
 

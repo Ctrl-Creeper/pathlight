@@ -18,6 +18,7 @@ use crate::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
 const WATCHES_FILE: &str = "watches.json";
+const SIZE_INDEX_FILE: &str = "activity-size-index.jsonl";
 /// How long a row is kept, and how large the journal may get, until the user
 /// says otherwise. The same numbers the macOS app ships
 /// (`ActivityStoragePreferences.defaults`), so one journal read on either host
@@ -100,6 +101,20 @@ impl Storage {
         path == self.path || paths::is_inside(&self.path, path)
     }
 
+    /// The baselines a watch measures its deltas against, kept beside the
+    /// journal and sealed with the same key.
+    ///
+    /// Storage, not attribution, because where a measurement is kept and
+    /// whether it is encrypted is this file's business — the same reason the
+    /// macOS app owns its own index. The file name is the app's, so a mac
+    /// running the terminal host keeps one index rather than two.
+    pub fn size_index(&self) -> crate::attribution::SizeIndex {
+        crate::attribution::SizeIndex::at(
+            self.dir().join(SIZE_INDEX_FILE),
+            self.encrypting().then(|| self.journal()),
+        )
+    }
+
     /// Appends rows to the shared journal.
     pub fn record(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
         let _guard = journal_lock()
@@ -146,6 +161,9 @@ impl Storage {
         let _guard = journal_lock()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // The baselines name the same files the rows do, so "delete every
+        // record" that left them behind would be a lie about what is kept.
+        let _ = std::fs::remove_file(self.dir().join(SIZE_INDEX_FILE));
         match std::fs::remove_file(self.journal()) {
             // Nothing recorded yet is already the state this asks for.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -612,9 +630,17 @@ mod tests {
         assert_eq!(storage.watches().len(), 1, "the folder list was reset too");
         assert_eq!(storage.recorded().1, 1, "the records were reset too");
 
-        // And deleting the records leaves the settings alone.
+        // And deleting the records leaves the settings alone — while taking
+        // the baselines, which name the same files.
+        let index = storage.size_index();
+        index.record("watch", "/watched/report.bin", Some(4096));
+        index.persist().unwrap();
         storage.forget_records().unwrap();
         assert_eq!(storage.recorded(), (0, 0));
+        assert_eq!(
+            storage.size_index().peek("watch", "/watched/report.bin"),
+            None
+        );
         assert_eq!(storage.watches().len(), 1);
         // Twice is not an error: nothing recorded is the state it asks for.
         storage.forget_records().unwrap();

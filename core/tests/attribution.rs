@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use pathlight_core::monitor::{Change, ChangeKind};
+use pathlight_core::store::Storage;
 use pathlight_core::{
     ActivityAttributor, AggregationOptions, Attributor, Confidence, EventKind, SizeIndex,
     SizeLookup,
@@ -393,4 +394,45 @@ fn a_removal_is_judged_by_the_size_the_watch_last_knew() {
 
     assert!(filtered.is_empty());
     assert_eq!(kept.len(), 1);
+}
+
+/// Why the baselines are on disk at all: a watch reopened tomorrow has to
+/// measure what changed rather than call the first change to every file a
+/// whole new file — and a deletion after a restart still needs a size.
+#[test]
+fn a_size_measured_before_a_restart_is_still_the_baseline_after_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::at(dir.path());
+    let index = storage.size_index();
+    index.record(SCOPE, "/a/big.bin", Some(4096));
+    index.persist().unwrap();
+    drop(index);
+
+    let reopened = storage.size_index();
+    assert_eq!(reopened.peek(SCOPE, "/a/big.bin"), Some(4096));
+    // A second watch over the same file is its own observer, restart or not.
+    assert_eq!(reopened.peek("another watch", "/a/big.bin"), None);
+
+    // A path taken as gone stays gone, or the next restart would resurrect a
+    // baseline for a file that is not there and report its deletion twice.
+    assert_eq!(reopened.take(SCOPE, "/a/big.bin"), Some(4096));
+    reopened.persist().unwrap();
+    assert_eq!(storage.size_index().peek(SCOPE, "/a/big.bin"), None);
+}
+
+/// The baselines name every file a watch has measured, so the setting that
+/// seals the rows has to seal these too.
+#[test]
+fn baselines_are_sealed_when_the_records_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::at(dir.path());
+    storage.set_encrypting(true).unwrap();
+    let index = storage.size_index();
+    index.record(SCOPE, "/a/private.bin", Some(9));
+    index.persist().unwrap();
+
+    let text = std::fs::read_to_string(dir.path().join("activity-size-index.jsonl")).unwrap();
+    assert!(!text.contains("private.bin"), "{text}");
+    // And this machine still reads its own back.
+    assert_eq!(storage.size_index().peek(SCOPE, "/a/private.bin"), Some(9));
 }

@@ -173,7 +173,7 @@ mod swift_case {
 }
 
 /// Whole-second RFC 3339 in UTC, matching `JSONEncoder.dateEncodingStrategy = .iso8601`.
-mod swift_date {
+pub(crate) mod swift_date {
     use std::time::SystemTime;
 
     use serde::de::Error as _;

@@ -202,7 +202,10 @@ struct Worker {
 
 impl Worker {
     fn run(self, receiver: mpsc::Receiver<StreamEvent>) {
-        let index = SizeIndex::default();
+        // Loaded from disk, so a watch reopened tomorrow measures deltas
+        // against yesterday's sizes instead of calling every first change a
+        // whole file and every deletion nothing at all.
+        let index = self.storage.size_index();
         let scope = self.scope.as_str();
         // The size provider records what it measured, so a later deletion of
         // the same path still has a size to report.
@@ -249,13 +252,13 @@ impl Worker {
                 Ok(event) => self.accept(event, &mut pending, &baseline),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.flush(&attributor, &mut pending);
+                    self.flush(&attributor, &mut pending, &index);
                     return;
                 }
             }
             let now = Instant::now();
             if now >= due {
-                self.flush(&attributor, &mut pending);
+                self.flush(&attributor, &mut pending, &index);
                 due = now + FLUSH;
             }
             if now >= trim_due {
@@ -391,7 +394,7 @@ impl Worker {
         }
     }
 
-    fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>) {
+    fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>, index: &SizeIndex) {
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if pending.is_empty() && dropped == 0 {
             return;
@@ -399,6 +402,11 @@ impl Worker {
         let events = attributor.process(pending);
         pending.clear();
         self.publish(events, dropped);
+        // After the rows, because a baseline nobody can compare against is
+        // worth less than a row nobody has a baseline for.
+        if let Err(error) = index.persist() {
+            self.live().error = Some(format!("Sizes could not be remembered: {error}"));
+        }
     }
 
     /// Journal first, then the screen. A row on screen that was never written
