@@ -22,7 +22,7 @@ use crate::monitor::{ActivityListener, Change, StreamEvent, Watcher};
 use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
 use crate::{paths, ActivityEvent, Confidence, EventKind};
 
-use crate::anomaly::{anomalies, Anomaly, AnomalyKind, WINDOW};
+use crate::anomaly::{anomalies, growth, Anomaly, AnomalyKind, GROWTH_WINDOW, WINDOW};
 use crate::store::Storage;
 
 /// How long a batch waits before it is attributed and written.
@@ -102,6 +102,7 @@ impl Session {
         // host restarts what is running when the user changes any of them.
         let options = storage.options();
         let latency_ms = storage.latency_ms();
+        let storage_threshold = storage.growth_alert_bytes();
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
@@ -123,7 +124,7 @@ impl Session {
             exclusions,
             live: live.clone(),
             dropped,
-            alerts: Mutex::new(Alerts::default()),
+            alerts: Mutex::new(Alerts::watching(storage_threshold)),
             announce: Box::new(announce),
         };
         std::thread::Builder::new()
@@ -411,8 +412,10 @@ impl Worker {
 
         let mut live = self.live();
         live.dropped += dropped;
+        let mut arrived = 0i64;
         for event in events {
             live.total_byte_delta += event.byte_delta.unwrap_or(0);
+            arrived = arrived.saturating_add(event.byte_delta.unwrap_or(0).max(0));
             live.event_count += 1;
             live.rows.push_front(event);
             if live.rows.len() > MAX_ROWS {
@@ -431,7 +434,7 @@ impl Worker {
             .alerts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .news(&live.rows, SystemTime::now());
+            .news(&live.rows, arrived, SystemTime::now());
         drop(live);
         for alert in news {
             (self.announce)(&alert, &self.scope);
@@ -449,20 +452,62 @@ struct Alerts {
     /// When each kind was last raised. A folder being emptied stays a folder
     /// being emptied for as long as it takes; saying so every flush would
     /// teach the user to ignore it.
-    said: [Option<SystemTime>; 2],
+    said: [Option<SystemTime>; 3],
+    /// How much this folder may gain in a day before the user is told, or
+    /// zero for never.
+    threshold: i64,
+    /// The day being added up, and what has arrived inside it.
+    // ponytail: counted from what this watch saw rather than read back out of
+    // the journal the way macOS does it. A running watch already has the
+    // number; re-reading a day of rows on every flush would be a disk read on
+    // the path that has to stay cheap. The cost is that a restart starts the
+    // day over, which is the same trade as the dropped-event counters.
+    day: Option<(SystemTime, i64)>,
 }
 
 impl Alerts {
-    /// What is worth saying about these rows right now.
+    /// Alerts that also watch for a folder gaining `threshold` bytes in a day.
+    fn watching(threshold: i64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+
+    /// What is worth saying about these rows right now, given that `arrived`
+    /// bytes of them are new.
     ///
     /// `rows` is newest first and bounded, so a long enough burst is measured
     /// from what was kept: the thresholds are floors, and a floor that is
     /// crossed is still crossed.
-    fn news(&mut self, rows: &VecDeque<ActivityEvent>, now: SystemTime) -> Vec<Anomaly> {
-        anomalies(rows, now)
+    fn news(
+        &mut self,
+        rows: &VecDeque<ActivityEvent>,
+        arrived: i64,
+        now: SystemTime,
+    ) -> Vec<Anomaly> {
+        let mut found = anomalies(rows, now);
+        found.extend(self.grown(arrived, now));
+        found
             .into_iter()
             .filter(|alert| self.once(alert, now))
             .collect()
+    }
+
+    /// Adds `arrived` to the day and says whether the day is now past the
+    /// threshold. The day restarts once it is over, so this is the last 24
+    /// hours of watching rather than a total that only ever grows.
+    fn grown(&mut self, arrived: i64, now: SystemTime) -> Option<Anomaly> {
+        if self.threshold <= 0 {
+            return None;
+        }
+        let (start, gained) = self.day.get_or_insert((now, 0));
+        if now.duration_since(*start).unwrap_or_default() >= GROWTH_WINDOW {
+            *start = now;
+            *gained = 0;
+        }
+        *gained = gained.saturating_add(arrived);
+        growth(*gained, self.threshold)
     }
 
     /// Whether this finding has gone unsaid for a window.
@@ -470,11 +515,14 @@ impl Alerts {
         // Matched rather than indexed by discriminant, so a finding added to
         // the core's policy fails to compile here instead of silently
         // borrowing another kind's cooldown.
-        let slot = &mut self.said[match alert.kind {
-            AnomalyKind::Removal => 0,
-            AnomalyKind::Burst => 1,
-        }];
-        if slot.is_some_and(|said| now.duration_since(said).unwrap_or_default() < WINDOW) {
+        let (index, cooldown) = match alert.kind {
+            AnomalyKind::Removal => (0, WINDOW),
+            AnomalyKind::Burst => (1, WINDOW),
+            // Once a day, because that is the span the threshold is about.
+            AnomalyKind::Growth => (2, GROWTH_WINDOW),
+        };
+        let slot = &mut self.said[index];
+        if slot.is_some_and(|said| now.duration_since(said).unwrap_or_default() < cooldown) {
             return false;
         }
         *slot = Some(now);
@@ -765,15 +813,17 @@ mod tests {
             .collect();
         let mut alerts = Alerts::default();
 
-        let news = alerts.news(&rows, now);
+        let news = alerts.news(&rows, 0, now);
         assert_eq!(news.len(), 1, "120 deleted items went unmentioned");
         assert_eq!(news[0].kind, AnomalyKind::Removal);
         assert!(
-            alerts.news(&rows, now + Duration::from_secs(60)).is_empty(),
+            alerts
+                .news(&rows, 0, now + Duration::from_secs(60))
+                .is_empty(),
             "the same finding was raised twice"
         );
         assert_eq!(
-            alerts.news(&rows, now + WINDOW).len(),
+            alerts.news(&rows, 0, now + WINDOW).len(),
             1,
             "still happening a window later, and still worth saying"
         );
@@ -784,6 +834,38 @@ mod tests {
     fn a_quiet_folder_is_never_interrupted() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ordinary = VecDeque::from([row(EventKind::Modified, 4096, 1, now)]);
-        assert!(Alerts::default().news(&ordinary, now).is_empty());
+        assert!(Alerts::default().news(&ordinary, 0, now).is_empty());
+        // And a threshold nobody set is not a threshold anything crosses.
+        assert!(Alerts::watching(0)
+            .news(&ordinary, 100 * 1_000_000_000, now)
+            .is_empty());
+    }
+
+    /// The threshold the user set, measured over a day of watching: enough
+    /// arriving is said once, and the day it was said in has to pass before
+    /// it is said again.
+    #[test]
+    fn a_folder_past_the_size_the_user_asked_about_says_so_once_a_day() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let quiet = VecDeque::new();
+        let mut alerts = Alerts::watching(1_000_000_000);
+
+        assert!(alerts.news(&quiet, 600_000_000, now).is_empty());
+        let news = alerts.news(&quiet, 600_000_000, now + Duration::from_secs(60));
+        assert_eq!(news.len(), 1, "1.2 GB in a day went unmentioned");
+        assert_eq!(news[0].kind, AnomalyKind::Growth);
+        assert_eq!(news[0].bytes, 1_200_000_000);
+        assert!(
+            alerts
+                .news(&quiet, 600_000_000, now + Duration::from_secs(120))
+                .is_empty(),
+            "the same day was reported twice"
+        );
+
+        // A new day starts the total over: yesterday's gigabytes are not
+        // today's growth.
+        assert!(alerts
+            .news(&quiet, 600_000_000, now + GROWTH_WINDOW)
+            .is_empty());
     }
 }

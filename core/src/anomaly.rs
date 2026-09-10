@@ -16,6 +16,9 @@ use crate::{ActivityEvent, EventKind};
 
 /// The span the thresholds are measured over.
 pub const WINDOW: Duration = Duration::from_secs(10 * 60);
+/// The span a growth threshold is measured over: the user sets "this much in
+/// a day", so a day is what a host has to add up.
+pub const GROWTH_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// Enough gone at once that nobody deleted it one file at a time.
 const REMOVED_ITEMS: u64 = 100;
 /// Or enough bytes gone that the count does not matter.
@@ -29,6 +32,11 @@ pub enum AnomalyKind {
     Removal,
     /// A lot of this folder just arrived.
     Burst,
+    /// This folder has grown past the size the user asked to be told about.
+    /// Unlike the other two this has no fixed threshold — it is the one the
+    /// user set — so [`anomalies`] never returns it; a host that keeps a
+    /// running total raises it.
+    Growth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
@@ -37,6 +45,16 @@ pub struct Anomaly {
     pub items: u64,
     /// Always positive: the size of what happened, not its direction.
     pub bytes: i64,
+}
+
+/// Whether `arrived` bytes in a day is past the threshold the user set, as a
+/// finding. A threshold of zero is the user not asking, which is the default.
+pub fn growth(arrived: i64, threshold: i64) -> Option<Anomaly> {
+    (threshold > 0 && arrived >= threshold).then_some(Anomaly {
+        kind: AnomalyKind::Growth,
+        items: 0,
+        bytes: arrived,
+    })
 }
 
 /// The findings in `events` as of `now`, newest-first or not — order does not

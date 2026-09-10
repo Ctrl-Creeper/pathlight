@@ -70,6 +70,7 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
 
     let shown = text(&run(home.path(), &["settings"]));
     assert!(shown.contains("retention-days            180"), "{shown}");
+    assert!(shown.contains("growth-alert-mb           never"), "{shown}");
 
     run(home.path(), &["settings", "retention-days", "30"]);
     run(home.path(), &["settings", "latency", "power-saving"]);
@@ -81,6 +82,7 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
         home.path(),
         &["settings", "aggregate-retention-days", "365"],
     );
+    run(home.path(), &["settings", "growth-alert-mb", "5000"]);
 
     let shown = text(&run(home.path(), &["settings"]));
     for expected in [
@@ -91,6 +93,7 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
         "patterns                  *.tmp logs/",
         "records                   grouped 120",
         "aggregate-retention-days  365",
+        "growth-alert-mb           5000",
     ] {
         assert!(shown.contains(expected), "{expected} missing from {shown}");
     }

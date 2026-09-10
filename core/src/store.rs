@@ -275,6 +275,21 @@ impl Storage {
             .unwrap_or(DEFAULT_LATENCY_MS)
     }
 
+    /// How much a folder may grow in a day before the user is told, or zero
+    /// for never — which is the default, because an unasked-for alert about
+    /// an ordinary download is how notifications get switched off wholesale.
+    // ponytail: one threshold for the install, where macOS keeps one per
+    // folder. Same setting, presented where these hosts keep their settings.
+    pub fn growth_alert_bytes(&self) -> i64 {
+        self.settings().growth_alert_bytes.unwrap_or(0).max(0)
+    }
+
+    pub fn set_growth_alert_bytes(&self, bytes: i64) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.growth_alert_bytes = Some(bytes.max(0));
+        self.save(&settings)
+    }
+
     pub fn set_latency_ms(&self, latency_ms: u64) -> io::Result<()> {
         let mut settings = self.settings();
         settings.latency_ms = Some(latency_ms.max(1));
@@ -459,6 +474,10 @@ struct Settings {
     minimum_recorded_byte_delta: Option<i64>,
     #[serde(default)]
     latency_ms: Option<u64>,
+    /// Absent, or zero, means the user has not asked to be told about a
+    /// folder growing.
+    #[serde(default)]
+    growth_alert_bytes: Option<i64>,
     /// Absent means rows name the files that changed, which is what a person
     /// opening a monitor for the first time is looking for.
     #[serde(default)]
@@ -654,17 +673,21 @@ mod tests {
         assert_eq!(storage.latency_ms(), DEFAULT_LATENCY_MS);
         assert_eq!(storage.patterns(), DEFAULT_PATTERNS.to_vec());
         assert_eq!(storage.options().minimum_recorded_byte_delta, 0);
+        // Nobody is told about a folder growing until they ask to be.
+        assert_eq!(storage.growth_alert_bytes(), 0);
 
         storage.set_retention(30, 2_000_000).unwrap();
         storage.set_latency_ms(BACKGROUND_LATENCY_MS).unwrap();
         storage.set_patterns(&["*.log".to_owned()]).unwrap();
         storage.set_minimum_byte_delta(1024).unwrap();
+        storage.set_growth_alert_bytes(5_000_000_000).unwrap();
 
         let reopened = Storage::at(dir.path());
         assert_eq!(reopened.retention(), (30, 2_000_000));
         assert_eq!(reopened.latency_ms(), BACKGROUND_LATENCY_MS);
         assert_eq!(reopened.patterns(), ["*.log"]);
         assert_eq!(reopened.options().minimum_recorded_byte_delta, 1024);
+        assert_eq!(reopened.growth_alert_bytes(), 5_000_000_000);
         // Recording everything is a choice, and one that has to survive a
         // restart rather than reading as "never edited".
         reopened.set_patterns(&[]).unwrap();

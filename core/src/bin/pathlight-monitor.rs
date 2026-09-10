@@ -187,8 +187,9 @@ fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
 const SETTING_VALUES: &str = "
 Change one with `settings KEY VALUE`: latency takes immediate, power-saving or a number
 of milliseconds; the file bounds take a byte count or `any`; encrypt takes on or off;
-records takes file-names or `grouped [SECONDS]`; patterns takes a list, `default` for the
-shipped one, or `none` to record everything.";
+records takes file-names or `grouped [SECONDS]`; growth-alert-mb takes megabytes a folder
+may gain in a day before you are told, or 0 for never; patterns takes a list, `default` for
+the shipped one, or `none` to record everything.";
 
 const HELP: &str = "\
 Usage: pathlight-monitor <command> [arguments]
@@ -514,6 +515,16 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
         }
         "aggregate-retention-days" => storage.set_aggregate_retention_days(number(first, key)?)?,
         "min-delta-bytes" => storage.set_minimum_byte_delta(number(first, key)?)?,
+        "growth-alert-mb" => {
+            let megabytes: i64 = number(first, key)?;
+            let bytes = megabytes.checked_mul(1_000_000).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "that size is larger than any disk",
+                )
+            })?;
+            storage.set_growth_alert_bytes(bytes)?;
+        }
         "records" => match first {
             // Named rows and grouped rows are the two answers; the window only
             // means anything for the second.
@@ -607,6 +618,13 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     say(
         "min-delta-bytes",
         options.minimum_recorded_byte_delta.to_string(),
+    );
+    say(
+        "growth-alert-mb",
+        match storage.growth_alert_bytes() {
+            0 => "never".to_owned(),
+            bytes => (bytes / 1_000_000).to_string(),
+        },
     );
     say("min-file-bytes", bound(min));
     say("max-file-bytes", bound(max));

@@ -73,6 +73,7 @@ pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     match alert.kind {
         AnomalyKind::Removal => format!("Many files deleted in {name}"),
         AnomalyKind::Burst => format!("{name} is filling up fast"),
+        AnomalyKind::Growth => format!("{name} is growing quickly"),
     }
 }
 
@@ -89,6 +90,9 @@ pub fn alert_body(alert: &Anomaly) -> String {
             alert.items
         ),
         AnomalyKind::Burst => format!("{size} written in the last {minutes} minutes."),
+        // No window in the sentence: this one is the threshold the user set
+        // for a day, and "today" is the word they set it in.
+        AnomalyKind::Growth => format!("Up {size} today, past the size you asked about."),
     }
 }
 

@@ -26,6 +26,10 @@ pub struct Draft {
     /// actually chosen in, where MB would mean "0" for every useful value.
     least_kb: String,
     power_saving: bool,
+    /// How much a folder may gain in a day before a notification, in MB, or
+    /// empty for never — the shipped answer, because an alert nobody asked
+    /// for is how notifications get switched off wholesale.
+    growth_alert_mb: String,
     /// Whether a row names the file that changed or says how much changed in
     /// the folder, and how wide a group is when it does the latter.
     records_file_names: bool,
@@ -61,6 +65,10 @@ impl Draft {
             cap_mb: (cap / BYTES_PER_MB as u64).to_string(),
             least_kb: (options.minimum_recorded_byte_delta / 1000).to_string(),
             power_saving: storage.latency_ms() >= BACKGROUND_LATENCY_MS,
+            growth_alert_mb: match storage.growth_alert_bytes() {
+                0 => String::new(),
+                bytes => (bytes / BYTES_PER_MB).to_string(),
+            },
             records_file_names: options.records_file_names,
             window_minutes: (match options.aggregation_window_secs {
                 0 => DEFAULT_AGGREGATION_WINDOW_SECS,
@@ -151,6 +159,22 @@ impl Draft {
         );
 
         ui.add_space(12.0);
+        ui.label(egui::RichText::new("Tell me when a folder grows").strong());
+        number(
+            ui,
+            "Grew today by more than (MB)",
+            &mut self.growth_alert_mb,
+        );
+        ui.label(
+            egui::RichText::new(
+                "Left empty, nothing is said. Pathlight always speaks up when a folder \
+                 loses a lot at once or fills up unusually fast.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+
+        ui.add_space(12.0);
         ui.label(egui::RichText::new("Never record these").strong());
         ui.label(
             egui::RichText::new("One gitignore-style pattern per line.")
@@ -220,12 +244,20 @@ impl Draft {
         let window_minutes: u64 = digits(&self.window_minutes, "Group changes within")?;
         let cap_mb: u64 = digits(&self.cap_mb, "Stop recording past")?;
         let least_kb: i64 = digits(&self.least_kb, "Smallest change to record")?;
+        // Empty is "never", which is the answer a box nobody typed in has.
+        let growth_mb: i64 = match self.growth_alert_mb.trim().is_empty() {
+            true => 0,
+            false => digits(&self.growth_alert_mb, "Grew today by more than")?,
+        };
         let cap = cap_mb
             .checked_mul(BYTES_PER_MB as u64)
             .ok_or_else(|| "That records cap is larger than any disk.".to_owned())?;
         let least = least_kb
             .checked_mul(1000)
             .ok_or_else(|| "That smallest change is larger than any file.".to_owned())?;
+        let growth = growth_mb
+            .checked_mul(BYTES_PER_MB)
+            .ok_or_else(|| "That growth is larger than any disk.".to_owned())?;
         let patterns: Vec<String> = self
             .patterns
             .lines()
@@ -251,6 +283,9 @@ impl Draft {
                 false => DEFAULT_LATENCY_MS,
             })
             .map_err(|error| format!("Could not save how soon changes are reported: {error}"))?;
+        storage
+            .set_growth_alert_bytes(growth)
+            .map_err(|error| format!("Could not save when to tell you about growth: {error}"))?;
         storage
             .set_patterns(&patterns)
             .map_err(|error| format!("Could not save the patterns: {error}"))
@@ -309,6 +344,7 @@ mod tests {
         draft.cap_mb = "500".to_owned();
         draft.least_kb = "4".to_owned();
         draft.power_saving = true;
+        draft.growth_alert_mb = "5000".to_owned();
         draft.patterns = "*.tmp\n\n  node_modules/  \n".to_owned();
         draft.save(&storage).unwrap();
 
@@ -319,6 +355,7 @@ mod tests {
         assert_eq!(storage.options().minimum_recorded_byte_delta, 4000);
         assert_eq!(storage.latency_ms(), BACKGROUND_LATENCY_MS);
         assert_eq!(storage.patterns(), ["*.tmp", "node_modules/"]);
+        assert_eq!(storage.growth_alert_bytes(), 5_000 * BYTES_PER_MB);
         // And a fresh draft shows it back, which is the half that silently
         // reverts if the units disagree.
         let reread = Draft::read(&storage);
@@ -327,6 +364,13 @@ mod tests {
         assert_eq!(reread.aggregate_days, "365");
         assert_eq!(reread.window_minutes, "2");
         assert!(reread.power_saving);
+        assert_eq!(reread.growth_alert_mb, "5000");
+
+        // And an emptied box is "never", not a number that failed to parse.
+        draft.growth_alert_mb = "  ".to_owned();
+        draft.save(&storage).unwrap();
+        assert_eq!(storage.growth_alert_bytes(), 0);
+        assert_eq!(Draft::read(&storage).growth_alert_mb, "");
     }
 
     /// Nothing is saved when a box cannot be read, and the message names the
