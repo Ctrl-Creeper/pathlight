@@ -8,6 +8,7 @@ uniffi::setup_scaffolding!();
 
 pub mod anomaly;
 pub mod attribution;
+pub mod autostart;
 pub mod crypt;
 pub mod event;
 pub mod evidence;
