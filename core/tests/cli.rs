@@ -349,3 +349,69 @@ fn a_pause_holds_every_watch_off_until_it_is_lifted() {
         text(&resumed)
     );
 }
+
+/// `--json` is the terminal's own convenience: the windows already show
+/// structured rows, and a pipeline needs the same numbers without parsing
+/// English. What matters is that both forms come off one answer, so a script
+/// and a person are never told different things.
+#[test]
+fn the_json_form_carries_the_same_numbers_as_the_columns() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    let path = root.to_string_lossy().replace('\\', "/");
+
+    let journal = Journal::new(format!(
+        "{}/activity-events.jsonl",
+        records_dir(home.path())
+    ));
+    journal
+        .append(vec![
+            recorded(root, "big.psd", 10, 8_192, EventKind::Created),
+            recorded(root, "notes.txt", 30, -4_096, EventKind::Deleted),
+        ])
+        .unwrap();
+
+    let printed = text(&run(home.path(), &["history", &path]));
+    assert!(printed.contains("2 change(s), net"), "{printed}");
+    let answer: serde_json::Value =
+        serde_json::from_str(&text(&run(home.path(), &["history", &path, "--json"])))
+            .expect("history --json is one JSON object");
+    assert_eq!(answer["eventCount"], 2);
+    assert_eq!(answer["totalNetByteDelta"], 4_096);
+    // The rows are the journal's own fields, `file://` paths included, so a
+    // pipeline reading these reads what the file holds.
+    let rows = answer["recentEvents"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row["path"].as_str().unwrap().starts_with("file://")),
+        "{rows:?}"
+    );
+
+    // A narrowing flag still narrows, and the flag can be typed anywhere.
+    let deleted: serde_json::Value = serde_json::from_str(&text(&run(
+        home.path(),
+        &["history", "--json", &path, "--kind", "deleted"],
+    )))
+    .unwrap();
+    assert_eq!(deleted["eventCount"], 1);
+
+    // The reading commands a script would poll: the same settings, the same
+    // folders, the same build.
+    let settings: serde_json::Value =
+        serde_json::from_str(&text(&run(home.path(), &["settings", "--json"]))).unwrap();
+    assert_eq!(settings["paused"], "no");
+    assert_eq!(settings["retention-days"], "180");
+    run(home.path(), &["watches", "add", &path]);
+    let watches: serde_json::Value =
+        serde_json::from_str(&text(&run(home.path(), &["watches", "--json"]))).unwrap();
+    assert_eq!(watches[0]["enabled"], false);
+    assert_eq!(watches[0]["path"], path);
+    let version: serde_json::Value =
+        serde_json::from_str(&text(&run(home.path(), &["version", "--json"]))).unwrap();
+    assert_eq!(version["host"], "pathlight-monitor");
+    assert!(version["watcher"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty()));
+}

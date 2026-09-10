@@ -2,6 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pathlight_core::history::Query;
@@ -10,6 +11,25 @@ use pathlight_core::store::{
 };
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
 use pathlight_core::{paths, ActivityEvent};
+
+/// Whether the reading commands answer a program instead of a person.
+///
+/// One process, one output stream, one switch read off the command line before
+/// anything prints.
+// ponytail: a global, because threading a flag through every command
+// signature would be a bigger diff than the feature. Only the commands that
+// read honour it; the ones that change something print a sentence either way.
+static AS_JSON: AtomicBool = AtomicBool::new(false);
+
+fn as_json() -> bool {
+    AS_JSON.load(Ordering::Relaxed)
+}
+
+/// One line, because a script pipes this into `jq` and a shell reads it a line
+/// at a time.
+fn print_json(value: serde_json::Value) {
+    println!("{value}");
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -313,6 +333,11 @@ Usage: pathlight-monitor <command> [arguments]
   install-cli             Put this command in your own home, on your PATH.
   uninstall [--yes]       List Pathlight's own storage, and with --yes remove it.
 
+Add --json to `watches`, `presets`, `history`, `settings`, `log` or `version`
+and the answer comes back as JSON on one line, for a script rather than a
+person. The rows are the journal's own fields, so what a pipeline reads here is
+what the windows read.
+
 Every command but `record` shares one settings file and one journal with the
 Pathlight windows, so a folder added here shows up there. No watch ever records
 Pathlight's own storage.
@@ -368,8 +393,16 @@ fn log_lines(rest: &[OsString]) -> io::Result<()> {
         }
     };
     let storage = storage()?;
+    let tail = storage.log_tail(lines);
+    if as_json() {
+        print_json(serde_json::json!({
+            "file": storage.log_file().display().to_string(),
+            "lines": tail.lines().collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
     println!("{}", storage.log_file().display());
-    match storage.log_tail(lines) {
+    match tail {
         tail if tail.is_empty() => println!(
             "Nothing written yet. A watch writes here when it opens, when it catches up after \
              a gap, when it warns about something, and when it fails."
@@ -477,7 +510,17 @@ fn presets(rest: &[OsString]) -> io::Result<()> {
             "usage: pathlight-monitor presets",
         ));
     }
-    for preset in pathlight_core::presets::available() {
+    let available = pathlight_core::presets::available();
+    if as_json() {
+        print_json(
+            available
+                .iter()
+                .map(|preset| serde_json::json!({"title": preset.title, "path": preset.path}))
+                .collect(),
+        );
+        return Ok(());
+    }
+    for preset in available {
         println!("{:<20}{}", preset.title, preset.path);
     }
     println!("\nAdd one with `watches add FOLDER`.");
@@ -491,6 +534,17 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
     match verb {
         "list" if rest.len() <= 1 => {
             let watches = storage.watches();
+            if as_json() {
+                print_json(
+                    watches
+                        .iter()
+                        .map(|watch| {
+                            serde_json::json!({"path": watch.path, "enabled": watch.enabled})
+                        })
+                        .collect(),
+                );
+                return Ok(());
+            }
             if watches.is_empty() {
                 println!("No folders yet. Add one with `watches add FOLDER`.");
             }
@@ -570,6 +624,25 @@ fn history(rest: &[OsString]) -> io::Result<()> {
     let snapshot = storage()?
         .search(&root, limit, &query)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    if as_json() {
+        print_json(serde_json::json!({
+            "rootPath": snapshot.root_path,
+            "eventCount": snapshot.event_count,
+            "totalNetByteDelta": snapshot.total_net_byte_delta,
+            "unknownSizeEventCount": snapshot.unknown_size_event_count,
+            "isTruncated": snapshot.is_truncated,
+            "skip": query.skip,
+            // The rows as the journal writes them, not a second spelling of
+            // the same fields: one contract for the file and the pipeline.
+            "recentEvents": snapshot
+                .recent_events
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(io::Error::other)?,
+        }));
+        return Ok(());
+    }
     println!("{}", snapshot.root_path);
     println!(
         "{} change(s){}, net {}{}",
@@ -806,9 +879,20 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     let (min, max) = storage.size_bounds();
     let bound =
         |value: Option<i64>| value.map_or_else(|| "any".to_owned(), |value| value.to_string());
+    let mut report: Vec<(String, serde_json::Value)> = Vec::new();
     // Padded so the keys read as a column; the first two are what this install
-    // is, not settings, and are named as such.
-    let say = |key: &str, value: String| println!("{key:<26}{value}");
+    // is, not settings, and are named as such. `--json` wants the same pairs
+    // as one object, so they are collected here rather than described twice.
+    // ponytail: every value stays the string the column shows, minus the hint
+    // in brackets after the two spaces — a typed schema would be a second
+    // definition of every setting to keep in step with this one.
+    let mut say = |key: &str, value: String| match as_json() {
+        true => {
+            let value = value.split("  ").next().unwrap_or(&value).to_owned();
+            report.push((key.to_owned(), serde_json::Value::String(value)));
+        }
+        false => println!("{key:<26}{value}"),
+    };
     say("folder", storage.dir().to_string_lossy().into_owned());
     let (bytes, rows) = storage.recorded();
     say(
@@ -873,6 +957,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     );
     say("encrypt", storage.encrypting().to_string());
     say("patterns", storage.patterns().join(" "));
+    if as_json() {
+        print_json(serde_json::Value::Object(report.into_iter().collect()));
+        return Ok(());
+    }
     println!("{SETTING_VALUES}");
     Ok(())
 }
@@ -939,6 +1027,11 @@ fn pause(rest: &[OsString], paused: bool) -> io::Result<()> {
 
 fn run() -> io::Result<()> {
     let mut args: Vec<OsString> = env::args_os().skip(1).collect();
+    // Taken out before the command is read, so it can be typed anywhere on the
+    // line and the positional arguments keep their meaning.
+    if take_switch(&mut args, "--json") {
+        AS_JSON.store(true, Ordering::Relaxed);
+    }
     // `first`, not `args[0]`: no arguments at all is the most likely way this
     // binary is ever run, and it used to panic.
     match args
@@ -951,10 +1044,20 @@ fn run() -> io::Result<()> {
             return Ok(());
         }
         "-V" | "--version" | "version" => {
-            println!(
-                "{}",
-                pathlight_core::text::version("pathlight-monitor", env!("CARGO_PKG_VERSION"))
-            );
+            match as_json() {
+                true => print_json(serde_json::json!({
+                    "host": "pathlight-monitor",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "core": pathlight_core::core_version(),
+                    "watcher": pathlight_core::text::guarantees(
+                        &pathlight_core::monitor::watcher_capabilities(),
+                    ),
+                })),
+                false => println!(
+                    "{}",
+                    pathlight_core::text::version("pathlight-monitor", env!("CARGO_PKG_VERSION"))
+                ),
+            }
             return Ok(());
         }
         "uninstall" => return uninstall(&args[1..]),
