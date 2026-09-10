@@ -633,6 +633,140 @@ fileprivate struct FfiConverterTimestamp: FfiConverterRustBuffer {
 
 
 /**
+ * [`Attributor`] for a host: the same logic, reached across the FFI.
+ */
+public protocol ActivityAttributorProtocol: AnyObject, Sendable {
+    
+    func process(changes: [Change])  -> [ActivityEvent]
+    
+}
+/**
+ * [`Attributor`] for a host: the same logic, reached across the FFI.
+ */
+open class ActivityAttributor: ActivityAttributorProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_activityattributor(self.handle, $0) }
+    }
+public convenience init(options: AggregationOptions, sizes: SizeLookup) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_activityattributor_new(
+        FfiConverterTypeAggregationOptions_lower(options),
+        FfiConverterTypeSizeLookup_lower(sizes),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_activityattributor(handle, $0) }
+    }
+
+    
+
+    
+open func process(changes: [Change]) -> [ActivityEvent]  {
+    return try!  FfiConverterSequenceTypeActivityEvent.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_activityattributor_process(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeChange.lower(changes),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeActivityAttributor: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = ActivityAttributor
+
+    public static func lift(_ handle: UInt64) throws -> ActivityAttributor {
+        return ActivityAttributor(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: ActivityAttributor) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ActivityAttributor {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ActivityAttributor, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActivityAttributor_lift(_ handle: UInt64) throws -> ActivityAttributor {
+    return try FfiConverterTypeActivityAttributor.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActivityAttributor_lower(_ value: ActivityAttributor) -> UInt64 {
+    return FfiConverterTypeActivityAttributor.lower(value)
+}
+
+
+
+
+
+
+/**
  * Implemented by the host (Swift/Kotlin). Called from the watcher's thread.
  */
 public protocol ActivityListener: AnyObject, Sendable {
@@ -836,6 +970,167 @@ public func FfiConverterTypeActivityListener_lower(_ value: ActivityListener) ->
 
 
 
+/**
+ * [`ExclusionFilter`] for a host: the same rules, reached across the FFI.
+ *
+ * Holds an `Option` so an empty pattern list is still an object — a
+ * constructor that returned nothing would have to be a factory function on
+ * the other side, and "record everything" is a filter like any other.
+ */
+public protocol ExclusionMatcherProtocol: AnyObject, Sendable {
+    
+    func excludes(path: String)  -> Bool
+    
+    /**
+     * True when nothing is being excluded, so a caller can skip the filter
+     * rather than ask it about every path.
+     */
+    func isEmpty()  -> Bool
+    
+}
+/**
+ * [`ExclusionFilter`] for a host: the same rules, reached across the FFI.
+ *
+ * Holds an `Option` so an empty pattern list is still an object — a
+ * constructor that returned nothing would have to be a factory function on
+ * the other side, and "record everything" is a filter like any other.
+ */
+open class ExclusionMatcher: ExclusionMatcherProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_exclusionmatcher(self.handle, $0) }
+    }
+public convenience init(patterns: [String], root: String)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_exclusionmatcher_new(
+        FfiConverterSequenceString.lower(patterns),
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_exclusionmatcher(handle, $0) }
+    }
+
+    
+
+    
+open func excludes(path: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_exclusionmatcher_excludes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * True when nothing is being excluded, so a caller can skip the filter
+     * rather than ask it about every path.
+     */
+open func isEmpty() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_exclusionmatcher_is_empty(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExclusionMatcher: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = ExclusionMatcher
+
+    public static func lift(_ handle: UInt64) throws -> ExclusionMatcher {
+        return ExclusionMatcher(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: ExclusionMatcher) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExclusionMatcher {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ExclusionMatcher, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExclusionMatcher_lift(_ handle: UInt64) throws -> ExclusionMatcher {
+    return try FfiConverterTypeExclusionMatcher.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExclusionMatcher_lower(_ value: ExclusionMatcher) -> UInt64 {
+    return FfiConverterTypeExclusionMatcher.lower(value)
+}
+
+
+
+
+
+
 public protocol JournalProtocol: AnyObject, Sendable {
     
     /**
@@ -852,6 +1147,21 @@ public protocol JournalProtocol: AnyObject, Sendable {
      * Dashboard history for one root: buckets, totals, and the newest rows.
      */
     func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64) throws  -> HistorySnapshot
+    
+    /**
+     * Drops rows that are older than `retention_days`, then, if the file
+     * still would not fit in `limit_bytes`, the oldest of what is left.
+     * Returns how many rows went. Zero means unlimited, for either.
+     *
+     * A journal nothing ever trims is the one way a monitor that promises to
+     * be cheap fills a disk — the thing it exists to warn about.
+     *
+     * Age is judged per row and the cap positionally, because a row this
+     * build cannot date (an encrypted line, or a line from a newer format)
+     * must not be aged out on a guess. It still counts against the cap, and
+     * the cap drops from the front, which is oldest for an append-only file.
+     */
+    func trim(retentionDays: UInt32, limitBytes: UInt64) throws  -> UInt64
     
 }
 open class Journal: JournalProtocol, @unchecked Sendable {
@@ -914,6 +1224,18 @@ public convenience init(path: String) {
     }
 
     
+    /**
+     * The same journal, appending encrypted rows.
+     */
+public static func encrypting(path: String) -> Journal  {
+    return try!  FfiConverterTypeJournal_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_journal_encrypting(
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
 
     
     /**
@@ -953,6 +1275,30 @@ open func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt6
         FfiConverterString.lower(rootPath),
         FfiConverterUInt32.lower(limit),
         FfiConverterUInt64.lower(bucketIntervalSecs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Drops rows that are older than `retention_days`, then, if the file
+     * still would not fit in `limit_bytes`, the oldest of what is left.
+     * Returns how many rows went. Zero means unlimited, for either.
+     *
+     * A journal nothing ever trims is the one way a monitor that promises to
+     * be cheap fills a disk — the thing it exists to warn about.
+     *
+     * Age is judged per row and the cap positionally, because a row this
+     * build cannot date (an encrypted line, or a line from a newer format)
+     * must not be aged out on a guess. It still counts against the cap, and
+     * the cap drops from the front, which is oldest for an append-only file.
+     */
+open func trim(retentionDays: UInt32, limitBytes: UInt64)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_journal_trim(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(retentionDays),
+        FfiConverterUInt64.lower(limitBytes),uniffiCallStatus
     )
 })
 }
@@ -1000,6 +1346,313 @@ public func FfiConverterTypeJournal_lift(_ handle: UInt64) throws -> Journal {
 #endif
 public func FfiConverterTypeJournal_lower(_ value: Journal) -> UInt64 {
     return FfiConverterTypeJournal.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The three size lookups attribution needs, implemented by the host.
+ *
+ * A shell owns its own size index because that is storage policy, not
+ * attribution: the macOS app persists and encrypts one, so a long-term watch
+ * still has baselines after a relaunch. What the host must not own is the
+ * arithmetic below, which is the same on every platform.
+ */
+public protocol SizeLookup: AnyObject, Sendable {
+    
+    /**
+     * Current allocated size. Implementations record it for later lookups.
+     */
+    func size(path: String)  -> Int64?
+    
+    /**
+     * Last known size of a path that just vanished; consumed on use.
+     */
+    func priorSize(path: String)  -> Int64?
+    
+    /**
+     * Last known size of a path that still exists, read before `size` so a
+     * modification reports growth instead of the whole file again.
+     */
+    func knownSize(path: String)  -> Int64?
+    
+}
+/**
+ * The three size lookups attribution needs, implemented by the host.
+ *
+ * A shell owns its own size index because that is storage policy, not
+ * attribution: the macOS app persists and encrypts one, so a long-term watch
+ * still has baselines after a relaunch. What the host must not own is the
+ * arithmetic below, which is the same on every platform.
+ */
+open class SizeLookupImpl: SizeLookup, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_sizelookup(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_sizelookup(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Current allocated size. Implementations record it for later lookups.
+     */
+open func size(path: String) -> Int64?  {
+    return try!  FfiConverterOptionInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizelookup_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Last known size of a path that just vanished; consumed on use.
+     */
+open func priorSize(path: String) -> Int64?  {
+    return try!  FfiConverterOptionInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizelookup_prior_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Last known size of a path that still exists, read before `size` so a
+     * modification reports growth instead of the whole file again.
+     */
+open func knownSize(path: String) -> Int64?  {
+    return try!  FfiConverterOptionInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizelookup_known_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceSizeLookup {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceSizeLookup = UniffiVTableCallbackInterfaceSizeLookup(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeSizeLookup.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface SizeLookup: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeSizeLookup.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface SizeLookup: handle missing in uniffiClone")
+            }
+        },
+        size: { (
+            uniffiHandle: UInt64,
+            path: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Int64? in
+                guard let uniffiObj = try? FfiConverterTypeSizeLookup.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.size(
+                     path: try FfiConverterString.lift(path)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        priorSize: { (
+            uniffiHandle: UInt64,
+            path: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Int64? in
+                guard let uniffiObj = try? FfiConverterTypeSizeLookup.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.priorSize(
+                     path: try FfiConverterString.lift(path)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        knownSize: { (
+            uniffiHandle: UInt64,
+            path: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Int64? in
+                guard let uniffiObj = try? FfiConverterTypeSizeLookup.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.knownSize(
+                     path: try FfiConverterString.lift(path)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceSizeLookup> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceSizeLookup>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitSizeLookup() {
+    uniffi_pathlight_core_fn_init_callback_vtable_sizelookup(UniffiCallbackInterfaceSizeLookup.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSizeLookup: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<SizeLookup>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = SizeLookup
+
+    public static func lift(_ handle: UInt64) throws -> SizeLookup {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return SizeLookupImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: SizeLookup) -> UInt64 {
+         if let rustImpl = value as? SizeLookupImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SizeLookup {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SizeLookup, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSizeLookup_lift(_ handle: UInt64) throws -> SizeLookup {
+    return try FfiConverterTypeSizeLookup.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSizeLookup_lower(_ value: SizeLookup) -> UInt64 {
+    return FfiConverterTypeSizeLookup.lower(value)
 }
 
 
@@ -1420,14 +2073,28 @@ public struct Change: Equatable, Hashable {
     public var path: String
     public var rootPath: String
     public var timestamp: Date
+    /**
+     * The program that caused this change, where the backend knows. Only a
+     * privileged Linux watch does today, and `Capabilities::reports_process`
+     * says so before a watch starts, so a host never has to guess whether
+     * `None` means "nobody" or "this platform cannot tell".
+     */
+    public var processName: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: ChangeKind, path: String, rootPath: String, timestamp: Date) {
+    public init(kind: ChangeKind, path: String, rootPath: String, timestamp: Date, 
+        /**
+         * The program that caused this change, where the backend knows. Only a
+         * privileged Linux watch does today, and `Capabilities::reports_process`
+         * says so before a watch starts, so a host never has to guess whether
+         * `None` means "nobody" or "this platform cannot tell".
+         */processName: String?) {
         self.kind = kind
         self.path = path
         self.rootPath = rootPath
         self.timestamp = timestamp
+        self.processName = processName
     }
 
     
@@ -1449,7 +2116,8 @@ public struct FfiConverterTypeChange: FfiConverterRustBuffer {
                 kind: FfiConverterTypeChangeKind.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 rootPath: FfiConverterString.read(from: &buf), 
-                timestamp: FfiConverterTimestamp.read(from: &buf)
+                timestamp: FfiConverterTimestamp.read(from: &buf), 
+                processName: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1458,6 +2126,7 @@ public struct FfiConverterTypeChange: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterString.write(value.rootPath, into: &buf)
         FfiConverterTimestamp.write(value.timestamp, into: &buf)
+        FfiConverterOptionString.write(value.processName, into: &buf)
     }
 }
 
@@ -1551,16 +2220,23 @@ public struct HistorySnapshot: Equatable, Hashable {
     public var unknownSizeEventCount: UInt32
     public var buckets: [HistoryBucket]
     /**
-     * Newest first.
+     * Newest first, at most `recent_limit` rows.
      */
     public var recentEvents: [ActivityEvent]
+    /**
+     * The totals above cover more rows than `recent_events` lists.
+     */
+    public var isTruncated: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(rootPath: String, generatedAt: Date, totalNetByteDelta: Int64, eventCount: UInt32, unknownSizeEventCount: UInt32, buckets: [HistoryBucket], 
         /**
-         * Newest first.
-         */recentEvents: [ActivityEvent]) {
+         * Newest first, at most `recent_limit` rows.
+         */recentEvents: [ActivityEvent], 
+        /**
+         * The totals above cover more rows than `recent_events` lists.
+         */isTruncated: Bool) {
         self.rootPath = rootPath
         self.generatedAt = generatedAt
         self.totalNetByteDelta = totalNetByteDelta
@@ -1568,6 +2244,7 @@ public struct HistorySnapshot: Equatable, Hashable {
         self.unknownSizeEventCount = unknownSizeEventCount
         self.buckets = buckets
         self.recentEvents = recentEvents
+        self.isTruncated = isTruncated
     }
 
     
@@ -1592,7 +2269,8 @@ public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
                 eventCount: FfiConverterUInt32.read(from: &buf), 
                 unknownSizeEventCount: FfiConverterUInt32.read(from: &buf), 
                 buckets: FfiConverterSequenceTypeHistoryBucket.read(from: &buf), 
-                recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf)
+                recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf), 
+                isTruncated: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1604,6 +2282,7 @@ public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.unknownSizeEventCount, into: &buf)
         FfiConverterSequenceTypeHistoryBucket.write(value.buckets, into: &buf)
         FfiConverterSequenceTypeActivityEvent.write(value.recentEvents, into: &buf)
+        FfiConverterBool.write(value.isTruncated, into: &buf)
     }
 }
 
@@ -2118,6 +2797,31 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeActivityEvent: FfiConverterRustBuffer {
     typealias SwiftType = [ActivityEvent]
 
@@ -2135,6 +2839,31 @@ fileprivate struct FfiConverterSequenceTypeActivityEvent: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeActivityEvent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeChange: FfiConverterRustBuffer {
+    typealias SwiftType = [Change]
+
+    public static func write(_ value: [Change], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeChange.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Change] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Change]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeChange.read(from: &buf))
         }
         return seq
     }
@@ -2175,6 +2904,18 @@ public func coreVersion() -> String  {
 })
 }
 /**
+ * [`normalized_patterns`] across the FFI, for a host that stores what the
+ * user typed and wants it stored the way this crate reads it.
+ */
+public func normalizedExclusionPatterns(patterns: [String]) -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_normalized_exclusion_patterns(
+        FfiConverterSequenceString.lower(patterns),uniffiCallStatus
+    )
+})
+}
+/**
  * What this platform's watcher guarantees. Safe to call before starting a
  * watch, which is the point: the host needs it to decide whether a stored
  * cursor is worth trusting.
@@ -2205,7 +2946,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_func_core_version() != 16517) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_func_normalized_exclusion_patterns() != 41574) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_func_watcher_capabilities() != 30058) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_activityattributor_process() != 61309) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizelookup_size() != 25057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizelookup_prior_size() != 63520) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizelookup_known_size() != 1211) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_exclusionmatcher_excludes() != 10943) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_exclusionmatcher_is_empty() != 64758) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_journal_append() != 25315) {
@@ -2217,10 +2979,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_journal_load_history() != 30952) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_method_journal_trim() != 19990) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_method_activitylistener_on_event() != 31555) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_watcher_stop() != 13909) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_constructor_activityattributor_new() != 8521) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_constructor_exclusionmatcher_new() != 65460) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_constructor_journal_encrypting() != 30733) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_constructor_journal_new() != 12772) {
@@ -2231,6 +3005,7 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitActivityListener()
+    uniffiCallbackInitSizeLookup()
     return InitializationResult.ok
 }()
 

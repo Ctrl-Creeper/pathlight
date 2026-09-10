@@ -52,6 +52,9 @@ struct PathlightApp: App {
             activityMonitor: RustDiskActivityMonitor(),
             activityAttribution: { options, sizeProviders in
                 RustActivityAttribution(options: options, sizeProviders: sizeProviders)
+            },
+            activityExclusion: { patterns, rootPath in
+                RustActivityExclusion(patterns: patterns, rootPath: rootPath)
             }
         )
     )

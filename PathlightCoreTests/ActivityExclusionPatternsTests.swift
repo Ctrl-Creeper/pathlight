@@ -2,61 +2,37 @@ import Foundation
 import Testing
 @testable import PathlightCore
 
-@Suite("Activity exclusion filter")
-struct ActivityExclusionFilterTests {
-    private let root = URL(filePath: "/Users/example", directoryHint: .isDirectory)
-
-    @Test("empty patterns disable filtering entirely")
-    func emptyPatternsDisableFiltering() {
-        #expect(ActivityExclusionFilter(patterns: [], rootPath: root) == nil)
-        #expect(ActivityExclusionFilter(patterns: ["   ", ""], rootPath: root) == nil)
+/// What a typed pattern is stored as. The matching those patterns drive lives
+/// in the Rust core and is checked in `core/tests/exclusion.rs`, which is why
+/// none of it is checked twice here.
+@Suite("Activity exclusion patterns")
+struct ActivityExclusionPatternsTests {
+    @Test("a pattern is stored one way however it was typed")
+    func aPatternIsStoredOneWayHoweverItWasTyped() {
+        #expect(
+            ActivityExclusionPatterns.normalized([
+                " node_modules/ ",
+                #"build\"#,
+                "./target/",
+                "/dist/",
+                "Library//Caches/",
+                "node_modules/",
+                "",
+                "   "
+            ]) == [
+                "node_modules/",
+                "build/",
+                "target/",
+                "dist/",
+                "Library/Caches/"
+            ]
+        )
     }
 
-    @Test("matches leaf names and extensions")
-    func matchesLeafNamesAndExtensions() throws {
-        let filter = try #require(ActivityExclusionFilter(
-            patterns: [".DS_Store", "*.tmp"],
-            rootPath: root
-        ))
-
-        #expect(filter.excludes(root.appending(path: "Documents/.DS_Store")))
-        #expect(filter.excludes(root.appending(path: "scratch.tmp")))
-        #expect(!filter.excludes(root.appending(path: "Documents/report.pdf")))
-    }
-
-    @Test("directory patterns exclude deep descendants")
-    func directoryPatternsExcludeDeepDescendants() throws {
-        let filter = try #require(ActivityExclusionFilter(
-            patterns: [".Trash/", "**/Caches/"],
-            rootPath: root
-        ))
-
-        #expect(filter.excludes(root.appending(path: ".Trash/old/movie.mov")))
-        #expect(filter.excludes(root.appending(path: "Library/Caches/com.app/blob.bin")))
-        #expect(filter.excludes(root.appending(path: "Library/Caches")))
-        #expect(!filter.excludes(root.appending(path: "Library/Preferences/com.app.plist")))
-    }
-
-    @Test("deleted directory leaf still matches directory-only patterns")
-    func deletedDirectoryLeafMatchesDirectoryPatterns() throws {
-        let filter = try #require(ActivityExclusionFilter(
-            patterns: ["node_modules/"],
-            rootPath: root
-        ))
-
-        // The path is gone, so the filter can't stat it; directory-only
-        // patterns must still match the bare leaf.
-        #expect(filter.excludes(root.appending(path: "project/node_modules")))
-    }
-
-    @Test("paths outside the root are never excluded")
-    func pathsOutsideRootAreNeverExcluded() throws {
-        let filter = try #require(ActivityExclusionFilter(
-            patterns: [".DS_Store"],
-            rootPath: root.appending(path: "Downloads")
-        ))
-
-        #expect(!filter.excludes(URL(filePath: "/Users/example/Documents/.DS_Store")))
+    @Test("patterns that are nothing but separators and space are dropped")
+    func emptyPatternsAreDropped() {
+        #expect(ActivityExclusionPatterns.normalized([]).isEmpty)
+        #expect(ActivityExclusionPatterns.normalized(["   ", "", "/", "//", "./"]).isEmpty)
     }
 
     @Test("legacy persisted options adopt default patterns")
@@ -70,7 +46,7 @@ struct ActivityExclusionFilterTests {
         """.utf8)
 
         let options = try JSONDecoder().decode(LongTermWatchTargetOptions.self, from: legacyJSON)
-        #expect(options.exclusionPatterns == ActivityExclusionFilter.defaultPatterns)
+        #expect(options.exclusionPatterns == ActivityExclusionPatterns.defaults)
 
         let roundTripped = try JSONDecoder().decode(
             LongTermWatchTargetOptions.self,

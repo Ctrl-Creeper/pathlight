@@ -12,6 +12,10 @@ struct AppDependencies {
     /// Byte attribution for one watch. Lives in the Rust core, so only a host
     /// that links it can supply one.
     var activityAttribution: ActivityAttributionFactory
+    /// Noise filtering for one watch. Also lives in the Rust core, so this
+    /// package has nothing to fall back on: filtering nothing records more
+    /// than the user asked for, never less.
+    var activityExclusion: ActivityExclusionFactory
     /// Byte-attribution providers for one watch. Each watch asks for its own
     /// scope so overlapping watches cannot consume each other's measurements.
     var activitySizeProviders: @Sendable (_ scope: String) -> ActivitySizeProviders
@@ -30,6 +34,7 @@ struct AppDependencies {
         systemActions: AppSystemActions,
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
         activityAttribution: @escaping ActivityAttributionFactory,
+        activityExclusion: @escaping ActivityExclusionFactory = { _, _ in nil },
         activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
             ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
         },
@@ -48,6 +53,7 @@ struct AppDependencies {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
         self.activityAttribution = activityAttribution
+        self.activityExclusion = activityExclusion
         self.activitySizeProviders = activitySizeProviders
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
@@ -61,11 +67,12 @@ struct AppDependencies {
     }
 
     /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
-    /// passes the Rust-backed monitor instead, and has to pass attribution
-    /// because this package holds no implementation of it.
+    /// passes the Rust-backed monitor instead, and has to pass attribution and
+    /// exclusion because this package holds no implementation of either.
     static func live(
         activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
         activityAttribution: @escaping ActivityAttributionFactory,
+        activityExclusion: @escaping ActivityExclusionFactory,
         activitySizeIndex: ActivitySizeIndex? = nil
     ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
@@ -77,6 +84,7 @@ struct AppDependencies {
             systemActions: .live,
             activityMonitor: activityMonitor,
             activityAttribution: activityAttribution,
+            activityExclusion: activityExclusion,
             activitySizeProviders: { scope in
                 ActivitySizeProviders(
                     size: { url in

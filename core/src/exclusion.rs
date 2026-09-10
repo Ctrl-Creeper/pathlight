@@ -3,6 +3,7 @@
 //! ripgrep's `ignore` crate, which implements gitignore semantics faithfully.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
@@ -24,16 +25,53 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
     "*.download",
 ];
 
-/// Trims, drops blanks, and de-duplicates while keeping order.
+/// One spelling for a pattern however it was typed, blanks dropped and
+/// duplicates removed while keeping the order the user wrote them in.
+///
+/// A pattern is text a person types, so it arrives with whatever their
+/// keyboard and habits produced: Windows separators, a leading `./` from a
+/// shell completion, doubled separators from pasting two halves together. The
+/// rules below are the ones the macOS app has always applied, kept here so
+/// both hosts store the same list and a target's patterns mean the same thing
+/// wherever it is opened.
 pub fn normalized_patterns<S: AsRef<str>>(patterns: &[S]) -> Vec<String> {
-    let mut seen = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for pattern in patterns {
-        let trimmed = pattern.as_ref().trim();
-        if !trimmed.is_empty() && !seen.iter().any(|s: &String| s == trimmed) {
-            seen.push(trimmed.to_owned());
+        let Some(normalized) = normalized_pattern(pattern.as_ref()) else {
+            continue;
+        };
+        if !seen.contains(&normalized) {
+            seen.push(normalized);
         }
     }
     seen
+}
+
+/// `None` for a pattern that is nothing but separators and space.
+// ponytail: a backslash is taken as a separator, not the gitignore escape and
+// not the legal POSIX filename character it also is. Somebody typing
+// `build\` means a folder far more often than they mean a file with a
+// backslash in its name; add an escape for the rare one when somebody asks.
+fn normalized_pattern(pattern: &str) -> Option<String> {
+    let mut text = pattern.trim().replace('\\', "/");
+    while let Some(rest) = text.strip_prefix("./") {
+        text = rest.to_owned();
+    }
+    // A leading separator is dropped rather than anchoring the pattern to the
+    // watch root, because that is what the app has always done with it.
+    text = text.trim_start_matches('/').to_owned();
+    while text.contains("//") {
+        text = text.replace("//", "/");
+    }
+    let directory_only = text.ends_with('/');
+    let trimmed = text.trim_end_matches('/');
+    match trimmed.is_empty() {
+        true => None,
+        false => Some(match directory_only {
+            true => format!("{trimmed}/"),
+            false => trimmed.to_owned(),
+        }),
+    }
 }
 
 #[derive(Debug)]
@@ -86,4 +124,43 @@ impl ExclusionFilter {
                 .matched_path_or_any_parents(candidate, true)
                 .is_ignore()
     }
+}
+
+/// [`ExclusionFilter`] for a host: the same rules, reached across the FFI.
+///
+/// Holds an `Option` so an empty pattern list is still an object — a
+/// constructor that returned nothing would have to be a factory function on
+/// the other side, and "record everything" is a filter like any other.
+#[derive(Debug, uniffi::Object)]
+pub struct ExclusionMatcher {
+    filter: Option<ExclusionFilter>,
+}
+
+#[uniffi::export]
+impl ExclusionMatcher {
+    #[uniffi::constructor]
+    pub fn new(patterns: Vec<String>, root: String) -> Result<Arc<Self>, CoreError> {
+        Ok(Arc::new(Self {
+            filter: ExclusionFilter::new(&patterns, &root)?,
+        }))
+    }
+
+    /// True when nothing is being excluded, so a caller can skip the filter
+    /// rather than ask it about every path.
+    pub fn is_empty(&self) -> bool {
+        self.filter.is_none()
+    }
+
+    pub fn excludes(&self, path: String) -> bool {
+        self.filter
+            .as_ref()
+            .is_some_and(|filter| filter.excludes(&path))
+    }
+}
+
+/// [`normalized_patterns`] across the FFI, for a host that stores what the
+/// user typed and wants it stored the way this crate reads it.
+#[uniffi::export]
+pub fn normalized_exclusion_patterns(patterns: Vec<String>) -> Vec<String> {
+    normalized_patterns(&patterns)
 }

@@ -26,7 +26,7 @@ struct LiveWatchSessionCoordinator: Sendable {
         startedAt: Date = Date(),
         options: DiskActivityAggregationOptions = .default,
         monitorLatency: TimeInterval = 0.25,
-        exclusionFilter: ActivityExclusionFilter? = nil,
+        exclusionFilter: (any ActivityExcluding)? = nil,
         sizeProviders: ActivitySizeProviders
     ) -> AsyncStream<WatchSessionModel> {
         let standardizedRoot = rootPath.standardizedFileURL

@@ -869,7 +869,7 @@ final class AppModel: ObservableObject {
         }
 
         var options = target.options
-        let normalizedPatterns = ScanExclusionMatcher.normalizedPatterns(patterns)
+        let normalizedPatterns = ActivityExclusionPatterns.normalized(patterns)
         guard normalizedPatterns != options.exclusionPatterns else {
             return
         }
@@ -1027,9 +1027,9 @@ final class AppModel: ObservableObject {
                     // Background watches don't need sub-second delivery; a wide
                     // latency window lets the kernel coalesce and saves wakeups.
                     monitorLatency: 30,
-                    exclusionFilter: ActivityExclusionFilter(
-                        patterns: currentTarget.options.exclusionPatterns,
-                        rootPath: currentTarget.rootPath
+                    exclusionFilter: self.dependencies.activityExclusion(
+                        currentTarget.options.exclusionPatterns,
+                        currentTarget.rootPath
                     ),
                     sizeProviders: sizeProviders
                 )

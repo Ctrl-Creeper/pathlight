@@ -82,10 +82,7 @@ struct LiveWatchSessionCoordinatorTests {
                 aggregationWindow: 0,
                 longTermRecordsFileNames: true
             ),
-            exclusionFilter: ActivityExclusionFilter(
-                patterns: [".DS_Store"],
-                rootPath: root
-            ),
+            exclusionFilter: StubExclusion(excludedNames: [".DS_Store"]),
             sizeProviders: ActivitySizeProviders(size: { _ in 4_096 })
         ).makeAsyncIterator()
 
@@ -203,5 +200,17 @@ private struct StaticDiskActivityMonitor: DiskActivityMonitoring {
             }
             continuation.finish()
         }
+    }
+}
+
+/// The matching itself lives in the Rust core, which this package does not
+/// link — `core/tests/exclusion.rs` is where the rules are checked. Here the
+/// only question is whether the coordinator honours an exclusion at all, so
+/// the filter says so directly.
+nonisolated private struct StubExclusion: ActivityExcluding {
+    let excludedNames: Set<String>
+
+    func excludes(_ url: URL) -> Bool {
+        excludedNames.contains(url.lastPathComponent)
     }
 }

@@ -543,7 +543,7 @@ private struct ActivityExclusionPatternEditor: View {
 
             HStack {
                 Button("Restore Defaults") {
-                    text = ActivityExclusionFilter.defaultPatterns.joined(separator: "\n")
+                    text = ActivityExclusionPatterns.defaults.joined(separator: "\n")
                 }
 
                 Spacer()

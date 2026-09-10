@@ -15,7 +15,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         aggregationWindow: TimeInterval,
         recordsFileNames: Bool,
         growthAlertThresholdBytes: Int64? = nil,
-        exclusionPatterns: [String] = ActivityExclusionFilter.defaultPatterns
+        exclusionPatterns: [String] = ActivityExclusionPatterns.defaults
     ) {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindow = aggregationWindow
@@ -32,7 +32,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         growthAlertThresholdBytes = try container.decodeIfPresent(Int64.self, forKey: .growthAlertThresholdBytes)
         // Targets persisted before exclusions existed adopt the defaults.
         exclusionPatterns = try container.decodeIfPresent([String].self, forKey: .exclusionPatterns)
-            ?? ActivityExclusionFilter.defaultPatterns
+            ?? ActivityExclusionPatterns.defaults
     }
 
     static let `default` = LongTermWatchTargetOptions(

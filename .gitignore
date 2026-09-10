@@ -1,4 +1,5 @@
 .build/
+build/
 *.xcuserstate
 xcuserdata/
 Pathlight.xcodeproj/xcuserdata/
