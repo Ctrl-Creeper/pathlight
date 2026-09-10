@@ -132,5 +132,8 @@ jobs:
           -configuration Debug -destination 'platform=macOS'
           -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
           | xcbeautify --renderer github-actions || true
+      # The binary, not the bundle directory: Xcode creates the `.app` early
+      # enough that a build which failed to compile still leaves one behind, so
+      # checking the directory let a broken build pass.
       - name: Verify build result
-        run: test -d build/Build/Products/Debug/Pathlight.app
+        run: test -x build/Build/Products/Debug/Pathlight.app/Contents/MacOS/Pathlight
