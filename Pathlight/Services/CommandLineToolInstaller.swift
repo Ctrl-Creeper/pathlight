@@ -49,7 +49,10 @@ nonisolated enum CommandLineToolError: LocalizedError, Equatable {
     }
 }
 
-private func runTool(_ tool: URL, _ arguments: [String]) throws -> String {
+// `nonisolated` because the launcher it is assigned to is: the app target
+// isolates file-scope functions to the main actor by default, and running a
+// child process and draining its pipes is the last thing that belongs there.
+private nonisolated func runTool(_ tool: URL, _ arguments: [String]) throws -> String {
     let process = Process()
     process.executableURL = tool
     process.arguments = arguments
@@ -68,6 +71,6 @@ private func runTool(_ tool: URL, _ arguments: [String]) throws -> String {
     return text(printed)
 }
 
-private func text(_ data: Data) -> String {
+private nonisolated func text(_ data: Data) -> String {
     String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 }
