@@ -56,6 +56,8 @@ impl ActivityListener for QueueListener {
 struct Recorder {
     journal: EvidenceJournal,
     source: SourceIdentity,
+    /// The sizes of file this session records at all; see [`SizeBounds`].
+    bounds: SizeBounds,
     sequence: u64,
     next_snapshot_id: u64,
     summary: RecordingSummary,
@@ -150,6 +152,9 @@ impl Recorder {
                     Ok(measurement) => (Some(measurement), None),
                     Err(error) => (None, Some(error.to_string())),
                 };
+                if !self.bounds.records(measurement.as_ref()) {
+                    return Ok(false);
+                }
                 (
                     EvidencePayload::Observation {
                         change,
@@ -302,11 +307,45 @@ impl Recorder {
     }
 }
 
+/// The sizes of file a recording keeps observations for, in bytes; `None` is
+/// no bound. The same rule the windows apply to a watch
+/// ([`crate::attribution::size_in_bounds`]), so one number means one thing on
+/// every host.
+///
+/// Only regular files are judged: a directory or a symlink has no size worth
+/// comparing, and dropping those observations would take the renames and
+/// deletions a reader reconstructs the history from. A file that could not be
+/// measured is kept for the same reason. The snapshots at each end still
+/// describe the whole folder — bounds decide what the live interval records,
+/// not what the folder is said to hold.
+///
+/// Judged on the allocated size where the filesystem reports one, which is the
+/// measure attribution uses, so a bound smaller than one allocation block
+/// cannot separate small files on any of them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SizeBounds {
+    pub min_bytes: Option<i64>,
+    pub max_bytes: Option<i64>,
+}
+
+impl SizeBounds {
+    fn records(&self, measurement: Option<&crate::measurement::FileMeasurement>) -> bool {
+        let size = measurement
+            .filter(|measurement| measurement.kind == crate::measurement::FileKind::File)
+            .map(|measurement| {
+                measurement
+                    .allocated_bytes
+                    .unwrap_or(measurement.logical_bytes) as i64
+            });
+        crate::attribution::size_in_bounds(size, self.min_bytes, self.max_bytes)
+    }
+}
+
 /// Record one live interval with a snapshot at each end, while the watcher is
 /// active. The journal must be outside the monitored tree to prevent feedback.
 /// This starts a new source epoch; it does not resume earlier recording sessions.
 pub fn record_for(root: &Path, journal: &Path, duration: Duration) -> io::Result<RecordingSummary> {
-    record_session(root, journal, duration, || {})
+    record_bounded(root, journal, duration, SizeBounds::default(), || {})
 }
 
 /// As `record_for`, but runs `on_live` once the watcher is armed and the
@@ -319,6 +358,17 @@ pub fn record_session(
     root: &Path,
     journal: &Path,
     duration: Duration,
+    on_live: impl FnOnce(),
+) -> io::Result<RecordingSummary> {
+    record_bounded(root, journal, duration, SizeBounds::default(), on_live)
+}
+
+/// As `record_session`, keeping observations only for files inside `bounds`.
+pub fn record_bounded(
+    root: &Path,
+    journal: &Path,
+    duration: Duration,
+    bounds: SizeBounds,
     on_live: impl FnOnce(),
 ) -> io::Result<RecordingSummary> {
     if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
@@ -360,6 +410,7 @@ pub fn record_session(
     }
     let mut recorder = Recorder {
         journal: EvidenceJournal::open(&journal_path)?,
+        bounds,
         source: SourceIdentity {
             backend: backend_name().into(),
             epoch: format!(
@@ -516,6 +567,7 @@ mod tests {
                 backend: "test".into(),
                 epoch: "overflow".into(),
             },
+            bounds: SizeBounds::default(),
             sequence: 0,
             next_snapshot_id: 0,
             summary: RecordingSummary::default(),
@@ -556,6 +608,7 @@ mod tests {
                 backend: "test".into(),
                 epoch: "deadline".into(),
             },
+            bounds: SizeBounds::default(),
             sequence: 0,
             next_snapshot_id: 0,
             summary: RecordingSummary::default(),

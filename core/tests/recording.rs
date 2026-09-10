@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use pathlight_core::evidence::{EvidenceJournal, EvidencePayload, NativePath};
 use pathlight_core::monitor::ChangeKind;
-use pathlight_core::recording::{record_for, record_session};
+use pathlight_core::recording::{record_bounded, record_for, record_session, SizeBounds};
 
 #[test]
 fn records_real_changes_and_two_interval_snapshots_to_an_external_journal() {
@@ -165,5 +165,60 @@ fn large_snapshot_manifests_are_chunked_instead_of_consuming_one_record_per_path
     assert!(
         records.len() < 20,
         "chunking should keep the journal index small"
+    );
+}
+
+/// The bounds the windows offer, on the command line: a file outside them is
+/// not observed at all, and the things that have no size worth comparing — a
+/// new directory, a file already gone by the time it was measured — stay in
+/// the journal, because they are what a reader rebuilds the history from.
+#[test]
+fn a_bounded_recording_observes_only_files_of_the_size_it_was_asked_for() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let journal_path = output.path().join("evidence.jsonl");
+    let bounds = SizeBounds {
+        min_bytes: Some(1_000_000),
+        max_bytes: None,
+    };
+
+    record_bounded(
+        root.path(),
+        &journal_path,
+        Duration::from_secs(3),
+        bounds,
+        || {
+            fs::write(root.path().join("tiny.txt"), b"small").unwrap();
+            fs::write(root.path().join("large.bin"), vec![7; 2 * 1024 * 1024]).unwrap();
+            fs::create_dir(root.path().join("folder")).unwrap();
+        },
+    )
+    .unwrap();
+    let records = EvidenceJournal::open(&journal_path)
+        .unwrap()
+        .read_records()
+        .unwrap();
+    let observed: Vec<String> = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            EvidencePayload::Observation { change, .. } => Some(
+                Path::new(&change.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        observed.iter().any(|name| name == "large.bin"),
+        "{observed:?}"
+    );
+    assert!(observed.iter().any(|name| name == "folder"), "{observed:?}");
+    assert!(
+        !observed.iter().any(|name| name == "tiny.txt"),
+        "{observed:?}"
     );
 }

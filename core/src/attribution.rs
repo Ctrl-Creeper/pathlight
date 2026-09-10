@@ -44,27 +44,34 @@ impl AggregationOptions {
     };
 
     /// Whether a file of this size is watched at all.
-    ///
-    /// A size that could not be read is watched. A change whose file cannot be
-    /// measured — a deletion, usually — must not vanish because of a bound it
-    /// was never tested against; under-reporting a deletion is the one failure
-    /// this app cannot afford.
     pub fn watches_file(&self, size: Option<i64>) -> bool {
-        let Some(size) = size else {
-            return true;
-        };
-        if let Some(min) = self.min_file_bytes {
-            if size < min {
-                return false;
-            }
-        }
-        if let Some(max) = self.max_file_bytes {
-            if size > max {
-                return false;
-            }
-        }
-        true
+        size_in_bounds(size, self.min_file_bytes, self.max_file_bytes)
     }
+}
+
+/// Whether a file of this size is inside the bounds a host set; `None` for a
+/// bound is no bound.
+///
+/// A size that could not be read is inside them. A change whose file cannot be
+/// measured — a deletion, usually — must not vanish because of a bound it was
+/// never tested against; under-reporting a deletion is the one failure this
+/// app cannot afford. Shared with the evidence recorder, so the bounds a user
+/// types mean the same thing in the CLI as in either window.
+pub fn size_in_bounds(size: Option<i64>, min_bytes: Option<i64>, max_bytes: Option<i64>) -> bool {
+    let Some(size) = size else {
+        return true;
+    };
+    if let Some(min) = min_bytes {
+        if size < min {
+            return false;
+        }
+    }
+    if let Some(max) = max_bytes {
+        if size > max {
+            return false;
+        }
+    }
+    true
 }
 
 /// Allocated on-disk size; directories count as 0 so readable folders are not

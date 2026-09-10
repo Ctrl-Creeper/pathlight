@@ -155,10 +155,35 @@ fn uninstall(rest: &[std::ffi::OsString]) -> io::Result<()> {
     )))
 }
 
+/// Takes `--name VALUE` out of `args` and parses it as a byte count.
+///
+/// Removed rather than ignored, so the positional arguments keep their meaning
+/// wherever the flag was typed. An unparsable value is an error and not a
+/// silently absent bound: a recording that quietly kept everything the user
+/// asked it to skip is a recording they would have to redo.
+fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
+    let Some(at) = args.iter().position(|arg| arg == name) else {
+        return Ok(None);
+    };
+    let value = args
+        .get(at + 1)
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} needs a byte count that is zero or more"),
+            )
+        })?;
+    args.drain(at..=at + 1);
+    Ok(Some(value))
+}
+
 fn run() -> io::Result<()> {
-    let args: Vec<_> = env::args_os().skip(1).collect();
+    let mut args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        println!("Usage: pathlight-monitor ROOT JOURNAL [SECONDS=10]\n       pathlight-monitor install-cli\n       pathlight-monitor uninstall [--yes]\nRecords an explicit live session and two interval snapshots. JOURNAL must be outside ROOT. Registration and scans add to the duration.\nInstall-cli puts this command in your own home directory and says how to reach it from a shell.\nUninstall lists Pathlight's own storage on this OS, plus an installed command, and with --yes removes them. Journals you named yourself are never guessed at.");
+        println!("Usage: pathlight-monitor ROOT JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]\n       pathlight-monitor install-cli\n       pathlight-monitor uninstall [--yes]\nRecords an explicit live session and two interval snapshots. JOURNAL must be outside ROOT. Registration and scans add to the duration.\nMin-bytes and max-bytes record only files of that size, the same bounds the windows offer; a file that cannot be measured, a directory and a symlink are always recorded, and the snapshots still describe the whole folder.\nInstall-cli puts this command in your own home directory and says how to reach it from a shell.\nUninstall lists Pathlight's own storage on this OS, plus an installed command, and with --yes removes them. Journals you named yourself are never guessed at.");
         return Ok(());
     }
     // `first`, not `args[0]`: no arguments at all is the most likely way this
@@ -169,10 +194,24 @@ fn run() -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "install-cli") {
         return install_cli(&args[1..]);
     }
+    let bounds = pathlight_core::recording::SizeBounds {
+        min_bytes: take_bytes(&mut args, "--min-bytes")?,
+        max_bytes: take_bytes(&mut args, "--max-bytes")?,
+    };
+    if bounds
+        .min_bytes
+        .zip(bounds.max_bytes)
+        .is_some_and(|(min, max)| min > max)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--min-bytes is above --max-bytes, which would record nothing",
+        ));
+    }
     if !(2..=3).contains(&args.len()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: pathlight-monitor ROOT JOURNAL [SECONDS=10]",
+            "usage: pathlight-monitor ROOT JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]",
         ));
     }
     let seconds = args.get(2).map_or(Ok(10), |value| {
@@ -193,8 +232,13 @@ fn run() -> io::Result<()> {
         "Preparing {} for a {seconds}-second recording…",
         root.display()
     );
-    let summary =
-        pathlight_core::recording::record_for(&root, &journal, Duration::from_secs(seconds))?;
+    let summary = pathlight_core::recording::record_bounded(
+        &root,
+        &journal,
+        Duration::from_secs(seconds),
+        bounds,
+        || {},
+    )?;
     println!(
         "Saved {} observations, {} gap records, {} total evidence records to {}",
         summary.observations,
