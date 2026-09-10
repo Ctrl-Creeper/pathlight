@@ -4,6 +4,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use pathlight_core::store::{Storage, WatchTarget, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS};
+use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
+use pathlight_core::{paths, ActivityEvent};
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("pathlight-monitor: {error}");
@@ -180,19 +184,465 @@ fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
     Ok(Some(value))
 }
 
-fn run() -> io::Result<()> {
-    let mut args: Vec<_> = env::args_os().skip(1).collect();
-    if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        println!("Usage: pathlight-monitor ROOT JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]\n       pathlight-monitor install-cli\n       pathlight-monitor uninstall [--yes]\nRecords an explicit live session and two interval snapshots. JOURNAL must be outside ROOT. Registration and scans add to the duration.\nMin-bytes and max-bytes record only files of that size, the same bounds the windows offer; a file that cannot be measured, a directory and a symlink are always recorded, and the snapshots still describe the whole folder.\nInstall-cli puts this command in your own home directory and says how to reach it from a shell.\nUninstall lists Pathlight's own storage on this OS, plus an installed command, and with --yes removes them. Journals you named yourself are never guessed at.");
-        return Ok(());
+const SETTING_VALUES: &str = "
+Change one with `settings KEY VALUE`: latency takes immediate, power-saving or a number
+of milliseconds; the file bounds take a byte count or `any`; encrypt takes on or off;
+patterns takes a list, `default` for the shipped one, or `none` to record everything.";
+
+const HELP: &str = "\
+Usage: pathlight-monitor <command> [arguments]
+
+  watch [FOLDER…]         Watch folders and print what changes, recording it.
+                          With no folder, watches the ones that are switched on.
+  watches                 List the folders this install remembers.
+  watches add FOLDER      Remember a folder, switched off.
+  watches enable FOLDER   Switch a folder on, so `watch` picks it up.
+  watches disable FOLDER  Switch it off again.
+  watches remove FOLDER   Forget it. Nothing already recorded is deleted.
+  history FOLDER          What the journal holds for a folder.
+  export FOLDER [FILE]    Write that as CSV, to FILE or to standard output.
+  settings                Show every setting, and where records are kept.
+  settings KEY VALUE…     Change one. Run `settings` to see the keys.
+  autostart [on|off]      Whether the watches start when you sign in.
+  record FOLDER JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]
+                          One explicit recording into a journal you name, with
+                          two interval snapshots. JOURNAL must be outside
+                          FOLDER, and registration and scans add to the
+                          duration.
+  install-cli             Put this command in your own home, on your PATH.
+  uninstall [--yes]       List Pathlight's own storage, and with --yes remove it.
+
+Every command but `record` shares one settings file and one journal with the
+Pathlight windows, so a folder added here shows up there. No watch ever records
+Pathlight's own storage.
+";
+
+/// The shared settings file and journal, or why there is none.
+fn storage() -> io::Result<Storage> {
+    Storage::current().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no home directory in the environment, so there is nowhere to record; set HOME \
+             (or USERPROFILE on Windows)",
+        )
+    })
+}
+
+/// A folder as the settings file spells it, so the same folder typed two ways
+/// is one entry and the storage guard can recognise it.
+fn root_of(argument: &OsString) -> String {
+    paths::normalize(&argument.to_string_lossy())
+}
+
+fn one_folder(rest: &[OsString], usage: &'static str) -> io::Result<String> {
+    match rest {
+        [folder] => Ok(root_of(folder)),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, usage)),
     }
+}
+
+/// Watches folders until the terminal is closed, printing rows as they are
+/// recorded.
+///
+/// The journal, the settings and the exclusions are the ones the windows use:
+/// this is the same watch, without a window. Folders named here are watched for
+/// as long as the command runs and not remembered — `watches enable` is how a
+/// folder is switched on for good.
+fn watch(rest: &[OsString]) -> io::Result<()> {
+    let storage = storage()?;
+    let roots: Vec<String> = if rest.is_empty() {
+        storage
+            .watches()
+            .into_iter()
+            .filter(|watch| watch.enabled)
+            .map(|watch| watch.path)
+            .collect()
+    } else {
+        rest.iter().map(root_of).collect()
+    };
+    if roots.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to watch: name a folder, or switch one on with `watches enable FOLDER`",
+        ));
+    }
+    let mut sessions = Vec::new();
+    for root in roots {
+        // Watching the journal's own folder is a feedback loop; the store
+        // refuses to record it either way, and saying so beats a watch that
+        // silently reports nothing.
+        if storage.is_own(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
+            ));
+        }
+        let session =
+            pathlight_core::watch::Session::start(&root, storage.clone(), |alert, scope| {
+                // On stderr, so `watch | grep` still reads as rows while a finding
+                // is still seen by somebody watching the terminal.
+                eprintln!("! {} — {}", alert_title(alert, scope), alert_body(alert));
+            })
+            .map_err(io::Error::other)?;
+        println!("Watching {root}");
+        sessions.push((root, session, 0u64));
+    }
+    println!(
+        "Recording to {}. Press Ctrl-C to stop.",
+        storage.journal().display()
+    );
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        for (root, session, printed) in &mut sessions {
+            let live = session.live();
+            // Newest first in `rows`, so the new ones are the front slice;
+            // printed oldest first, which is how a log reads.
+            let fresh = (live.event_count - *printed).min(live.rows.len() as u64) as usize;
+            for event in live.rows.iter().take(fresh).rev() {
+                print_row(event);
+            }
+            *printed = live.event_count;
+            if let Some(error) = &live.error {
+                eprintln!("! {root}: {error}");
+            }
+        }
+    }
+}
+
+fn print_row(event: &ActivityEvent) {
+    let size = event
+        .byte_delta
+        .map(|bytes| format!("  {}", human_bytes(bytes)))
+        .unwrap_or_default();
+    let writer = event
+        .process_name
+        .as_deref()
+        .map(|name| format!("  by {name}"))
+        .unwrap_or_default();
+    println!(
+        "{}  {:<9}  {}{size}{writer}",
+        event
+            .timestamp_text()
+            .unwrap_or_else(|| "unknown time".to_owned()),
+        kind_label(event.kind),
+        event.path,
+    );
+}
+
+/// The remembered folders, and the switches the windows show as checkboxes.
+fn watches(rest: &[OsString]) -> io::Result<()> {
+    let storage = storage()?;
+    let verb = rest.first().and_then(|arg| arg.to_str()).unwrap_or("list");
+    match verb {
+        "list" if rest.len() <= 1 => {
+            let watches = storage.watches();
+            if watches.is_empty() {
+                println!("No folders yet. Add one with `watches add FOLDER`.");
+            }
+            for watch in watches {
+                println!(
+                    "{}  {}",
+                    if watch.enabled { "on " } else { "off" },
+                    watch.path
+                );
+            }
+            Ok(())
+        }
+        "add" => {
+            let root = one_folder(&rest[1..], "usage: pathlight-monitor watches add FOLDER")?;
+            if storage.is_own(&root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{root} is where Pathlight keeps its own records"),
+                ));
+            }
+            let mut watches = storage.watches();
+            if watches.iter().any(|watch| watch.path == root) {
+                println!("{root} is already remembered.");
+                return Ok(());
+            }
+            // Switched off, like the windows add it: nothing starts recording
+            // because a folder was named.
+            watches.push(WatchTarget {
+                path: root.clone(),
+                enabled: false,
+            });
+            storage.set_watches(&watches)?;
+            println!("Added {root}, switched off. `watches enable {root}` switches it on.");
+            Ok(())
+        }
+        "remove" => {
+            let root = one_folder(&rest[1..], "usage: pathlight-monitor watches remove FOLDER")?;
+            let mut watches = storage.watches();
+            let before = watches.len();
+            watches.retain(|watch| watch.path != root);
+            if watches.len() == before {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{root} is not one of the remembered folders"),
+                ));
+            }
+            storage.set_watches(&watches)?;
+            println!("Forgot {root}. What was recorded for it is still in the journal.");
+            Ok(())
+        }
+        "enable" | "disable" => {
+            let enabled = verb == "enable";
+            let root = one_folder(
+                &rest[1..],
+                "usage: pathlight-monitor watches enable|disable FOLDER",
+            )?;
+            storage.set_watch_enabled(&root, enabled)?;
+            println!("{root} is switched {}.", if enabled { "on" } else { "off" });
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: pathlight-monitor watches [list|add|remove|enable|disable] [FOLDER]",
+        )),
+    }
+}
+
+fn history(rest: &[OsString]) -> io::Result<()> {
+    let root = one_folder(rest, "usage: pathlight-monitor history FOLDER")?;
+    let snapshot = storage()?
+        .history(&root)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    println!("{}", snapshot.root_path);
+    println!(
+        "{} change(s), net {}{}",
+        snapshot.event_count,
+        human_bytes(snapshot.total_net_byte_delta),
+        match snapshot.unknown_size_event_count {
+            0 => String::new(),
+            unknown => format!(" ({unknown} of unknown size)"),
+        }
+    );
+    if snapshot.is_truncated {
+        println!("The rows below are the newest; the totals above cover every row.");
+    }
+    for event in &snapshot.recent_events {
+        print_row(event);
+    }
+    Ok(())
+}
+
+fn export(rest: &[OsString]) -> io::Result<()> {
+    let (root, target) = match rest {
+        [folder] => (root_of(folder), None),
+        [folder, file] => (root_of(folder), Some(PathBuf::from(file))),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: pathlight-monitor export FOLDER [FILE]",
+            ))
+        }
+    };
+    let events = storage()?
+        .rows(&root)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if events.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("nothing has been recorded for {root} yet"),
+        ));
+    }
+    let csv = pathlight_core::export::csv(&events);
+    match target {
+        Some(path) => {
+            std::fs::write(&path, csv)?;
+            println!("Exported {} change(s) to {}.", events.len(), path.display());
+        }
+        // Standard output, so this composes with the rest of a shell. The
+        // count goes to stderr rather than into the CSV.
+        None => {
+            print!("{csv}");
+            eprintln!("{} change(s).", events.len());
+        }
+    }
+    Ok(())
+}
+
+/// Every setting the watches read, and the one command that changes them.
+///
+/// The same values the windows edit, in the same file: a `settings` change here
+/// is what the next watch on any host reads.
+fn settings(rest: &[OsString]) -> io::Result<()> {
+    let storage = storage()?;
+    let Some(key) = rest.first().and_then(|arg| arg.to_str()) else {
+        return show_settings(&storage);
+    };
+    let values: Vec<String> = rest[1..]
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+    let first = values.first().map(String::as_str).unwrap_or_default();
+    match key {
+        "retention-days" => {
+            let (_, cap) = storage.retention();
+            storage.set_retention(number(first, key)?, cap)?;
+        }
+        "journal-limit-mb" => {
+            let (days, _) = storage.retention();
+            let megabytes: u64 = number(first, key)?;
+            let cap = megabytes.checked_mul(1_000_000).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "that cap is larger than any disk",
+                )
+            })?;
+            storage.set_retention(days, cap)?;
+        }
+        "min-delta-bytes" => storage.set_minimum_byte_delta(number(first, key)?)?,
+        "min-file-bytes" | "max-file-bytes" => {
+            let bound = match first {
+                "" | "none" | "any" => None,
+                value => Some(number(value, key)?),
+            };
+            let (min, max) = storage.size_bounds();
+            let (min, max) = match key {
+                "min-file-bytes" => (bound, max),
+                _ => (min, bound),
+            };
+            if min.zip(max).is_some_and(|(min, max)| min > max) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the smallest size is above the largest, which records nothing",
+                ));
+            }
+            storage.set_size_bounds(min, max)?;
+        }
+        "latency" => match first {
+            "immediate" => storage.set_latency_ms(DEFAULT_LATENCY_MS)?,
+            "power-saving" => storage.set_latency_ms(BACKGROUND_LATENCY_MS)?,
+            value => storage.set_latency_ms(number(value, "latency")?)?,
+        },
+        "encrypt" => storage.set_encrypting(switch(first, key)?)?,
+        "patterns" => {
+            let patterns: Vec<String> = match first {
+                "default" => pathlight_core::exclusion::DEFAULT_PATTERNS
+                    .iter()
+                    .map(|pattern| (*pattern).to_owned())
+                    .collect(),
+                // An empty list is "record everything", which is a different
+                // answer from never having chosen and has to be asked for.
+                "none" => Vec::new(),
+                _ => values.clone(),
+            };
+            storage.set_patterns(&patterns)?;
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{key} is not a setting; run `pathlight-monitor settings` to see them"),
+            ))
+        }
+    }
+    show_settings(&storage)
+}
+
+fn show_settings(storage: &Storage) -> io::Result<()> {
+    let (days, cap) = storage.retention();
+    let options = storage.options();
+    let (min, max) = storage.size_bounds();
+    let bound =
+        |value: Option<i64>| value.map_or_else(|| "any".to_owned(), |value| value.to_string());
+    println!("records            {}", storage.dir().display());
+    println!(
+        "journal            {}",
+        match std::fs::metadata(storage.journal()).map(|meta| meta.len()) {
+            Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
+            Err(_) => "nothing recorded yet".to_owned(),
+        }
+    );
+    println!("retention-days     {days}");
+    println!("journal-limit-mb   {}", cap / 1_000_000);
+    println!("min-delta-bytes    {}", options.minimum_recorded_byte_delta);
+    println!("min-file-bytes     {}", bound(min));
+    println!("max-file-bytes     {}", bound(max));
+    println!(
+        "latency            {} ms{}",
+        storage.latency_ms(),
+        match storage.latency_ms() >= BACKGROUND_LATENCY_MS {
+            true => "  (power-saving)",
+            false => "  (immediate)",
+        }
+    );
+    println!("encrypt            {}", storage.encrypting());
+    println!("patterns           {}", storage.patterns().join(" "));
+    println!("{SETTING_VALUES}");
+    Ok(())
+}
+
+fn number<T: std::str::FromStr>(value: &str, key: &str) -> io::Result<T> {
+    value.trim().parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{key} needs a whole number"),
+        )
+    })
+}
+
+fn switch(value: &str, key: &str) -> io::Result<bool> {
+    match value {
+        "on" | "true" | "yes" => Ok(true),
+        "off" | "false" | "no" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{key} is on or off"),
+        )),
+    }
+}
+
+/// Whether the watches come back after a sign-out.
+///
+/// The item launches this command with `watch`, so the folders that are
+/// switched on are watched with no terminal open.
+fn autostart(rest: &[OsString]) -> io::Result<()> {
+    let item = pathlight_core::autostart::login_item(&["watch"])?;
+    match rest.first().and_then(|arg| arg.to_str()) {
+        None | Some("status") => {}
+        Some(value) => item.set(switch(value, "autostart")?)?,
+    }
+    println!(
+        "autostart {}
+  {}",
+        match item.is_enabled() {
+            true => "on",
+            false => "off",
+        },
+        item.command()
+    );
+    Ok(())
+}
+
+fn run() -> io::Result<()> {
+    let mut args: Vec<OsString> = env::args_os().skip(1).collect();
     // `first`, not `args[0]`: no arguments at all is the most likely way this
     // binary is ever run, and it used to panic.
-    if args.first().is_some_and(|arg| arg == "uninstall") {
-        return uninstall(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "install-cli") {
-        return install_cli(&args[1..]);
+    match args
+        .first()
+        .and_then(|arg| arg.to_str())
+        .unwrap_or_default()
+    {
+        "" | "-h" | "--help" | "help" => {
+            print!("{HELP}");
+            return Ok(());
+        }
+        "uninstall" => return uninstall(&args[1..]),
+        "install-cli" => return install_cli(&args[1..]),
+        "watch" => return watch(&args[1..]),
+        "watches" => return watches(&args[1..]),
+        "history" => return history(&args[1..]),
+        "export" => return export(&args[1..]),
+        "settings" => return settings(&args[1..]),
+        "autostart" => return autostart(&args[1..]),
+        // Named or not: the recording form is what this binary was before the
+        // other commands existed, and scripts pass the two paths bare.
+        "record" => {
+            args.remove(0);
+        }
+        _ => {}
     }
     let bounds = pathlight_core::recording::SizeBounds {
         min_bytes: take_bytes(&mut args, "--min-bytes")?,

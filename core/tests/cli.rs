@@ -1,152 +1,138 @@
-//! The recorder's command line, driven as a user drives it.
+//! The terminal's half of the app, driven the way a person drives it.
 //!
-//! Argument parsing is the one part of this binary a test can reach without a
-//! filesystem to watch, and it guards a destructive subcommand.
+//! One settings file and one journal are shared with the windows, so what
+//! matters is that a change made here is a change the next watch reads — and
+//! that a command nobody typed correctly says so instead of guessing.
 
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// Where `install-cli` is expected to land under a temporary home.
-fn installed_path(home: &Path) -> std::path::PathBuf {
-    if cfg!(windows) {
-        home.join("AppData")
-            .join("Local")
-            .join("Programs")
-            .join("Pathlight")
-            .join("pathlight-monitor.exe")
-    } else {
-        home.join(".local").join("bin").join("pathlight-monitor")
-    }
-}
-
-fn run(args: &[&str], home: &Path) -> Output {
+/// The command, run against a throwaway home so nothing touches the tester's
+/// own records. `HOME` (and `USERPROFILE`) is how the store finds its
+/// directory, which is the only handle a test has on it.
+fn run(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pathlight-monitor"))
         .args(args)
-        // Uninstall derives its paths from the home directory and the data
-        // roots, so a test that did not redirect every one of them could delete
-        // the developer's own storage. Cleared rather than set, so the layout
-        // falls back to its standard place under this temporary home.
-        .env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        // Otherwise a Linux runner's XDG variables point the store back at the
+        // tester's real home and the test writes where it was told not to.
         .env_remove("XDG_DATA_HOME")
-        .env_remove("XDG_STATE_HOME")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_CACHE_HOME")
-        .env_remove("APPDATA")
-        .env_remove("LOCALAPPDATA")
         .output()
-        .expect("the binary this test was built alongside")
+        .expect("the binary under test is built by cargo test")
 }
 
-/// Running a command with no arguments is how everybody meets it, and it used
-/// to panic with an index out of bounds.
-#[test]
-fn no_arguments_reports_the_usage_instead_of_crashing() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = run(&[], dir.path());
-
-    let message = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{message}");
-    assert!(message.contains("usage:"), "{message}");
-    assert!(!message.contains("panicked"), "{message}");
-}
-
-#[test]
-fn help_explains_both_subcommands_and_succeeds() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = run(&["--help"], dir.path());
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success());
-    assert!(text.contains("ROOT JOURNAL"), "{text}");
-    assert!(text.contains("uninstall"), "{text}");
-}
-
-/// The one destructive command. Listing has to remove nothing, and removal has
-/// to reach exactly the storage the layout names — here inside a temporary home.
-#[test]
-fn uninstall_lists_before_it_removes() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = pathlight_core::uninstall::paths(dir.path(), |_| None)
-        .into_iter()
-        .next()
-        .unwrap();
-    std::fs::create_dir_all(&storage).unwrap();
-    std::fs::write(storage.join("activity-events.jsonl"), b"row").unwrap();
-
-    let listed = run(&["uninstall"], dir.path());
-    assert!(listed.status.success());
-    assert!(storage.exists(), "a dry run removed storage");
-
-    let removed = run(&["uninstall", "--yes"], dir.path());
-    assert!(
-        removed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&removed.stderr)
-    );
-    assert!(!storage.exists());
-}
-
-/// The whole point of the subcommand: after this, a shell can reach the
-/// command by name. Nothing outside the temporary home is written.
-#[test]
-fn install_cli_puts_the_command_in_the_users_own_home() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = run(&["install-cli"], dir.path());
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{}",
+fn text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-    let installed = installed_path(dir.path());
-    assert!(installed.exists(), "{text}");
-    assert!(
-        installed.starts_with(dir.path()),
-        "{} escaped the home it was given",
-        installed.display()
-    );
-    // A directory nothing has put on PATH has to be reported as such, or the
-    // command looks installed and is unreachable.
-    assert!(text.contains("not in PATH"), "{text}");
-
-    // Re-running after an update is the normal case, not an error.
-    let again = run(&["install-cli"], dir.path());
-    assert!(
-        again.status.success(),
-        "{}",
-        String::from_utf8_lossy(&again.stderr)
-    );
-    assert!(installed.exists());
+    )
 }
 
-/// A binary left on someone's PATH after an uninstall is litter they never
-/// find, so the command that installed it is the one that accounts for it.
 #[test]
-fn uninstall_removes_an_installed_command_too() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(run(&["install-cli"], dir.path()).status.success());
-    let installed = installed_path(dir.path());
+fn a_folder_added_in_the_terminal_is_switched_on_only_when_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().to_string_lossy().replace('\\', "/");
 
-    let listed = run(&["uninstall"], dir.path());
-    let text = String::from_utf8_lossy(&listed.stdout);
-    assert!(text.contains("pathlight-monitor"), "{text}");
-    assert!(installed.exists(), "a dry run removed the command");
+    assert!(text(&run(home.path(), &["watches"])).contains("No folders yet"));
 
-    assert!(run(&["uninstall", "--yes"], dir.path()).status.success());
-    assert!(!installed.exists());
+    let added = run(home.path(), &["watches", "add", &path]);
+    assert!(added.status.success(), "{}", text(&added));
+    // Off, like every host adds it: naming a folder must not start recording
+    // it.
+    let listed = text(&run(home.path(), &["watches"]));
+    assert!(listed.contains("off"), "{listed}");
+
+    run(home.path(), &["watches", "enable", &path]);
+    assert!(text(&run(home.path(), &["watches"])).contains("on "));
+    run(home.path(), &["watches", "disable", &path]);
+    assert!(text(&run(home.path(), &["watches"])).contains("off"));
+
+    let removed = run(home.path(), &["watches", "remove", &path]);
+    assert!(removed.status.success(), "{}", text(&removed));
+    assert!(text(&run(home.path(), &["watches"])).contains("No folders yet"));
+
+    // A folder that was never added cannot be switched off, and the message
+    // says which folder rather than failing silently.
+    let missing = run(home.path(), &["watches", "remove", &path]);
+    assert!(!missing.status.success());
+    assert!(text(&missing).contains(&path), "{}", text(&missing));
 }
 
-/// A typo in the flag must not be read as consent.
+/// The point of the settings commands: what is set in a terminal is what the
+/// windows and the next watch read, in the same file.
 #[test]
-fn an_unknown_uninstall_flag_removes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = run(&["uninstall", "--force"], dir.path());
+fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
+    let home = tempfile::tempdir().unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("usage:"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let shown = text(&run(home.path(), &["settings"]));
+    assert!(shown.contains("retention-days     180"), "{shown}");
+
+    run(home.path(), &["settings", "retention-days", "30"]);
+    run(home.path(), &["settings", "latency", "power-saving"]);
+    run(home.path(), &["settings", "min-file-bytes", "1024"]);
+    run(home.path(), &["settings", "encrypt", "on"]);
+    run(home.path(), &["settings", "patterns", "*.tmp", "logs/"]);
+
+    let shown = text(&run(home.path(), &["settings"]));
+    for expected in [
+        "retention-days     30",
+        "latency            30000 ms",
+        "min-file-bytes     1024",
+        "encrypt            true",
+        "patterns           *.tmp logs/",
+    ] {
+        assert!(shown.contains(expected), "{expected} missing from {shown}");
+    }
+
+    // The shipped patterns come back, which is the only way out of an edit
+    // that excluded something the user wanted.
+    let restored = text(&run(home.path(), &["settings", "patterns", "default"]));
+    assert!(restored.contains(".DS_Store"), "{restored}");
+
+    // A value that is not a number changes nothing rather than being read as
+    // zero, which would delete every row as it was written.
+    let refused = run(home.path(), &["settings", "retention-days", "a while"]);
+    assert!(!refused.status.success());
+    assert!(text(&run(home.path(), &["settings"])).contains("retention-days     30"));
+}
+
+#[test]
+fn nothing_recorded_yet_is_said_rather_than_exported_as_an_empty_file() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().to_string_lossy().replace('\\', "/");
+
+    let exported = run(home.path(), &["export", &path]);
+    assert!(!exported.status.success());
+    assert!(text(&exported).contains("nothing has been recorded"));
+
+    // And a folder with no rows still has a history, because "no changes" is
+    // an answer.
+    let history = run(home.path(), &["history", &path]);
+    assert!(history.status.success(), "{}", text(&history));
+    assert!(text(&history).contains("0 change(s)"));
+}
+
+/// No arguments used to be a usage error; a monitor people run to find out
+/// what it does should say what it does.
+#[test]
+fn the_bare_command_says_what_the_commands_are() {
+    let home = tempfile::tempdir().unwrap();
+    let output = run(home.path(), &[]);
+    assert!(output.status.success(), "{}", text(&output));
+    let help = text(&output);
+    for command in [
+        "watch ",
+        "watches ",
+        "history ",
+        "export ",
+        "settings ",
+        "autostart ",
+    ] {
+        assert!(help.contains(command), "{command} missing from {help}");
+    }
 }
