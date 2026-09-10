@@ -204,6 +204,8 @@ Usage: pathlight-monitor <command> [arguments]
   watches remove FOLDER   Forget it. Nothing already recorded is deleted.
   history FOLDER          What the journal holds for a folder.
   export FOLDER [FILE]    Write that as CSV, to FILE or to standard output.
+  report FOLDER [FILE]    Write it as a report to read: totals, where inside
+                          the folder the bytes went, and what was running.
   settings                Show every setting, and where records are kept.
   settings KEY VALUE…     Change one. Run `settings` to see the keys.
   autostart [on|off]      Whether the watches start when you sign in.
@@ -447,14 +449,21 @@ fn history(rest: &[OsString]) -> io::Result<()> {
     Ok(())
 }
 
-fn export(rest: &[OsString]) -> io::Result<()> {
+/// What was recorded, as a file: a spreadsheet's CSV, or the report a person
+/// reads. One command for both, because everything but the last line — which
+/// folder, is there anything, where does it go — is the same question.
+fn export(rest: &[OsString], as_report: bool) -> io::Result<()> {
+    let command = match as_report {
+        true => "report",
+        false => "export",
+    };
     let (root, target) = match rest {
         [folder] => (root_of(folder), None),
         [folder, file] => (root_of(folder), Some(PathBuf::from(file))),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: pathlight-monitor export FOLDER [FILE]",
+                format!("usage: pathlight-monitor {command} FOLDER [FILE]"),
             ))
         }
     };
@@ -467,16 +476,19 @@ fn export(rest: &[OsString]) -> io::Result<()> {
             format!("nothing has been recorded for {root} yet"),
         ));
     }
-    let csv = pathlight_core::export::csv(&events);
+    let text = match as_report {
+        true => pathlight_core::export::markdown(&events, &root),
+        false => pathlight_core::export::csv(&events),
+    };
     match target {
         Some(path) => {
-            std::fs::write(&path, csv)?;
+            std::fs::write(&path, text)?;
             println!("Exported {} change(s) to {}.", events.len(), path.display());
         }
         // Standard output, so this composes with the rest of a shell. The
         // count goes to stderr rather than into the CSV.
         None => {
-            print!("{csv}");
+            print!("{text}");
             eprintln!("{} change(s).", events.len());
         }
     }
@@ -713,7 +725,8 @@ fn run() -> io::Result<()> {
         "watches" => return watches(&args[1..]),
         "presets" => return presets(&args[1..]),
         "history" => return history(&args[1..]),
-        "export" => return export(&args[1..]),
+        "export" => return export(&args[1..], false),
+        "report" => return export(&args[1..], true),
         "settings" => return settings(&args[1..]),
         "autostart" => return autostart(&args[1..]),
         // Named or not: the recording form is what this binary was before the

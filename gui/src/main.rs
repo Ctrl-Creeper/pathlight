@@ -248,7 +248,7 @@ impl App {
     /// Reading the journal rather than the pane's snapshot: the pane lists the
     /// newest rows, and an export missing the older ones is the one thing a
     /// person exports records for.
-    fn export(&mut self) {
+    fn export(&mut self, as_report: bool) {
         let Some(root) = self.selected.clone() else {
             return;
         };
@@ -270,23 +270,29 @@ impl App {
         // ponytail: on the ui thread, like the folder picker already is. The
         // read is a file the retention cap bounds, and the dialog blocks
         // anyway.
+        let (title, suffix, text) = match as_report {
+            true => (
+                "Save a report of the recorded changes",
+                "report.md",
+                pathlight_core::export::markdown(&events, &root),
+            ),
+            false => (
+                "Export recorded changes",
+                "changes.csv",
+                pathlight_core::export::csv(&events),
+            ),
+        };
         let Some(target) = rfd::FileDialog::new()
-            .set_title("Export recorded changes")
-            .set_file_name(format!("{}-changes.csv", leaf(&root)))
+            .set_title(title)
+            .set_file_name(format!("{}-{suffix}", leaf(&root)))
             .save_file()
         else {
             return;
         };
-        self.notice = Some(
-            match std::fs::write(&target, pathlight_core::export::csv(&events)) {
-                Ok(()) => format!(
-                    "Exported {} change(s) to {}.",
-                    events.len(),
-                    target.display()
-                ),
-                Err(error) => format!("Could not write {}: {error}", target.display()),
-            },
-        );
+        self.notice = Some(match std::fs::write(&target, text) {
+            Ok(()) => format!("Wrote {} change(s) to {}.", events.len(), target.display()),
+            Err(error) => format!("Could not write {}: {error}", target.display()),
+        });
     }
 
     fn forget(&mut self, root: &str) {
@@ -433,7 +439,11 @@ impl App {
 /// `&self`, and both of these change the app.
 enum Ask {
     Reload,
-    Export,
+    /// Every recorded row as a file: a spreadsheet's CSV, or the report a
+    /// person reads.
+    Export {
+        as_report: bool,
+    },
 }
 
 impl eframe::App for App {
@@ -543,7 +553,7 @@ impl App {
                     self.load_history(&root);
                 }
             }
-            Some(Ask::Export) => self.export(),
+            Some(Ask::Export { as_report }) => self.export(as_report),
             None => {}
         }
 
@@ -775,7 +785,17 @@ impl App {
             ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Export…").clicked() {
-                    ask = Some(Ask::Export);
+                    ask = Some(Ask::Export { as_report: false });
+                }
+                if ui
+                    .button("Report…")
+                    .on_hover_text(
+                        "A report to read: the totals, where inside the folder the bytes \
+                         went, and what was running.",
+                    )
+                    .clicked()
+                {
+                    ask = Some(Ask::Export { as_report: true });
                 }
                 if ui
                     .button("Show…")
