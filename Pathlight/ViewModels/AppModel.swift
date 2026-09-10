@@ -942,6 +942,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The newest page is the input on purpose: `core/src/watch.rs` gives the
+    /// same rule the same bound (its live ring buffer holds 500 rows), and the
+    /// thresholds are floors — a floor crossed inside a longer burst is still
+    /// crossed. History refreshes are event-driven and throttled to one a
+    /// second, so this runs as often as the other hosts' per-flush check.
     private func evaluateAnomalies(
         history: ActivityHistorySnapshot,
         targetID: String,
