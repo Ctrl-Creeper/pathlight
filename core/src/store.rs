@@ -12,17 +12,25 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use crate::attribution::AggregationOptions;
+use crate::exclusion::DEFAULT_PATTERNS;
 use crate::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
 const WATCHES_FILE: &str = "watches.json";
-/// How long a row is kept, and how large the journal may get. The same
-/// numbers the macOS app ships (`ActivityStoragePreferences.defaults`), so one
-/// journal read on either host means the same thing.
-// ponytail: not settings yet. A monitor that fills a disk is the bug; a
-// monitor whose retention cannot be changed is a preference.
-const RETENTION_DAYS: u32 = 180;
-const JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+/// How long a row is kept, and how large the journal may get, until the user
+/// says otherwise. The same numbers the macOS app ships
+/// (`ActivityStoragePreferences.defaults`), so one journal read on either host
+/// means the same thing.
+pub const DEFAULT_RETENTION_DAYS: u32 = 180;
+pub const DEFAULT_JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+/// The interactive coalescing window: wide enough that a save is one event
+/// rather than five, short enough to feel immediate.
+pub const DEFAULT_LATENCY_MS: u64 = 250;
+/// What the macOS app uses for a watch nobody is looking at. A wide window is
+/// how monitoring stays cheap: the kernel wakes the process once for a
+/// half-minute of churn instead of once per file.
+pub const BACKGROUND_LATENCY_MS: u64 = 30_000;
 /// One bucket per hour, and the rows one screen can plausibly be scrolled
 /// through. Totals cover every retained row either way.
 const HISTORY_BUCKET_SECS: u64 = 3600;
@@ -99,8 +107,8 @@ impl Storage {
         let _guard = journal_lock()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.journal_handle()
-            .trim(RETENTION_DAYS, JOURNAL_LIMIT_BYTES)
+        let (days, limit) = self.retention();
+        self.journal_handle().trim(days, limit)
     }
 
     /// What was recorded for one folder, folded into buckets and totals.
@@ -171,15 +179,119 @@ impl Storage {
         self.save(&settings)
     }
 
-    /// The folders the user chose, dropping any that no longer exist so a
-    /// stale entry cannot look like a live watch.
-    pub fn load_watches(&self) -> Vec<String> {
-        self.settings().roots
+    /// The folders the user chose, and whether each one is being watched.
+    pub fn watches(&self) -> Vec<WatchTarget> {
+        self.settings()
+            .roots
+            .into_iter()
+            .map(WatchTarget::from)
+            .collect()
     }
 
-    pub fn save_watches(&self, roots: &[String]) -> io::Result<()> {
+    pub fn set_watches(&self, watches: &[WatchTarget]) -> io::Result<()> {
         let mut settings = self.settings();
-        settings.roots = roots.to_vec();
+        settings.roots = watches.iter().cloned().map(StoredWatch::from).collect();
+        self.save(&settings)
+    }
+
+    /// Switches one folder on or off, leaving the rest of the list alone.
+    /// Unknown paths are added, because a host that can name a folder is a
+    /// host the user just asked to watch it.
+    pub fn set_watch_enabled(&self, path: &str, enabled: bool) -> io::Result<()> {
+        let mut watches = self.watches();
+        match watches.iter_mut().find(|watch| watch.path == path) {
+            Some(watch) => watch.enabled = enabled,
+            None => watches.push(WatchTarget {
+                path: path.to_owned(),
+                enabled,
+            }),
+        }
+        self.set_watches(&watches)
+    }
+
+    /// How long a row is kept and how large the journal may get.
+    pub fn retention(&self) -> (u32, u64) {
+        let settings = self.settings();
+        (
+            settings.retention_days.unwrap_or(DEFAULT_RETENTION_DAYS),
+            settings
+                .journal_limit_bytes
+                .unwrap_or(DEFAULT_JOURNAL_LIMIT_BYTES),
+        )
+    }
+
+    /// Neither is allowed to be zero: a retention of nothing is a monitor that
+    /// records and then immediately forgets, which reads as a broken journal
+    /// rather than as a setting.
+    pub fn set_retention(&self, days: u32, limit_bytes: u64) -> io::Result<()> {
+        if days == 0 || limit_bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a retention of nothing would delete every row as soon as it was written",
+            ));
+        }
+        let mut settings = self.settings();
+        settings.retention_days = Some(days);
+        settings.journal_limit_bytes = Some(limit_bytes);
+        self.save(&settings)
+    }
+
+    /// How long the watcher coalesces before it hands events over.
+    ///
+    /// Two values are worth having and the file holds a number, so a host can
+    /// offer the pair ([`DEFAULT_LATENCY_MS`], [`BACKGROUND_LATENCY_MS`]) as a
+    /// choice and anybody editing the file by hand can still say 5 seconds.
+    pub fn latency_ms(&self) -> u64 {
+        self.settings()
+            .latency_ms
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_LATENCY_MS)
+    }
+
+    pub fn set_latency_ms(&self, latency_ms: u64) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.latency_ms = Some(latency_ms.max(1));
+        self.save(&settings)
+    }
+
+    /// What every watch here leaves out, on top of the storage guard: the
+    /// noise nobody asked to be told about. Never edited means the shipped
+    /// list, and an empty list means "record everything", which is a different
+    /// answer and has to survive a restart as one.
+    pub fn patterns(&self) -> Vec<String> {
+        self.settings().exclusion_patterns.unwrap_or_else(|| {
+            DEFAULT_PATTERNS
+                .iter()
+                .map(|pattern| (*pattern).to_owned())
+                .collect()
+        })
+    }
+
+    pub fn set_patterns(&self, patterns: &[String]) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.exclusion_patterns = Some(patterns.to_vec());
+        self.save(&settings)
+    }
+
+    /// What is recorded and how it is folded together: the sizes of file this
+    /// install watches at all, and how much has to have changed before a row
+    /// is written.
+    ///
+    /// One owner, so a watch opened from a terminal aggregates exactly the way
+    /// the window's would.
+    pub fn options(&self) -> AggregationOptions {
+        let settings = self.settings();
+        AggregationOptions {
+            minimum_recorded_byte_delta: settings.minimum_recorded_byte_delta.unwrap_or(0).max(0),
+            min_file_bytes: settings.min_file_bytes,
+            max_file_bytes: settings.max_file_bytes,
+            ..AggregationOptions::SHORT_TERM
+        }
+    }
+
+    pub fn set_minimum_byte_delta(&self, bytes: i64) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.minimum_recorded_byte_delta = Some(bytes.max(0));
         self.save(&settings)
     }
 
@@ -217,10 +329,58 @@ fn resolved(dir: &Path) -> PathBuf {
     }
 }
 
+/// One watched folder, and whether a host that resumes watches at startup
+/// opens this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchTarget {
+    pub path: String,
+    pub enabled: bool,
+}
+
+/// A folder in the settings file, in either shape it has been written in.
+///
+/// Untagged, so a list written before a watch could be left switched off — a
+/// plain array of strings — still reads as the folders it named. Losing
+/// somebody's watch list to a format change would be the worst kind of
+/// upgrade, and the alternative is a migration nobody can test twice.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum StoredWatch {
+    Target {
+        path: String,
+        #[serde(default)]
+        enabled: bool,
+    },
+    Path(String),
+}
+
+impl From<StoredWatch> for WatchTarget {
+    fn from(stored: StoredWatch) -> Self {
+        match stored {
+            StoredWatch::Target { path, enabled } => Self { path, enabled },
+            // A list from before the flag existed was the list of folders
+            // being watched, so that is what it still means.
+            StoredWatch::Path(path) => Self {
+                path,
+                enabled: true,
+            },
+        }
+    }
+}
+
+impl From<WatchTarget> for StoredWatch {
+    fn from(watch: WatchTarget) -> Self {
+        Self::Target {
+            path: watch.path,
+            enabled: watch.enabled,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Settings {
     #[serde(default)]
-    roots: Vec<String>,
+    roots: Vec<StoredWatch>,
     /// Off by default. Encryption whose key is lost is history that is lost,
     /// so this is the user's choice to make and not a default to surprise
     /// them with.
@@ -232,6 +392,20 @@ struct Settings {
     min_file_bytes: Option<i64>,
     #[serde(default)]
     max_file_bytes: Option<i64>,
+    /// Absent means the shipped default, which is how every setting added
+    /// after a file was first written has to read.
+    #[serde(default)]
+    retention_days: Option<u32>,
+    #[serde(default)]
+    journal_limit_bytes: Option<u64>,
+    #[serde(default)]
+    minimum_recorded_byte_delta: Option<i64>,
+    #[serde(default)]
+    latency_ms: Option<u64>,
+    /// Absent means the shipped patterns; an empty list means the user asked
+    /// for everything to be recorded.
+    #[serde(default)]
+    exclusion_patterns: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -312,7 +486,7 @@ mod tests {
         );
         // And a folder list saved afterwards keeps them: both live in one
         // file, so a write of either must not drop the other.
-        storage.save_watches(&["/a".to_owned()]).unwrap();
+        storage.set_watch_enabled("/a", true).unwrap();
         assert_eq!(
             Storage::at(dir.path()).size_bounds(),
             (Some(1_000_000), None)
@@ -324,11 +498,81 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::at(dir.path());
 
-        assert!(storage.load_watches().is_empty());
+        assert!(storage.watches().is_empty());
         storage
-            .save_watches(&["/a".to_owned(), "/b".to_owned()])
+            .set_watches(&[watch("/a", true), watch("/b", false)])
             .unwrap();
 
-        assert_eq!(Storage::at(dir.path()).load_watches(), ["/a", "/b"]);
+        assert_eq!(
+            Storage::at(dir.path()).watches(),
+            [watch("/a", true), watch("/b", false)]
+        );
+        // Switching one folder leaves the other's state alone, which is the
+        // whole reason the flag is per folder.
+        storage.set_watch_enabled("/b", true).unwrap();
+        storage.set_watch_enabled("/c", false).unwrap();
+        assert_eq!(
+            Storage::at(dir.path()).watches(),
+            [watch("/a", true), watch("/b", true), watch("/c", false)]
+        );
+    }
+
+    fn watch(path: &str, enabled: bool) -> WatchTarget {
+        WatchTarget {
+            path: path.to_owned(),
+            enabled,
+        }
+    }
+
+    /// The upgrade: a file written before a watch could be switched off holds
+    /// a plain array of paths. Reading it as an empty list would silently
+    /// forget every folder somebody was watching.
+    #[test]
+    fn a_folder_list_from_an_older_build_still_names_its_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::write(
+            dir.path().join(WATCHES_FILE),
+            r#"{"roots":["/a","/b"],"encrypt":true}"#,
+        )
+        .unwrap();
+        let storage = Storage::at(dir.path());
+
+        assert_eq!(storage.watches(), [watch("/a", true), watch("/b", true)]);
+        assert!(storage.encrypting());
+    }
+
+    /// Every knob a host offers, round-tripped through the file: a setting
+    /// that is not read back is a setting the next watch ignores.
+    #[test]
+    fn saved_settings_survive_a_restart_and_fall_back_to_the_shipped_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+
+        assert_eq!(
+            storage.retention(),
+            (DEFAULT_RETENTION_DAYS, DEFAULT_JOURNAL_LIMIT_BYTES)
+        );
+        assert_eq!(storage.latency_ms(), DEFAULT_LATENCY_MS);
+        assert_eq!(storage.patterns(), DEFAULT_PATTERNS.to_vec());
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 0);
+
+        storage.set_retention(30, 2_000_000).unwrap();
+        storage.set_latency_ms(BACKGROUND_LATENCY_MS).unwrap();
+        storage.set_patterns(&["*.log".to_owned()]).unwrap();
+        storage.set_minimum_byte_delta(1024).unwrap();
+
+        let reopened = Storage::at(dir.path());
+        assert_eq!(reopened.retention(), (30, 2_000_000));
+        assert_eq!(reopened.latency_ms(), BACKGROUND_LATENCY_MS);
+        assert_eq!(reopened.patterns(), ["*.log"]);
+        assert_eq!(reopened.options().minimum_recorded_byte_delta, 1024);
+        // Recording everything is a choice, and one that has to survive a
+        // restart rather than reading as "never edited".
+        reopened.set_patterns(&[]).unwrap();
+        assert!(Storage::at(dir.path()).patterns().is_empty());
+        // A retention of nothing is refused rather than saved.
+        assert!(reopened.set_retention(0, 1).is_err());
+        assert_eq!(Storage::at(dir.path()).retention(), (30, 2_000_000));
     }
 }

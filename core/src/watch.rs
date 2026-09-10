@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
-use crate::exclusion::{ExclusionFilter, DEFAULT_PATTERNS};
+use crate::exclusion::ExclusionFilter;
 use crate::monitor::{ActivityListener, Change, StreamEvent, Watcher};
 use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
 use crate::{paths, ActivityEvent, Confidence, EventKind};
@@ -25,9 +25,6 @@ use crate::{paths, ActivityEvent, Confidence, EventKind};
 use crate::anomaly::{anomalies, Anomaly, AnomalyKind, WINDOW};
 use crate::store::Storage;
 
-/// The interactive coalescing window. Wide enough that a save is one event
-/// rather than five, short enough to feel immediate.
-const LATENCY_MS: u64 = 250;
 /// How long a batch waits before it is attributed and written.
 const FLUSH: Duration = Duration::from_millis(200);
 /// Bounded so a burst costs memory it cannot exceed. Overflow is counted and
@@ -40,6 +37,11 @@ const TRIM_EVERY: Duration = Duration::from_secs(3600);
 /// Rows the UI keeps. Totals are kept separately and cover every row, because
 /// totalling only what fits on screen makes a busy disk read as a quiet one.
 const MAX_ROWS: usize = 500;
+
+/// Where a finding goes: a desktop notification from the window, a line on
+/// stderr from the command line. Which findings are worth saying is
+/// [`crate::anomaly`]'s decision; saying them is the host's.
+type Announcer = Box<dyn Fn(&Anomaly, &str) + Send + Sync>;
 
 /// What the UI reads. Every field is cumulative for the life of the session.
 #[derive(Debug)]
@@ -94,23 +96,19 @@ impl Session {
         // Built before the watch opens: a filter that failed to compile after
         // events started arriving would record the noise it exists to drop.
         let exclusions =
-            ExclusionFilter::new(DEFAULT_PATTERNS, root).map_err(|error| error.to_string())?;
+            ExclusionFilter::new(&storage.patterns(), root).map_err(|error| error.to_string())?;
         // Read once, here: a watch runs for months, and re-reading the file
-        // per event would be a disk read on the path that must stay cheap.
-        // The window restarts what is running when the bounds change.
-        let (min_file_bytes, max_file_bytes) = storage.size_bounds();
-        let options = AggregationOptions {
-            min_file_bytes,
-            max_file_bytes,
-            ..AggregationOptions::SHORT_TERM
-        };
+        // per event would be a disk read on the path that must stay cheap. A
+        // host restarts what is running when the user changes any of them.
+        let options = storage.options();
+        let latency_ms = storage.latency_ms();
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
         let watcher = Watcher::start(
             root.to_owned(),
             None,
-            LATENCY_MS,
+            latency_ms,
             Arc::new(QueueListener {
                 sender,
                 dropped: dropped.clone(),
@@ -187,20 +185,18 @@ struct Worker {
     /// file this watch records at all.
     options: AggregationOptions,
     /// The noise nobody asked to be told about: `.DS_Store`, trashes,
-    /// caches, half-finished downloads.
-    // ponytail: the shipped defaults, not per-watch patterns. Add an editor
-    // and a list in `watches.json` when somebody needs a rule of their own;
-    // until then one list is the whole feature.
+    /// caches, half-finished downloads — the shipped list until the user
+    /// edits it.
+    // ponytail: one list for the install, not one per watch. macOS keeps a
+    // list per target because a preset ships its own; here a second list per
+    // folder is a shape nobody has asked for yet.
     exclusions: Option<ExclusionFilter>,
     live: Arc<Mutex<Live>>,
     dropped: Arc<AtomicU64>,
     /// What the user has already been told, so a background watch can speak
     /// up without becoming noise.
     alerts: Mutex<Alerts>,
-    /// Where a finding goes: a desktop notification from the window, a line on
-    /// stderr from the command line. Which findings are worth saying is
-    /// [`crate::anomaly`]'s decision; saying them is the host's.
-    announce: Box<dyn Fn(&Anomaly, &str) + Send + Sync>,
+    announce: Announcer,
 }
 
 impl Worker {
@@ -679,7 +675,7 @@ mod tests {
         fs::write(root.join("gone.bin"), vec![0u8; 8 * 1024]).unwrap();
         let scope = paths::normalize(&root.to_string_lossy());
         let worker = Worker {
-            exclusions: ExclusionFilter::new(DEFAULT_PATTERNS, &scope).unwrap(),
+            exclusions: ExclusionFilter::new(crate::exclusion::DEFAULT_PATTERNS, &scope).unwrap(),
             scope,
             storage: Storage::at(storage_dir.path()),
             options: AggregationOptions::SHORT_TERM,

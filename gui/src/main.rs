@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::store::Storage;
+use pathlight_core::store::{Storage, WatchTarget};
 use pathlight_core::text::{elapsed, human_bytes, kind_label, leaf};
 use pathlight_core::watch::Session;
 use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapshot};
@@ -39,14 +39,15 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install(&cc.egui_ctx, &theme::system_fonts());
-            Ok(Box::new(App::new()))
+            Ok(Box::new(App::resumed()))
         }),
     )
 }
 
 struct App {
     storage: Result<Storage, String>,
-    roots: Vec<String>,
+    /// The folders the user chose, and whether each was left switched on.
+    watches: Vec<WatchTarget>,
     sessions: HashMap<String, Session>,
     selected: Option<String>,
     /// What the journal already holds for [`Self::selected`], so a folder that
@@ -94,10 +95,7 @@ impl App {
              to record to. Set HOME (or USERPROFILE on Windows) and start Pathlight again."
                 .to_owned()
         });
-        let roots = storage
-            .as_ref()
-            .map(Storage::load_watches)
-            .unwrap_or_default();
+        let watches = storage.as_ref().map(Storage::watches).unwrap_or_default();
         let encrypt = storage.as_ref().is_ok_and(Storage::encrypting);
         let (min_bytes, max_bytes) = storage
             .as_ref()
@@ -107,9 +105,9 @@ impl App {
             encrypt,
             min_mb: mb_text(min_bytes),
             max_mb: mb_text(max_bytes),
-            selected: roots.first().cloned(),
+            selected: watches.first().map(|watch| watch.path.clone()),
             storage,
-            roots,
+            watches,
             sessions: HashMap::new(),
             history: None,
             history_root: None,
@@ -122,6 +120,30 @@ impl App {
             tray_tried: false,
             hidden: false,
             quitting: false,
+        }
+    }
+
+    /// The app as it was left: every folder that was being watched when
+    /// Pathlight last stopped is being watched again.
+    ///
+    /// A monitor that forgets what it was monitoring across a restart — or a
+    /// reboot, or an update — records nothing for however long it takes
+    /// somebody to notice, which is the one failure a monitor cannot have.
+    fn resumed() -> Self {
+        let mut app = Self::new();
+        app.resume();
+        app
+    }
+
+    fn resume(&mut self) {
+        let enabled: Vec<String> = self
+            .watches
+            .iter()
+            .filter(|watch| watch.enabled)
+            .map(|watch| watch.path.clone())
+            .collect();
+        for root in enabled {
+            self.start(&root);
         }
     }
 
@@ -194,8 +216,11 @@ impl App {
                 return;
             }
         }
-        if !self.roots.contains(&root) {
-            self.roots.push(root.clone());
+        if !self.watches.iter().any(|watch| watch.path == root) {
+            self.watches.push(WatchTarget {
+                path: root.clone(),
+                enabled: false,
+            });
             self.persist();
         }
         self.selected = Some(root);
@@ -249,25 +274,56 @@ impl App {
 
     fn forget(&mut self, root: &str) {
         self.sessions.remove(root);
-        self.roots.retain(|existing| existing != root);
+        self.watches.retain(|watch| watch.path != root);
         if self.selected.as_deref() == Some(root) {
-            self.selected = self.roots.first().cloned();
+            self.selected = self.watches.first().map(|watch| watch.path.clone());
         }
         self.persist();
     }
 
     fn toggle(&mut self, root: &str) {
-        if self.sessions.remove(root).is_some() {
-            return;
+        match self.sessions.remove(root).is_some() {
+            true => self.remember(root, false),
+            false => self.start(root),
         }
+    }
+
+    /// Opens a watch, and remembers that it is open so the next launch does
+    /// the same. A watch that could not be opened is not remembered as one:
+    /// the next launch would fail the same way and say nothing new.
+    fn start(&mut self, root: &str) {
         let Some(storage) = self.storage().cloned() else {
             return;
         };
         match Session::start(root, storage, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
+                self.remember(root, true);
             }
             Err(error) => self.notice = Some(format!("Could not watch {root}: {error}")),
+        }
+    }
+
+    fn remember(&mut self, root: &str, enabled: bool) {
+        match self.watches.iter_mut().find(|watch| watch.path == root) {
+            Some(watch) => watch.enabled = enabled,
+            None => self.watches.push(WatchTarget {
+                path: root.to_owned(),
+                enabled,
+            }),
+        }
+        self.persist();
+    }
+
+    /// Stops every watch and starts the same ones again, which is how a
+    /// setting a running watch read when it opened takes effect without the
+    /// user stopping anything by hand.
+    // ponytail: the live counters start over with the watch. They are the
+    // session's, and this is a new session with different rules.
+    fn restart_watches(&mut self) {
+        for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
+            self.sessions.remove(&root);
+            self.start(&root);
         }
     }
 
@@ -316,12 +372,7 @@ impl App {
         }
         // The bounds are read when a watch opens, so a watch already running
         // would otherwise keep the old ones until it was stopped by hand.
-        // ponytail: the live counters start over with the watch. They are the
-        // session's, and this is a new session with different rules.
-        for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
-            self.sessions.remove(&root);
-            self.toggle(&root);
-        }
+        self.restart_watches();
     }
 
     fn persist(&mut self) {
@@ -329,7 +380,7 @@ impl App {
             return;
         }
         if let Some(storage) = self.storage() {
-            if let Err(error) = storage.save_watches(&self.roots) {
+            if let Err(error) = storage.set_watches(&self.watches) {
                 self.notice = Some(format!("Could not save the folder list: {error}"));
             }
         }
@@ -342,7 +393,7 @@ impl App {
         self.sessions.clear();
         let failures = uninstall::remove_all(targets);
         self.uninstalled = true;
-        self.roots.clear();
+        self.watches.clear();
         self.selected = None;
         self.notice = Some(if failures.is_empty() {
             "Everything Pathlight recorded on this system is gone. Quit Pathlight and delete \
@@ -591,7 +642,7 @@ impl App {
         self.size_bounds(ui);
         ui.add_space(6.0);
 
-        if self.roots.is_empty() {
+        if self.watches.is_empty() {
             ui.label(
                 egui::RichText::new(
                     "No folders yet. Add one and Pathlight will record what changes inside it.",
@@ -606,7 +657,12 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for root in self.roots.clone() {
+                for root in self
+                    .watches
+                    .iter()
+                    .map(|watch| watch.path.clone())
+                    .collect::<Vec<_>>()
+                {
                     let watching = self.sessions.contains_key(&root);
                     ui.group(|ui| {
                         ui.set_width(ui.available_width());
@@ -1030,7 +1086,13 @@ mod tests {
         App {
             storage: Ok(Storage::at(storage_dir)),
             selected: roots.first().cloned(),
-            roots,
+            watches: roots
+                .into_iter()
+                .map(|path| WatchTarget {
+                    path,
+                    enabled: false,
+                })
+                .collect(),
             sessions: HashMap::new(),
             history: None,
             history_root: None,
@@ -1087,6 +1149,49 @@ mod tests {
             harness.state().sessions.is_empty(),
             "pressing Stop did not end the watch"
         );
+    }
+
+    /// The promise a restart has to keep: a folder that was being watched when
+    /// Pathlight stopped is being watched again when it comes back. Anything
+    /// else records nothing from the reboot until somebody notices.
+    ///
+    /// Driven through the real button and then through the file, because the
+    /// file is all the next launch has.
+    #[test]
+    fn a_watch_that_was_running_is_running_again_next_launch() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+
+        assert_eq!(
+            Storage::at(storage_dir.path()).watches(),
+            [WatchTarget {
+                path: root.clone(),
+                enabled: true
+            }]
+        );
+
+        let mut next = app(storage_dir.path(), Vec::new());
+        next.watches = Storage::at(storage_dir.path()).watches();
+        next.resume();
+        assert!(
+            next.sessions.contains_key(&root),
+            "the watch was not resumed"
+        );
+
+        // And a watch the user switched off stays off, which is the other half
+        // of remembering: a stopped watch that came back would be a monitor
+        // nobody can turn off.
+        harness.step();
+        harness.get_by_label("Stop").click();
+        harness.step();
+        let mut next = app(storage_dir.path(), Vec::new());
+        next.watches = Storage::at(storage_dir.path()).watches();
+        next.resume();
+        assert!(next.sessions.is_empty(), "a stopped watch came back");
     }
 
     /// The promise the tray exists to keep: putting the window away must not
