@@ -27,6 +27,7 @@ pub mod monitor;
 #[cfg(not(target_os = "macos"))]
 mod notify_backend;
 pub mod paths;
+pub mod presets;
 pub mod recording;
 pub mod snapshot;
 pub mod store;

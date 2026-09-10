@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod notify;
+mod settings;
 mod theme;
 mod tray;
 
@@ -27,19 +28,25 @@ use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapsho
 use tray::{Tray, Wish};
 
 fn main() -> eframe::Result<()> {
+    // How the login item starts us: watching, with no window in the way of
+    // whatever the person actually signed in to do.
+    let hidden = std::env::args().any(|argument| argument == settings::HIDDEN);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([980.0, 660.0])
             .with_min_inner_size([680.0, 420.0])
+            .with_visible(!hidden)
             .with_title("Pathlight"),
         ..Default::default()
     };
     eframe::run_native(
         "Pathlight",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             theme::install(&cc.egui_ctx, &theme::system_fonts());
-            Ok(Box::new(App::resumed()))
+            let mut app = App::resumed();
+            app.hidden = hidden;
+            Ok(Box::new(app))
         }),
     )
 }
@@ -86,6 +93,9 @@ struct App {
     hidden: bool,
     /// The user asked to quit, so the next close request is a real one.
     quitting: bool,
+    /// The settings pane, while it is open, holding what has been typed but
+    /// not yet applied.
+    settings: Option<settings::Draft>,
 }
 
 impl App {
@@ -120,6 +130,7 @@ impl App {
             tray_tried: false,
             hidden: false,
             quitting: false,
+            settings: None,
         }
     }
 
@@ -204,7 +215,13 @@ impl App {
         else {
             return;
         };
-        let root = paths::normalize(&folder.to_string_lossy());
+        self.add_root(paths::normalize(&folder.to_string_lossy()));
+    }
+
+    /// Puts a folder in the list, however it was chosen — picked by hand or
+    /// offered as a preset. Not started: a folder appears switched off, so
+    /// nothing begins recording because somebody opened a menu.
+    fn add_root(&mut self, root: String) {
         if let Some(storage) = self.storage() {
             // Watching the journal's own folder is a feedback loop, and one
             // the user cannot be expected to recognise from a folder picker.
@@ -491,6 +508,10 @@ impl App {
                         );
                     }
                     ui.add_space(12.0);
+                    if ui.button("Settings…").clicked() {
+                        self.settings = self.storage().map(settings::Draft::read);
+                    }
+                    ui.add_space(12.0);
                     let mut encrypt = self.encrypt;
                     ui.checkbox(&mut encrypt, "Encrypt new records")
                         .on_hover_text(
@@ -538,6 +559,12 @@ impl App {
         if !self.tray_tried {
             self.tray_tried = true;
             self.tray = tray::install(ctx);
+            // Started hidden by the login item, on a desktop that gave us no
+            // tray icon: there would be no way back to the window, so it is
+            // shown instead of the app being invisible and unreachable.
+            if self.hidden && self.tray.is_none() {
+                self.grant(Wish::Show, ctx);
+            }
         }
 
         // Read out before granting: the wishes borrow the tray and granting
@@ -635,6 +662,20 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Add folder…").clicked() {
                     self.add_folder();
+                }
+                // The folders that hold a machine's churn are ones nobody
+                // would think to type: AppData, ~/.cache, the whole disk.
+                let mut chosen = None;
+                ui.menu_button("Suggested…", |ui| {
+                    for preset in pathlight_core::presets::available() {
+                        if ui.button(preset.title).clicked() {
+                            chosen = Some(preset.path);
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some(root) = chosen {
+                    self.add_root(root);
                 }
             });
         });
@@ -935,6 +976,29 @@ impl App {
             });
         }
 
+        if self.settings.is_some() {
+            let mut verdict = None;
+            let mut draft = self.settings.take();
+            if let (Some(draft), Some(storage)) = (draft.as_mut(), self.storage().cloned()) {
+                egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(520.0)
+                        .show(ui, |ui| verdict = draft.ui(ui, &storage));
+                });
+            }
+            self.settings = draft;
+            match verdict {
+                Some(settings::Verdict::Close) => self.settings = None,
+                Some(settings::Verdict::Saved) => {
+                    self.settings = None;
+                    // Every one of these is read when a watch opens, so a
+                    // running watch would otherwise keep the old rules.
+                    self.restart_watches();
+                }
+                None => {}
+            }
+        }
+
         if let Some(notice) = self.notice.clone() {
             egui::Modal::new(egui::Id::new("notice")).show(ctx, |ui| {
                 ui.set_max_width(460.0);
@@ -1110,6 +1174,7 @@ mod tests {
             tray_tried: true,
             hidden: false,
             quitting: false,
+            settings: None,
         }
     }
 
@@ -1365,6 +1430,32 @@ mod tests {
         // A number too large to be bytes is not a bound; the alternative is a
         // silent wrap into a small one.
         assert_eq!(parse_mb(&i64::MAX.to_string()), None);
+    }
+
+    /// The settings pane, driven through the real widgets: opened from the
+    /// footer, changed, applied, and read back off disk. `settings.rs` tests
+    /// the values; this tests that the buttons are wired to them at all.
+    #[test]
+    fn a_setting_changed_in_the_pane_is_on_disk_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let mut harness = harness(app(dir.path(), Vec::new()));
+
+        harness.get_by_label("Settings…").click();
+        harness.run();
+        // Through accesskit rather than a pointer: the pane scrolls in a
+        // window this size, and a real user scrolls to what a test cannot.
+        harness
+            .get_by_label_contains("Power saving")
+            .click_accesskit();
+        harness.run();
+        harness.get_by_label("Apply").click_accesskit();
+        harness.run();
+
+        assert_eq!(storage.latency_ms(), 30_000);
+        // The pane closes on Apply; leaving it open would read as not having
+        // saved.
+        assert!(harness.state().settings.is_none());
     }
 
     #[test]
