@@ -4,7 +4,7 @@
 
 Watches folders and tells you what changed on disk, when, and by how much. A native macOS app, and a window for Windows and Linux. Pick a folder, and Pathlight records every create, modify, delete, and move inside it — live in a floating monitor, or long-term in the background with history, trends, and growth alerts.
 
-This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathlight) that keeps only the file-change monitoring feature. The disk space analyzer (scanning, sunburst chart, file browser, trash actions) has been removed. The monitoring engine lives in a Rust core (`core/`). Two shells sit on top of it: the macOS app, which takes its FSEvents stream and its byte attribution from the core and keeps exclusion, journal and history in Swift; and `gui/`, a window for Windows and Linux that links the core directly and uses all of it. They also share a journal format, held byte-for-byte by `core/tests/swift_compat.rs`, so either shell reads the other's history.
+The monitoring engine lives in a Rust core (`core/`). Two shells sit on top of it: the macOS app, which takes its FSEvents stream and its byte attribution from the core and keeps exclusion, journal and history in Swift; and `gui/`, a window for Windows and Linux that links the core directly and uses all of it. They also share a journal format, held byte-for-byte by `core/tests/swift_compat.rs`, so either shell reads the other's history.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Windows%20%7C%20Linux-blue)
 ![Swift](https://img.shields.io/badge/Swift-6.0-orange)
