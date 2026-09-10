@@ -41,3 +41,15 @@ fn paths_outside_root_are_never_excluded() {
     assert!(!filter.excludes("/Volumes/Other/.DS_Store"));
     assert!(!filter.excludes("/Users/example2/.DS_Store"));
 }
+
+#[test]
+fn a_watch_on_a_filesystem_root_still_excludes() {
+    // The root every "watch my whole disk" target has. Its own prefix
+    // arithmetic used to leave the relative path without a leading separator
+    // here, which made the filter answer "not mine" for every path on the
+    // machine.
+    let filter = ExclusionFilter::new(&["private/var/folders/"], "/")
+        .unwrap()
+        .expect("non-empty patterns");
+    assert!(filter.excludes("/private/var/folders/zz/T/scratch"));
+}

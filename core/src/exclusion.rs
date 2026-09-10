@@ -67,10 +67,11 @@ impl ExclusionFilter {
 
     pub fn excludes(&self, path: &str) -> bool {
         let path = crate::paths::normalize(path);
-        let Some(relative) = path.strip_prefix(self.root.as_str()) else {
-            return false;
-        };
-        if relative.is_empty() || !relative.starts_with('/') {
+        // The shared containment test rather than prefix arithmetic of its
+        // own: a watch on a filesystem root has a root that is one separator,
+        // and subtracting it left every path looking like it was somewhere
+        // else — so a whole-disk watch ignored every pattern it was given.
+        if !crate::paths::is_inside(&self.root, &path) {
             return false;
         }
         // Deleted paths cannot be stat'ed, so the leaf is tried both as a file and
