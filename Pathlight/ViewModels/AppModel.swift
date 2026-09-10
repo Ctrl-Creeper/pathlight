@@ -100,6 +100,7 @@ final class AppModel: ObservableObject {
 
         warmActivityStorageKey()
         observeActivityStoragePreferences()
+        observeMonitoringTrouble()
         refreshFullDiskAccessStatus()
         startEnabledLongTermWatches()
         // Preload histories so the menu bar shows today's numbers before the
@@ -154,6 +155,19 @@ final class AppModel: ObservableObject {
         }
         startShortTermWatch(rootPath: url, options: options)
         return true
+    }
+
+    /// The tail of the watch diary, read when somebody asks rather than kept
+    /// in a published property: nothing on screen depends on it per frame, and
+    /// the same bound the other two hosts show.
+    static let diaryLinesShown = 200
+
+    func diaryTail() -> String {
+        dependencies.diary?.tail(lines: Self.diaryLinesShown) ?? ""
+    }
+
+    var diaryFileURL: URL? {
+        dependencies.diary?.fileURL
     }
 
     func revealURLInFinder(_ url: URL) {
@@ -958,6 +972,7 @@ final class AppModel: ObservableObject {
         }
 
         growthAlertLastPostedAt[targetID] = Date()
+        note("\(targetID) grew by \(PathlightFormatters.size(growth)), past \(PathlightFormatters.size(threshold))")
         Task {
             await poster.postGrowthAlert(
                 rootPath: target.rootPath,
@@ -988,6 +1003,7 @@ final class AppModel: ObservableObject {
                 continue
             }
             anomalyAlertLastPostedAt[key] = now
+            note("\(anomaly.title): \(anomaly.body)")
             Task {
                 await poster.postActivityAlert(
                     rootPath: anomaly.rootPath,
@@ -1274,6 +1290,9 @@ final class AppModel: ObservableObject {
         retryCount: Int
     ) {
         let existingStatus = longTermWatchRuntimeStatuses[targetID]
+        if existingStatus?.state != state {
+            note("watch on \(targetID): \(ActivityDashboardPresentation.statusText(for: LongTermWatchRuntimeStatus(state: state, lastActivityAt: nil, retryCount: retryCount)).lowercased())")
+        }
         longTermWatchRuntimeStatuses[targetID] = LongTermWatchRuntimeStatus(
             state: state,
             lastActivityAt: lastActivityAt ?? existingStatus?.lastActivityAt,
@@ -1282,6 +1301,24 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Preferences persistence
+
+    /// One line in the diary, for whoever looks after the fact rather than
+    /// while it happens. `Storage::note` in `core/src/store.rs` writes the
+    /// same file for the other two hosts.
+    private func note(_ line: String) {
+        dependencies.diary?.note(line)
+    }
+
+    /// Every message the window shows about trouble is also written down, once
+    /// here rather than at each of the places that set it — the same reason
+    /// `core/src/watch.rs` funnels through `trouble`.
+    private func observeMonitoringTrouble() {
+        $monitoringStatusMessage
+            .compactMap { $0 }
+            .removeDuplicates()
+            .sink { [weak self] message in self?.note(message) }
+            .store(in: &cancellables)
+    }
 
     private func observeActivityStoragePreferences() {
         Publishers.CombineLatest4(

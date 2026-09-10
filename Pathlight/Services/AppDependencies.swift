@@ -33,6 +33,10 @@ struct AppDependencies {
     var processHints: (any ProcessHinting)?
     /// Loads the activity storage key up front; no-op when nothing is encrypted.
     var activityStorageKeyWarmUp: @Sendable () throws -> Void
+    /// Where watch starts, gaps, findings and failures are written down. No
+    /// default: a test that wrote to the real diary would be a test editing
+    /// the user's records.
+    var diary: ActivityDiary?
 
     init(
         systemActions: AppSystemActions,
@@ -53,7 +57,8 @@ struct AppDependencies {
         activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil,
         activityAnomalies: @escaping ActivityAnomalyDetecting = { _, _, _ in [] },
         processHints: (any ProcessHinting)? = nil,
-        activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {}
+        activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {},
+        diary: ActivityDiary? = nil
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
@@ -70,6 +75,7 @@ struct AppDependencies {
         self.activityAnomalies = activityAnomalies
         self.processHints = processHints
         self.activityStorageKeyWarmUp = activityStorageKeyWarmUp
+        self.diary = diary
     }
 
     /// Every platform-specific piece is a parameter: this package holds no
@@ -122,7 +128,8 @@ struct AppDependencies {
             activityGrowthAlertPoster: UserNotificationGrowthAlertPoster(),
             activityAnomalies: activityAnomalies,
             processHints: LsofProcessHintService(),
-            activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() }
+            activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() },
+            diary: .live
         )
     }
 }

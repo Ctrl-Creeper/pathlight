@@ -45,6 +45,8 @@ private enum SettingsTab: String {
 private struct GeneralSettingsPane: View {
     @EnvironmentObject private var appModel: AppModel
     @State private var commandLineReport: String?
+    @State private var isShowingDiary = false
+    @State private var diary = ""
 
     var body: some View {
         Form {
@@ -90,6 +92,36 @@ private struct GeneralSettingsPane: View {
                 LabeledContent("Version", value: Self.appVersion)
                 LabeledContent("Monitoring core", value: "Rust \(coreVersion())")
                 LabeledContent("Watcher guarantees", value: Self.watcherGuarantees)
+            }
+
+            // What the watches wrote down while nobody was looking: starts,
+            // reconnects, gaps caught up, alerts and failures. The terminal
+            // host prints the same file with `pathlight-monitor log`.
+            Section("What the Watches Wrote") {
+                DisclosureGroup(isExpanded: $isShowingDiary) {
+                    Text(diary.isEmpty ? "Nothing written yet." : diary)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack {
+                        if !diary.isEmpty {
+                            CopyPathButton(path: diary, title: "Copy")
+                        }
+                        Button("Refresh") { diary = appModel.diaryTail() }
+                        if let url = appModel.diaryFileURL {
+                            Button("Show the File") { appModel.revealURLInFinder(url) }
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    Text("The last \(AppModel.diaryLinesShown) lines")
+                }
+                .onChange(of: isShowingDiary) { _, expanded in
+                    if expanded { diary = appModel.diaryTail() }
+                }
             }
         }
         .formStyle(.grouped)

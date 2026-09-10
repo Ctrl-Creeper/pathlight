@@ -31,6 +31,7 @@ let package = Package(
                 "Services/ActivityAttribution.swift",
                 "Services/ActivityBaselineService.swift",
                 "Services/ActivityDashboardPresentation.swift",
+                "Services/ActivityDiary.swift",
                 "Services/ActivityEventStore.swift",
                 "Services/ActivityExclusion.swift",
                 "Services/ActivityGrowthAlertService.swift",

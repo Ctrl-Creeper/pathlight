@@ -201,6 +201,18 @@ fn the_bare_command_says_what_the_commands_are() {
     }
 }
 
+/// The diary has to say where it is even when it is empty: a report that
+/// cannot be attached is a report nobody sends.
+#[test]
+fn the_diary_says_where_it_is_before_anything_has_been_written() {
+    let home = tempfile::tempdir().unwrap();
+    let shown = text(&run(home.path(), &["log"]));
+    assert!(shown.contains("pathlight.log"), "{shown}");
+    assert!(shown.contains("Nothing written yet"), "{shown}");
+    // A count that is not a number is a mistyped command, not 50 lines.
+    assert!(!run(home.path(), &["log", "lots"]).status.success());
+}
+
 /// A bug report that cannot name the build it came from is a bug nobody can
 /// reproduce, so every host prints its own version and the core's.
 #[test]

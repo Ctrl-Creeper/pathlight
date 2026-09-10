@@ -117,6 +117,10 @@ impl Session {
         )
         .map_err(|error| error.to_string())?;
 
+        storage.note(&format!(
+            "watch opened on {root} · flushing every {latency_ms} ms · this watcher {}",
+            crate::text::guarantees(&crate::monitor::watcher_capabilities())
+        ));
         let worker = Worker {
             scope: root.to_owned(),
             storage,
@@ -166,17 +170,32 @@ type Baseline = Arc<Mutex<Option<ScanSnapshot>>>;
 /// What the folder holds now. A folder that cannot be read has no baseline,
 /// which is said out loud: silently having none would turn every later gap
 /// into a gap nobody can reconcile.
-fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>) -> Option<ScanSnapshot> {
+fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>, storage: &Storage) -> Option<ScanSnapshot> {
     match snapshot::scan(Path::new(scope)) {
         Ok(snapshot) => Some(snapshot),
         Err(error) => {
-            live.lock().unwrap_or_else(PoisonError::into_inner).error = Some(format!(
-                "Could not read {scope} to know what it holds, so a dropped event cannot \
-                 be recovered here: {error}"
-            ));
+            trouble(
+                live,
+                storage,
+                format!(
+                    "Could not read {scope} to know what it holds, so a dropped event cannot \
+                     be recovered here: {error}"
+                ),
+            );
             None
         }
     }
+}
+
+/// One thing that went wrong, said to whoever is looking now and written down
+/// for whoever looks later.
+///
+/// Both, because a watch runs for months with the window closed: an error that
+/// only ever reached a screen nobody was in front of is an error nobody can be
+/// told about afterwards.
+fn trouble(live: &Arc<Mutex<Live>>, storage: &Storage, message: String) {
+    storage.note(&message);
+    live.lock().unwrap_or_else(PoisonError::into_inner).error = Some(message);
 }
 
 struct Worker {
@@ -231,14 +250,15 @@ impl Worker {
             let slot = baseline.clone();
             let scope = self.scope.clone();
             let live = self.live.clone();
+            let storage = self.storage.clone();
             let spawned = std::thread::Builder::new()
                 .name("pathlight-baseline".into())
                 .spawn(move || {
-                    let taken = baseline_of(&scope, &live);
+                    let taken = baseline_of(&scope, &live, &storage);
                     *slot.lock().unwrap_or_else(PoisonError::into_inner) = taken;
                 });
             if let Err(error) = spawned {
-                self.live().error = Some(format!("Could not take a baseline: {error}"));
+                self.trouble(format!("Could not take a baseline: {error}"));
             }
         }
         let mut due = Instant::now() + FLUSH;
@@ -253,6 +273,8 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.flush(&attributor, &mut pending, &index);
+                    self.storage
+                        .note(&format!("watch closed on {}", self.scope));
                     return;
                 }
             }
@@ -293,7 +315,7 @@ impl Worker {
         let Some(previous) = slot.take() else {
             return;
         };
-        let Some(current) = baseline_of(&self.scope, &self.live) else {
+        let Some(current) = baseline_of(&self.scope, &self.live, &self.storage) else {
             // Keep the old baseline: it is still the last thing known, and a
             // watch with no baseline can never reconcile again.
             *slot = Some(previous);
@@ -311,10 +333,13 @@ impl Worker {
 
         let recovered = events.len() as u64;
         self.publish(events, 0);
-        let mut live = self.live();
-        live.recovered += recovered;
+        self.storage.note(&format!(
+            "caught up on {}: {recovered} row(s) recovered from a gap",
+            self.scope
+        ));
+        self.live().recovered += recovered;
         if incomplete {
-            live.error = Some(
+            self.trouble(
                 "Parts of this folder could not be read while catching up, so the recovered \
                  list may be short."
                     .to_owned(),
@@ -390,8 +415,13 @@ impl Worker {
     /// user was promised, and only they can free the disk it sits on.
     fn trim(&self) {
         if let Err(error) = self.storage.trim_journal() {
-            self.live().error = Some(format!("Could not trim the journal: {error}"));
+            self.trouble(format!("Could not trim the journal: {error}"));
         }
+    }
+
+    /// See [`trouble`]: a Worker always has both halves to hand.
+    fn trouble(&self, message: String) {
+        trouble(&self.live, &self.storage, message);
     }
 
     fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>, index: &SizeIndex) {
@@ -405,7 +435,7 @@ impl Worker {
         // After the rows, because a baseline nobody can compare against is
         // worth less than a row nobody has a baseline for.
         if let Err(error) = index.persist() {
-            self.live().error = Some(format!("Sizes could not be remembered: {error}"));
+            self.trouble(format!("Sizes could not be remembered: {error}"));
         }
     }
 
@@ -430,8 +460,10 @@ impl Worker {
                 live.rows.pop_back();
             }
         }
-        if let Some(failure) = failure {
-            live.error = Some(format!("Could not write to the journal: {failure}"));
+        let journal_failure =
+            failure.map(|failure| format!("Could not write to the journal: {failure}"));
+        if let Some(message) = &journal_failure {
+            live.error = Some(message.clone());
         }
 
         // While the window is closed nothing repaints, so this has to happen
@@ -444,7 +476,14 @@ impl Worker {
             .unwrap_or_else(PoisonError::into_inner)
             .news(&live.rows, arrived, SystemTime::now());
         drop(live);
+        // After the lock, because writing to the diary is a disk write and
+        // the lock is held on the path that also draws.
+        if let Some(message) = &journal_failure {
+            self.storage.note(message);
+        }
         for alert in news {
+            self.storage
+                .note(&crate::text::alert_title(&alert, &self.scope));
             (self.announce)(&alert, &self.scope);
         }
     }
@@ -741,7 +780,11 @@ mod tests {
             announce: Box::new(|_, _| {}),
         };
 
-        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&worker.scope, &worker.live)));
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
+            &worker.scope,
+            &worker.live,
+            &worker.storage,
+        )));
         assert!(
             baseline.lock().unwrap().is_some(),
             "no baseline: {:?}",

@@ -7,9 +7,10 @@ import SwiftUI
 /// terminal prints, which are already selectable text.
 struct CopyPathButton: View {
     let path: String
+    var title = "Copy Path"
 
     var body: some View {
-        Button("Copy Path", systemImage: "doc.on.doc") {
+        Button(title, systemImage: "doc.on.doc") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(path, forType: .string)
         }

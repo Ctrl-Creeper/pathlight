@@ -303,6 +303,9 @@ Usage: pathlight-monitor <command> [arguments]
                           two interval snapshots. JOURNAL must be outside
                           FOLDER, and registration and scans add to the
                           duration.
+  log [LINES=50]          The watch's own diary: opened, caught up, warned,
+                          failed. Says where the file is, so a report can
+                          attach it.
   version                 Which build this is, and what its watcher promises.
   install-cli             Put this command in your own home, on your PATH.
   uninstall [--yes]       List Pathlight's own storage, and with --yes remove it.
@@ -334,6 +337,43 @@ fn one_folder(rest: &[OsString], usage: &'static str) -> io::Result<String> {
         [folder] => Ok(root_of(folder)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, usage)),
     }
+}
+
+/// The watch's own diary: when it opened, what it caught up on after a gap,
+/// what it warned about, and what failed.
+///
+/// The windows show the same file. It is the only answer to "it missed
+/// something last night" that does not require somebody to have been watching
+/// the window at the time.
+fn log_lines(rest: &[OsString]) -> io::Result<()> {
+    let lines = match rest {
+        [] => 50,
+        [count] => count
+            .to_str()
+            .and_then(|count| count.parse().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: pathlight-monitor log [LINES]",
+                )
+            })?,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: pathlight-monitor log [LINES]",
+            ))
+        }
+    };
+    let storage = storage()?;
+    println!("{}", storage.log_file().display());
+    match storage.log_tail(lines) {
+        tail if tail.is_empty() => println!(
+            "Nothing written yet. A watch writes here when it opens, when it catches up after \
+             a gap, when it warns about something, and when it fails."
+        ),
+        tail => println!("{tail}"),
+    }
+    Ok(())
 }
 
 /// Watches folders until the terminal is closed, printing rows as they are
@@ -895,6 +935,7 @@ fn run() -> io::Result<()> {
         "watches" => return watches(&args[1..]),
         "presets" => return presets(&args[1..]),
         "history" => return history(&args[1..]),
+        "log" => return log_lines(&args[1..]),
         "compact" => return compact(&args[1..]),
         "forget-records" => return forget_records(&args[1..]),
         "export" => return export(&args[1..], false),

@@ -14,6 +14,10 @@ use pathlight_core::text::human_bytes;
 
 use crate::{show_in_file_manager, BYTES_PER_MB};
 
+/// How much of the diary the pane shows. Enough to cover the last few watch
+/// sessions; the whole file is one button away.
+const LOG_LINES_SHOWN: usize = 200;
+
 /// What the boxes hold while they are being edited. Text, because a
 /// half-typed number is not a setting and must not be saved as one.
 pub struct Draft {
@@ -44,6 +48,10 @@ pub struct Draft {
     message: Option<String>,
     /// Whether deleting every record has already been asked for once.
     confirm_forget: bool,
+    /// The diary's last lines, read when the section is opened rather than
+    /// per frame: a file read on the paint path is a disk read sixty times a
+    /// second for a file that changes when a watch does something.
+    log: Option<String>,
 }
 
 /// What the user did with the modal.
@@ -85,6 +93,7 @@ impl Draft {
             login_error: item.err().map(|error| error.to_string()),
             message: None,
             confirm_forget: false,
+            log: None,
         }
     }
 
@@ -219,6 +228,49 @@ impl Draft {
             .small()
             .color(ui.visuals().weak_text_color()),
         );
+        // What the watches wrote while nobody was looking. Folded away
+        // because it is the answer to a question most days do not raise.
+        let diary = egui::CollapsingHeader::new("What the watches wrote")
+            .id_salt("diary")
+            .show(ui, |ui| {
+                let tail = self
+                    .log
+                    .get_or_insert_with(|| storage.log_tail(LOG_LINES_SHOWN));
+                if tail.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Nothing yet. A watch writes here when it opens, when it catches \
+                             up after a gap, when it warns about something, and when it fails.",
+                        )
+                        .small(),
+                    );
+                    return None;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(tail.as_str()).small().monospace());
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(tail.clone());
+                    }
+                    if ui.button("Refresh").clicked() {
+                        return Some(());
+                    }
+                    if ui.button("Show the file").clicked() {
+                        show_in_file_manager(&storage.log_file());
+                    }
+                    None
+                })
+                .inner
+            });
+        // Outside the closure: the tail it borrows is the thing being dropped.
+        if diary.body_returned.flatten().is_some() {
+            self.log = None;
+        }
+
         ui.horizontal(|ui| {
             if ui.button("Show records folder").clicked() {
                 show_in_file_manager(storage.dir());

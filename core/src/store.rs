@@ -17,6 +17,13 @@ use crate::exclusion::DEFAULT_PATTERNS;
 use crate::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
+const LOG_FILE: &str = "pathlight.log";
+/// How large the log may get before its older half goes.
+///
+/// A diary of watch starts, gaps and failures is what turns "it missed
+/// something" into a report somebody can read; a diary that grows without a
+/// bound is the disk problem it was written to explain.
+const LOG_MAX_BYTES: u64 = 256 * 1024;
 const WATCHES_FILE: &str = "watches.json";
 const SIZE_INDEX_FILE: &str = "activity-size-index.jsonl";
 /// How long a row is kept, and how large the journal may get, until the user
@@ -152,6 +159,53 @@ impl Storage {
         (bytes, rows)
     }
 
+    /// The file every host writes its diary of watch starts, gaps and
+    /// failures to. It lives beside the journal, so the macOS app's own
+    /// writer lands in the same file on a mac that also runs the terminal.
+    pub fn log_file(&self) -> PathBuf {
+        self.dir().join(LOG_FILE)
+    }
+
+    /// Writes one line about the watch itself.
+    ///
+    /// Best effort on purpose: a monitor that stops watching because it could
+    /// not write its own diary is worse than a monitor with a gap in the diary.
+    pub fn note(&self, line: &str) {
+        use std::io::Write as _;
+
+        let path = self.log_file();
+        let _ = fs::create_dir_all(self.dir());
+        if fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_MAX_BYTES) {
+            // Cut on a line boundary so the oldest surviving line is whole,
+            // and cut in the middle so this happens once per doubling rather
+            // than on every write.
+            if let Ok(text) = fs::read_to_string(&path) {
+                let kept = text
+                    .char_indices()
+                    .nth(text.chars().count() / 2)
+                    .and_then(|(middle, _)| text[middle..].find('\n').map(|end| middle + end + 1))
+                    .unwrap_or(text.len());
+                let _ = fs::write(&path, &text[kept..]);
+            }
+        }
+        let stamped = format!(
+            "{} {line}\n",
+            crate::event::swift_date::text(std::time::SystemTime::now())
+                .unwrap_or_else(|| "unknown time".to_owned())
+        );
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(stamped.as_bytes());
+        }
+    }
+
+    /// The last `lines` lines of that diary, newest last, as a person reads
+    /// it. Empty when nothing has been written yet, which is itself an answer.
+    pub fn log_tail(&self, lines: usize) -> String {
+        let text = fs::read_to_string(self.log_file()).unwrap_or_default();
+        let kept: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        kept[kept.len().saturating_sub(lines)..].join("\n")
+    }
+
     /// Deletes everything recorded, leaving the settings alone.
     ///
     /// Records are the one thing here nobody can get back, so this exists as
@@ -162,9 +216,11 @@ impl Storage {
         let _guard = journal_lock()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // The baselines name the same files the rows do, so "delete every
-        // record" that left them behind would be a lie about what is kept.
+        // The baselines name the same files the rows do, and the diary names
+        // the folders that were watched, so "delete every record" that left
+        // either behind would be a lie about what is kept.
         let _ = std::fs::remove_file(self.dir().join(SIZE_INDEX_FILE));
+        let _ = std::fs::remove_file(self.log_file());
         match std::fs::remove_file(self.journal()) {
             // Nothing recorded yet is already the state this asks for.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -832,5 +888,45 @@ mod tests {
         // A retention of nothing is refused rather than saved.
         assert!(reopened.set_retention(0, 1).is_err());
         assert_eq!(Storage::at(dir.path()).retention(), (30, 2_000_000));
+    }
+
+    /// The diary answers "what happened while nobody was looking", so what it
+    /// must never do is grow without a bound or lose the newest line to the
+    /// trim that bounds it.
+    #[test]
+    fn the_diary_keeps_the_newest_lines_and_stays_under_its_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+
+        assert!(storage.log_tail(50).is_empty());
+        storage.note("watch opened on /Users/example/Downloads");
+        storage.note("caught up on /Users/example/Downloads: 2 row(s) recovered from a gap");
+        let tail = storage.log_tail(50);
+        assert_eq!(tail.lines().count(), 2);
+        assert!(
+            tail.lines().next().unwrap().contains("watch opened"),
+            "{tail}"
+        );
+        assert!(tail.lines().last().unwrap().contains("caught up"), "{tail}");
+        // Only what was asked for, newest last.
+        assert!(storage.log_tail(1).contains("caught up"));
+
+        let long = "x".repeat(1024);
+        for _ in 0..(LOG_MAX_BYTES / 1024 + 8) {
+            storage.note(&long);
+        }
+        storage.note("the newest line");
+        let bytes = fs::metadata(storage.log_file()).unwrap().len();
+        assert!(bytes <= LOG_MAX_BYTES + 8 * 1024, "{bytes} bytes");
+        assert!(storage.log_tail(1).ends_with("the newest line"));
+        // Every surviving line is whole: a trim that cut mid-line would leave
+        // a first row nobody can read.
+        for line in storage.log_tail(usize::MAX).lines() {
+            assert!(line.starts_with("20"), "{line}");
+        }
+
+        // The diary names watched folders, so it goes when the records do.
+        storage.forget_records().unwrap();
+        assert!(storage.log_tail(50).is_empty());
     }
 }
