@@ -39,5 +39,16 @@ tempfile = "3.27.0"
 # folder picker still avoids gtk through xdg-portal. tray-icon already pulls
 # gtk 0.18 in via libappindicator, so this follows its pin rather than
 # choosing a second one.
+#
+# This stack brings glib 0.18, which RUSTSEC-2024-0429 marks unsound: five
+# `glib::VariantStrIter` methods can dereference NULL, fixed in glib 0.20.
+# Accepted, not ignored — the only calls into gtk here are `gtk::init` and
+# `gtk::main` in src/tray.rs, and nothing in this crate constructs a
+# `Variant`, let alone iterates one. Dropping to a patched glib means gtk4,
+# which libappindicator does not offer, so the alternative is no tray on
+# Linux — and the tray is how the app stays reachable once its window is
+# closed. Revisit when tray-icon's Linux backend moves off gtk3; the
+# unmaintained advisories on gtk/gdk/atk were withdrawn on 2026-08-14, when
+# gtk3-rs picked up development again.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
