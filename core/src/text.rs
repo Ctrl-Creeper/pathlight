@@ -123,6 +123,11 @@ pub fn version(host: &str, host_version: &str) -> String {
 }
 
 /// A finding's headline, naming the folder it is about.
+/// Why a watch would not open, in the one case that is a choice rather than a
+/// failure. Every host says the same thing, because the fix is the same one
+/// switch wherever they saw it.
+pub const PAUSED: &str = "monitoring is paused";
+
 pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     let name = leaf(root);
     match alert.kind {

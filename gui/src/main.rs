@@ -85,6 +85,9 @@ struct App {
     /// Whether new rows are written encrypted, mirrored from storage so the
     /// checkbox does not read a file every frame.
     encrypt: bool,
+    /// Whether every watch is held off, mirrored from storage for the same
+    /// reason.
+    paused: bool,
     /// What the two size boxes hold while they are being typed, in MB. Text
     /// rather than numbers, because an empty box is "no bound" and a
     /// half-typed one must not be read as a bound the user did not finish.
@@ -119,12 +122,14 @@ impl App {
         });
         let watches = storage.as_ref().map(Storage::watches).unwrap_or_default();
         let encrypt = storage.as_ref().is_ok_and(Storage::encrypting);
+        let paused = storage.as_ref().is_ok_and(Storage::paused);
         let (min_bytes, max_bytes) = storage
             .as_ref()
             .map(Storage::size_bounds)
             .unwrap_or_default();
         Self {
             encrypt,
+            paused,
             min_mb: mb_text(min_bytes),
             max_mb: mb_text(max_bytes),
             selected: watches.first().map(|watch| watch.path.clone()),
@@ -370,6 +375,26 @@ impl App {
         }
     }
 
+    /// Holds every watch off, or lets them open again.
+    ///
+    /// Pausing does not switch the folders off: what was being watched is what
+    /// starts again on resume, here or at the next launch, which is the whole
+    /// point of one switch rather than a row of them.
+    fn set_paused(&mut self, paused: bool) {
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if let Err(error) = storage.set_paused(paused) {
+            self.notice = Some(format!("Could not save that: {error}"));
+            return;
+        }
+        self.paused = paused;
+        match paused {
+            true => self.sessions.clear(),
+            false => self.resume(),
+        }
+    }
+
     /// Turns encryption of new rows on or off.
     ///
     /// Nothing re-writes what is already recorded: encrypting old rows would
@@ -504,6 +529,25 @@ impl App {
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
+                if self.paused {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("Paused — nothing is being recorded.")
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut paused = self.paused;
+                    ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
+                        "Holds every watch off, for something noisy about to happen — a build, \
+                         a restore, a large copy. The folders stay as they are, and resuming \
+                         starts the same ones again.",
+                    );
+                    if paused != self.paused {
+                        self.set_paused(paused);
+                    }
+                });
             });
             ui.add_space(8.0);
         });
@@ -749,6 +793,9 @@ impl App {
 
         let mut toggle: Option<String> = None;
         let mut forget: Option<String> = None;
+        // A paused install cannot open a watch, so the button says so by
+        // being unavailable rather than by failing when it is pressed.
+        let paused = self.paused;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -775,9 +822,17 @@ impl App {
                                     if ui.button("Forget").clicked() {
                                         forget = Some(root.clone());
                                     }
-                                    if ui.button(if watching { "Stop" } else { "Watch" }).clicked()
-                                    {
+                                    let button =
+                                        egui::Button::new(if watching { "Stop" } else { "Watch" });
+                                    let press = ui.add_enabled(!paused, button);
+                                    if press.clicked() {
                                         toggle = Some(root.clone());
+                                    }
+                                    if paused {
+                                        press.on_disabled_hover_text(
+                                            "Monitoring is paused. Resume at the top of the \
+                                             window and this folder starts again.",
+                                        );
                                     }
                                 },
                             );
@@ -1354,6 +1409,7 @@ mod tests {
             uninstall_prompt: None,
             uninstalled: false,
             encrypt: false,
+            paused: false,
             min_mb: String::new(),
             max_mb: String::new(),
             tray: None,
@@ -1403,6 +1459,44 @@ mod tests {
             harness.state().sessions.is_empty(),
             "pressing Stop did not end the watch"
         );
+    }
+
+    /// One switch, every watch: pausing ends what is running without
+    /// forgetting it, and resuming brings the same folder back — including
+    /// after a restart, which is why the answer lives in the settings file.
+    #[test]
+    fn pausing_ends_every_watch_and_resuming_brings_them_back() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+        assert!(harness.state().sessions.contains_key(&root));
+
+        harness.get_by_label("Pause all watches").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "a pause left a watch running"
+        );
+        assert!(Storage::at(storage_dir.path()).paused());
+        // A watch cannot be started while paused, whichever button asks.
+        harness.step();
+        harness.get_by_label("Watch").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "a paused install opened a watch"
+        );
+
+        harness.get_by_label("Pause all watches").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.contains_key(&root),
+            "resuming did not bring the watch back"
+        );
+        assert!(!Storage::at(storage_dir.path()).paused());
     }
 
     /// The promise a restart has to keep: a folder that was being watched when

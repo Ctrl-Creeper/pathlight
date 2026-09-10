@@ -33,7 +33,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLoginNudgeDismissed =
         UserDefaults.standard.bool(forKey: AppModel.launchAtLoginNudgeDismissedKey)
 
+    /// Every watch held off by one switch, for something noisy about to
+    /// happen. The other two hosts keep this in the settings file the core
+    /// owns; this host keeps its settings in defaults, and the meaning is the
+    /// same — the folders stay as they are, and resuming starts the same ones.
+    @Published private(set) var isMonitoringPaused =
+        UserDefaults.standard.bool(forKey: AppModel.monitoringPausedKey)
+
     private static let launchAtLoginNudgeDismissedKey = "launchAtLoginNudgeDismissed"
+    private static let monitoringPausedKey = "monitoringPaused"
     private static let preferencePersistenceDebounce: RunLoop.SchedulerTimeType.Stride = .milliseconds(50)
 
     private let dependencies: AppDependencies
@@ -326,6 +334,10 @@ final class AppModel: ObservableObject {
         options: DiskActivityAggregationOptions = .shortTermDefault
     ) {
         stopShortTermWatch()
+        guard !isMonitoringPaused else {
+            monitoringStatusMessage = "Monitoring is paused. Resume it and this folder starts again."
+            return
+        }
 
         let taskID = UUID()
         liveWatchTaskID = taskID
@@ -1047,13 +1059,34 @@ final class AppModel: ObservableObject {
         longTermWatchBaselineIDs.removeAll()
     }
 
+    func setMonitoringPaused(_ paused: Bool) {
+        guard paused != isMonitoringPaused else { return }
+        isMonitoringPaused = paused
+        UserDefaults.standard.set(paused, forKey: Self.monitoringPausedKey)
+        note(paused ? "monitoring paused" : "monitoring resumed")
+        guard paused else {
+            startEnabledLongTermWatches()
+            return
+        }
+        stopShortTermWatch()
+        stopAllLongTermWatches()
+    }
+
     private func startEnabledLongTermWatches() {
+        guard !isMonitoringPaused else { return }
         for target in longTermWatchTargets where target.isEnabled {
             startLongTermWatch(for: target)
         }
     }
 
     private func startLongTermWatch(for target: LongTermWatchTarget) {
+        // Checked here rather than at each caller, for the same reason
+        // `Session::start` checks it in the core: a path that forgot would
+        // record through a pause the user asked for.
+        guard !isMonitoringPaused else {
+            stopLongTermWatch(targetID: target.id)
+            return
+        }
         guard target.isEnabled else {
             stopLongTermWatch(targetID: target.id)
             return

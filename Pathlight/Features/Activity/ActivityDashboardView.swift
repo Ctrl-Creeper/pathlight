@@ -18,6 +18,7 @@ struct ActivityDashboardActions {
     let exportHistory: (URL) -> Void
     let startLiveMonitor: (DiskActivityAggregationOptions) -> Void
     let stopLiveMonitor: () -> Void
+    let setMonitoringPaused: (Bool) -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -27,6 +28,7 @@ struct ActivityDashboardView: View {
     var historyQuery: ActivityHistoryQuery = .everything
     let showsLaunchAtLoginNudge: Bool
     var monitoringStatusMessage: String? = nil
+    var isMonitoringPaused = false
     let isLiveMonitorActive: Bool
     let actions: ActivityDashboardActions
 
@@ -70,6 +72,21 @@ struct ActivityDashboardView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                // One switch for every watch, for something noisy about to
+                // happen. The folders stay as they are, so resuming starts
+                // the same ones again.
+                Button {
+                    actions.setMonitoringPaused(!isMonitoringPaused)
+                } label: {
+                    Label(
+                        isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
+                        systemImage: isMonitoringPaused ? "play.circle" : "pause.circle"
+                    )
+                }
+                .help(isMonitoringPaused
+                    ? "Start the folders that were being watched again"
+                    : "Hold every watch off without switching the folders off")
+
                 Menu {
                     Button("Choose Folder…") {
                         actions.addFolder()
@@ -156,6 +173,12 @@ struct ActivityDashboardView: View {
             Text(presentation.summaryText)
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
+
+            if isMonitoringPaused {
+                Label("Paused — nothing is being recorded", systemImage: "pause.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.orange)
+            }
 
             Spacer(minLength: 12)
         }

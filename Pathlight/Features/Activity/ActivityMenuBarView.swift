@@ -14,7 +14,9 @@ struct ActivityMenuBarView: View {
     }
 
     var body: some View {
-        Text(presentation.summaryText)
+        Text(appModel.isMonitoringPaused
+            ? "Paused — nothing is being recorded"
+            : presentation.summaryText)
 
         Divider()
 
@@ -27,6 +29,12 @@ struct ActivityMenuBarView: View {
         }
 
         Divider()
+
+        // Reachable with the window closed, which is when a pause is most
+        // likely wanted: the watches run either way.
+        Button(appModel.isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring") {
+            appModel.setMonitoringPaused(!appModel.isMonitoringPaused)
+        }
 
         Button("Open Activity Dashboard") {
             openDashboard()

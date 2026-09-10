@@ -93,6 +93,12 @@ impl Session {
         storage: Storage,
         announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        // The pause is checked here rather than in each host: a host that
+        // forgot would record through a pause the user asked for, and there is
+        // no message for that afterwards.
+        if storage.paused() {
+            return Err(crate::text::PAUSED.to_owned());
+        }
         // Built before the watch opens: a filter that failed to compile after
         // events started arriving would record the noise it exists to drop.
         let exclusions =

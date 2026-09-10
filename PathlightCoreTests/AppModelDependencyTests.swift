@@ -90,6 +90,41 @@ final class AppModelDependencyTests: XCTestCase {
         XCTAssertEqual(model.launchAtLoginStatus, .enabled)
     }
 
+    /// One switch for every watch: pausing ends what is running without
+    /// forgetting the folder, and resuming starts the same one again — the
+    /// promise `pausing_ends_every_watch_and_resuming_brings_them_back` makes
+    /// of the other two hosts.
+    func testPausingStopsEveryWatchAndResumingStartsTheSameOnes() {
+        let store = LongTermWatchTargetStore(
+            persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
+        )
+        let rootPath = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightPause-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: rootPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootPath) }
+        _ = store.upsert(LongTermWatchTarget(rootPath: rootPath, isEnabled: true), currentTargets: [])
+
+        let model = AppModel(dependencies: makeDependencies(longTermWatchTargets: store))
+        defer {
+            model.setMonitoringPaused(false)
+            model.cleanup()
+        }
+        XCTAssertNotEqual(model.longTermWatchRuntimeStatuses[rootPath.path]?.state, .paused)
+
+        model.setMonitoringPaused(true)
+
+        XCTAssertTrue(model.isMonitoringPaused)
+        XCTAssertEqual(model.longTermWatchRuntimeStatuses[rootPath.path]?.state, .paused)
+        // The folder is still one this install watches, which is what makes
+        // resuming the same set possible.
+        XCTAssertEqual(model.longTermWatchTargets.map(\.isEnabled), [true])
+
+        model.setMonitoringPaused(false)
+
+        XCTAssertFalse(model.isMonitoringPaused)
+        XCTAssertNotEqual(model.longTermWatchRuntimeStatuses[rootPath.path]?.state, .paused)
+    }
+
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "AppModelDependencyTests.\(UUID().uuidString)")!
     }

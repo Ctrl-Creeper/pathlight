@@ -430,6 +430,26 @@ impl Storage {
         self.save(&settings)
     }
 
+    /// Whether every watch in this install is held off.
+    ///
+    /// One switch, so somebody about to do something noisy — a build, a
+    /// restore, a big copy — can stop recording without turning watches off
+    /// one at a time and having to remember afterwards which ones were on.
+    pub fn paused(&self) -> bool {
+        self.settings().paused.unwrap_or(false)
+    }
+
+    pub fn set_paused(&self, paused: bool) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.paused = Some(paused);
+        self.save(&settings)?;
+        self.note(match paused {
+            true => "monitoring paused",
+            false => "monitoring resumed",
+        });
+        Ok(())
+    }
+
     pub fn set_latency_ms(&self, latency_ms: u64) -> io::Result<()> {
         let mut settings = self.settings();
         settings.latency_ms = Some(latency_ms.max(1));
@@ -614,6 +634,10 @@ struct Settings {
     minimum_recorded_byte_delta: Option<i64>,
     #[serde(default)]
     latency_ms: Option<u64>,
+    /// Absent means watching, which is what an install that has never been
+    /// paused should do after an update.
+    #[serde(default)]
+    paused: Option<bool>,
     /// Absent, or zero, means the user has not asked to be told about a
     /// folder growing.
     #[serde(default)]

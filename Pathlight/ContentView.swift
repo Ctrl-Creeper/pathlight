@@ -18,6 +18,7 @@ struct ContentView: View {
             historyQuery: appModel.activityHistoryQuery,
             showsLaunchAtLoginNudge: appModel.shouldShowLaunchAtLoginNudge,
             monitoringStatusMessage: appModel.monitoringStatusMessage,
+            isMonitoringPaused: appModel.isMonitoringPaused,
             isLiveMonitorActive: appModel.liveWatchSession != nil,
             actions: dashboardActions
         )
@@ -72,7 +73,8 @@ struct ContentView: View {
                     openWindow(id: "live-monitor")
                 }
             },
-            stopLiveMonitor: { appModel.stopShortTermWatch() }
+            stopLiveMonitor: { appModel.stopShortTermWatch() },
+            setMonitoringPaused: { appModel.setMonitoringPaused($0) }
         )
     }
 }

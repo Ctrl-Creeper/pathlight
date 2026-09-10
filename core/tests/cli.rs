@@ -313,3 +313,39 @@ fn a_history_can_be_narrowed_to_what_somebody_is_looking_for() {
     assert!(!mistyped.status.success());
     assert!(text(&mistyped).contains("deleted"), "{}", text(&mistyped));
 }
+
+/// The pause is one switch for every watch, and it survives being read back
+/// by a different command — which is the only way a host can honour it.
+#[test]
+fn a_pause_holds_every_watch_off_until_it_is_lifted() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().to_string_lossy().replace('\\', "/");
+    run(home.path(), &["watches", "add", &path]);
+    run(home.path(), &["watches", "enable", &path]);
+
+    let paused = run(home.path(), &["pause"]);
+    assert!(paused.status.success(), "{}", text(&paused));
+    assert!(text(&paused).contains("paused"), "{}", text(&paused));
+    assert!(
+        text(&run(home.path(), &["settings"])).contains("paused                    yes"),
+        "{}",
+        text(&run(home.path(), &["settings"]))
+    );
+
+    // The watch does not open, and says why rather than watching nothing.
+    let watched = run(home.path(), &["watch", &path]);
+    assert!(!watched.status.success(), "{}", text(&watched));
+    assert!(
+        text(&watched).contains("monitoring is paused"),
+        "{}",
+        text(&watched)
+    );
+
+    let resumed = run(home.path(), &["resume"]);
+    assert!(
+        text(&resumed).contains("Monitoring is on"),
+        "{}",
+        text(&resumed)
+    );
+}

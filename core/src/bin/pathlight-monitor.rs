@@ -298,6 +298,9 @@ Usage: pathlight-monitor <command> [arguments]
                           watch, and say how many rows went.
   forget-records [--yes]  Delete everything recorded, keeping the settings.
   autostart [on|off]      Whether the watches start when you sign in.
+  pause / resume          Hold every watch off, or let them open again. One
+                          switch for all of them, so nothing has to be
+                          switched back on one at a time afterwards.
   record FOLDER JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]
                           One explicit recording into a journal you name, with
                           two interval snapshots. JOURNAL must be outside
@@ -824,6 +827,13 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
         "watcher",
         pathlight_core::text::guarantees(&pathlight_core::monitor::watcher_capabilities()),
     );
+    say(
+        "paused",
+        match storage.paused() {
+            true => "yes  (`resume` to watch again)".to_owned(),
+            false => "no".to_owned(),
+        },
+    );
     say("retention-days", days.to_string());
     say(
         "aggregate-retention-days",
@@ -909,6 +919,24 @@ fn autostart(rest: &[OsString]) -> io::Result<()> {
     Ok(())
 }
 
+/// The one switch that holds every watch off, in the same shape as
+/// `autostart`: no argument says where it stands.
+fn pause(rest: &[OsString], paused: bool) -> io::Result<()> {
+    let storage = storage()?;
+    match rest.first().and_then(|arg| arg.to_str()) {
+        None => storage.set_paused(paused)?,
+        Some(value) => storage.set_paused(switch(value, "pause")?)?,
+    }
+    println!(
+        "{}",
+        match storage.paused() {
+            true => "Monitoring is paused. No watch will open until `pathlight-monitor resume`.",
+            false => "Monitoring is on. Watches open as usual.",
+        }
+    );
+    Ok(())
+}
+
 fn run() -> io::Result<()> {
     let mut args: Vec<OsString> = env::args_os().skip(1).collect();
     // `first`, not `args[0]`: no arguments at all is the most likely way this
@@ -942,6 +970,8 @@ fn run() -> io::Result<()> {
         "report" => return export(&args[1..], true),
         "settings" => return settings(&args[1..]),
         "autostart" => return autostart(&args[1..]),
+        "pause" => return pause(&args[1..], true),
+        "resume" => return pause(&args[1..], false),
         // Named or not: the recording form is what this binary was before the
         // other commands existed, and scripts pass the two paths bare.
         "record" => {
