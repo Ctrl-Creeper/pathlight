@@ -1,11 +1,33 @@
 import Foundation
 @testable import PathlightCore
 
-func makeEncryptedActivityStorageLineCodec(encryptNewData: Bool = true) -> ActivityStorageLineCodec {
+func makeSealedActivityStorageLineCodec(encryptNewData: Bool = true) -> ActivityStorageLineCodec {
     ActivityStorageLineCodec(
         preferencesStore: FixedActivityStoragePreferencesStore(encryptNewData: encryptNewData),
-        cryptor: AESGCMActivityStorageCryptor(keyProvider: FixedActivityStorageKeyProvider())
+        cryptor: SealedActivityStorageCryptor()
     )
+}
+
+/// Marked like a real row and reversible, but not encryption: the cipher lives
+/// in the Rust core, which this package does not link. What these tests can
+/// check is that a codec set to encrypt sends every line through its cryptor
+/// and never leaves json on disk — `core/src/crypt.rs` owns the cipher itself.
+nonisolated struct SealedActivityStorageCryptor: ActivityStorageLineCrypting {
+    static let marker = "pathlight:v1:aes-gcm:"
+
+    func seal(_ payload: Data) throws -> String {
+        Self.marker + payload.base64EncodedString()
+    }
+
+    func open(_ line: String) throws -> Data? {
+        guard line.hasPrefix(Self.marker) else {
+            return nil
+        }
+        guard let payload = Data(base64Encoded: String(line.dropFirst(Self.marker.count))) else {
+            throw ActivityStorageLineCodecError.keyUnavailable
+        }
+        return payload
+    }
 }
 
 func posixPermissions(at url: URL) throws -> Int {
@@ -27,12 +49,6 @@ final class FixedActivityStoragePreferencesStore: ActivityStoragePreferencesPers
     }
 
     func savePreferences(_ preferences: ActivityStoragePreferences) {}
-}
-
-private struct FixedActivityStorageKeyProvider: ActivityStorageKeyProviding {
-    func loadOrCreateKey() throws -> Data {
-        Data(repeating: 7, count: 32)
-    }
 }
 
 /// Byte attribution the app can be tested against.

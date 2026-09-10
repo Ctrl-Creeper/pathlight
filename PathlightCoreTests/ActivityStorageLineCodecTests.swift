@@ -4,9 +4,9 @@ import Testing
 
 @Suite("Activity storage line codec")
 struct ActivityStorageLineCodecTests {
-    @Test("encrypts new lines and decodes them")
-    func encryptsNewLinesAndDecodesThem() throws {
-        let codec = makeEncryptedActivityStorageLineCodec()
+    @Test("sends new lines through the cryptor and decodes them back")
+    func sendsNewLinesThroughTheCryptor() throws {
+        let codec = makeSealedActivityStorageLineCodec()
         let plaintext = Data(#"{"path":"/Users/example/Downloads/private.zip"}"#.utf8)
 
         let encoded = try codec.encode(plaintext)
@@ -19,7 +19,7 @@ struct ActivityStorageLineCodecTests {
 
     @Test("keeps plaintext lines readable for migration")
     func keepsPlaintextLinesReadableForMigration() throws {
-        let codec = makeEncryptedActivityStorageLineCodec()
+        let codec = makeSealedActivityStorageLineCodec()
         let plaintext = #"{"path":"/Users/example/Downloads/legacy.zip"}"#
 
         let decoded = try codec.decode(plaintext)
@@ -74,21 +74,13 @@ struct ActivityStorageLineCodecTests {
         #expect(underlying.callCount == 1)
     }
 
-    @Test("round-trips encryption through the caching provider")
-    func roundTripsEncryptionThroughCachingProvider() throws {
-        let codec = ActivityStorageLineCodec(
-            preferencesStore: FixedActivityStoragePreferencesStore(encryptNewData: true),
-            cryptor: AESGCMActivityStorageCryptor(
-                keyProvider: CachingActivityStorageKeyProvider(
-                    wrapping: ScriptedActivityStorageKeyProvider(results: [.success(Data(repeating: 3, count: 32))])
-                )
-            )
-        )
-        let plaintext = Data(#"{"path":"/Users/example/Downloads/cached.zip"}"#.utf8)
+    @Test("reads a row it cannot decrypt as an error, not as json")
+    func readsAnUnreadableRowAsAnError() throws {
+        let codec = makeSealedActivityStorageLineCodec()
 
-        let decoded = try codec.decode(try codec.encode(plaintext))
-
-        #expect(decoded == plaintext)
+        #expect(throws: (any Error).self) {
+            try codec.decode(SealedActivityStorageCryptor.marker + "!not base64!")
+        }
     }
 }
 

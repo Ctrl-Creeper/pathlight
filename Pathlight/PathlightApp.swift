@@ -56,7 +56,8 @@ struct PathlightApp: App {
             activityExclusion: { patterns, rootPath in
                 RustActivityExclusion(patterns: patterns, rootPath: rootPath)
             },
-            activityAnomalies: RustActivityAnomalies.anomalies(in:rootPath:now:)
+            activityAnomalies: RustActivityAnomalies.anomalies(in:rootPath:now:),
+            activityStorageCryptor: RustActivityStorageCryptor.live
         )
     )
     private let updaterController: SPUStandardUpdaterController

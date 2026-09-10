@@ -49,7 +49,7 @@ struct ActivityStorageUsageServiceTests {
         let directoryURL = makeTemporaryStorageDirectory()
         let eventsURL = directoryURL.appending(path: "activity-events.jsonl")
         let sizeIndexURL = directoryURL.appending(path: "activity-size-index.jsonl")
-        let lineCodec = makeEncryptedActivityStorageLineCodec()
+        let lineCodec = makeSealedActivityStorageLineCodec()
         let file = URL(filePath: "/Users/example/Downloads/current.iso")
         let index = ActivitySizeIndex(journalURL: sizeIndexURL, lineCodec: lineCodec)
         index.recordKnownSize(4_096, for: file)

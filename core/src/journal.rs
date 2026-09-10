@@ -62,7 +62,7 @@ impl Journal {
         for event in &events {
             let line = event.to_json_line()?;
             match &key {
-                Some(key) => payload.push_str(&crate::crypt::seal(key, &line)?),
+                Some(key) => payload.push_str(&crate::crypt::seal(key, line.as_bytes())?),
                 None => payload.push_str(&line),
             }
             payload.push('\n');
@@ -207,7 +207,7 @@ fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
     if !line.starts_with(ENCRYPTED_PREFIX) {
         return Some(line.to_owned());
     }
-    crate::crypt::open(key?, line)
+    String::from_utf8(crate::crypt::open(key?, line)?).ok()
 }
 
 /// The timestamp of a row this build can read, or `None` when it cannot.

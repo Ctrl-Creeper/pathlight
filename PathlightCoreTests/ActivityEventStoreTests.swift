@@ -154,7 +154,7 @@ struct ActivityEventStoreTests {
         )
         let store = JSONLActivityEventStore(
             journalURL: journalURL,
-            lineCodec: makeEncryptedActivityStorageLineCodec()
+            lineCodec: makeSealedActivityStorageLineCodec()
         )
 
         try await store.append([event])

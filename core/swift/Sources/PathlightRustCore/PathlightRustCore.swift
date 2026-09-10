@@ -589,6 +589,24 @@ fileprivate struct FfiConverterString: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterTimestamp: FfiConverterRustBuffer {
     typealias SwiftType = Date
 
@@ -2933,6 +2951,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -3087,6 +3129,47 @@ public func activityAnomalyWindowSecs() -> UInt64  {
 })
 }
 /**
+ * The bytes behind a stored line: `None` when the line was never encrypted —
+ * a row from before the setting was turned on, which stays readable — and an
+ * error when it is encrypted and this key cannot authenticate it. An
+ * unreadable row is never quietly handed back as if it were plaintext.
+ */
+public func openStorageLine(line: String, key: Data)throws  -> Data?  {
+    return try  FfiConverterOptionData.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_open_storage_line(
+        FfiConverterString.lower(line),
+        FfiConverterData.lower(key),uniffiCallStatus
+    )
+})
+}
+/**
+ * One journal line for a host that keeps its own key: the whole stored line,
+ * marker and framing included. macOS passes its Keychain key in rather than
+ * letting the core hold one, because only the app can open that Keychain.
+ */
+public func sealStorageLine(payload: Data, key: Data)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_seal_storage_line(
+        FfiConverterData.lower(payload),
+        FfiConverterData.lower(key),uniffiCallStatus
+    )
+})
+}
+/**
+ * What an encrypted line starts with, for a host that must decide whether a
+ * row is encrypted before it fetches its key: reading a plaintext journal
+ * must not open the macOS Keychain, let alone prompt for it.
+ */
+public func storageLineMarker() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_storage_line_marker(uniffiCallStatus
+    )
+})
+}
+/**
  * [`normalized_patterns`] across the FFI, for a host that stores what the
  * user typed and wants it stored the way this crate reads it.
  */
@@ -3133,6 +3216,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_activity_anomaly_window_secs() != 38083) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_open_storage_line() != 61108) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_seal_storage_line() != 32343) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_storage_line_marker() != 64290) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_normalized_exclusion_patterns() != 41574) {

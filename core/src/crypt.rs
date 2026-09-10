@@ -24,10 +24,10 @@ pub(crate) const PREFIX: &str = "pathlight:v1:aes-gcm:";
 const NONCE_BYTES: usize = 12;
 
 /// One line, encrypted under `key`.
-pub(crate) fn seal(key: &[u8; 32], plaintext: &str) -> Result<String, CoreError> {
+pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<String, CoreError> {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let sealed = Aes256Gcm::new(key.into())
-        .encrypt(&nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext)
         .map_err(|_| CoreError::Io {
             message: "the journal line could not be encrypted".to_owned(),
         })?;
@@ -40,13 +40,50 @@ pub(crate) fn seal(key: &[u8; 32], plaintext: &str) -> Result<String, CoreError>
 /// a row from another machine, or one whose bytes were altered. A row that
 /// cannot be authenticated is a row that is not shown; GCM's tag is the whole
 /// reason to prefer it over a bare cipher.
-pub(crate) fn open(key: &[u8; 32], line: &str) -> Option<String> {
+pub(crate) fn open(key: &[u8; 32], line: &str) -> Option<Vec<u8>> {
     let combined = STANDARD.decode(line.strip_prefix(PREFIX)?).ok()?;
     let (nonce, sealed) = combined.split_at_checked(NONCE_BYTES)?;
-    let plaintext = Aes256Gcm::new(key.into())
+    Aes256Gcm::new(key.into())
         .decrypt(Nonce::from_slice(nonce), sealed)
-        .ok()?;
-    String::from_utf8(plaintext).ok()
+        .ok()
+}
+
+/// What an encrypted line starts with, for a host that must decide whether a
+/// row is encrypted before it fetches its key: reading a plaintext journal
+/// must not open the macOS Keychain, let alone prompt for it.
+#[uniffi::export]
+pub fn storage_line_marker() -> String {
+    PREFIX.to_owned()
+}
+
+/// One journal line for a host that keeps its own key: the whole stored line,
+/// marker and framing included. macOS passes its Keychain key in rather than
+/// letting the core hold one, because only the app can open that Keychain.
+#[uniffi::export]
+pub fn seal_storage_line(payload: Vec<u8>, key: Vec<u8>) -> Result<String, CoreError> {
+    seal(&storage_key(&key)?, &payload)
+}
+
+/// The bytes behind a stored line: `None` when the line was never encrypted —
+/// a row from before the setting was turned on, which stays readable — and an
+/// error when it is encrypted and this key cannot authenticate it. An
+/// unreadable row is never quietly handed back as if it were plaintext.
+#[uniffi::export]
+pub fn open_storage_line(line: String, key: Vec<u8>) -> Result<Option<Vec<u8>>, CoreError> {
+    if !line.starts_with(PREFIX) {
+        return Ok(None);
+    }
+    open(&storage_key(&key)?, &line)
+        .map(Some)
+        .ok_or_else(|| CoreError::Encoding {
+            message: "the row is encrypted and this key cannot read it".to_owned(),
+        })
+}
+
+fn storage_key(key: &[u8]) -> Result<[u8; 32], CoreError> {
+    key.try_into().map_err(|_| CoreError::Encoding {
+        message: format!("a storage key is 32 bytes, not {}", key.len()),
+    })
 }
 
 /// Where the key for a journal lives: beside it, inside the storage directory
@@ -192,12 +229,12 @@ mod tests {
     #[test]
     fn a_sealed_line_comes_back_and_a_changed_one_does_not() {
         let key = [7u8; 32];
-        let line = seal(&key, r#"{"kind":{"modified":{}}}"#).unwrap();
+        let line = seal(&key, br#"{"kind":{"modified":{}}}"#).unwrap();
 
         assert!(line.starts_with(PREFIX), "{line}");
         assert_eq!(
             open(&key, &line).as_deref(),
-            Some(r#"{"kind":{"modified":{}}}"#)
+            Some(&br#"{"kind":{"modified":{}}}"#[..])
         );
         assert_eq!(open(&[8u8; 32], &line), None, "another key read the row");
 
@@ -216,7 +253,34 @@ mod tests {
     fn the_same_line_twice_is_two_different_ciphertexts() {
         let key = [3u8; 32];
 
-        assert_ne!(seal(&key, "same").unwrap(), seal(&key, "same").unwrap());
+        assert_ne!(seal(&key, b"same").unwrap(), seal(&key, b"same").unwrap());
+    }
+
+    /// What the macOS app calls: a line it sealed comes back, a plaintext row
+    /// reads as "not encrypted", and a row it cannot authenticate is an error
+    /// rather than an empty or plaintext-looking result.
+    #[test]
+    fn a_host_with_its_own_key_seals_and_opens_a_line() {
+        let key = vec![9u8; 32];
+        let line = seal_storage_line(b"{}".to_vec(), key.clone()).unwrap();
+
+        assert_eq!(
+            open_storage_line(line.clone(), key.clone()).unwrap(),
+            Some(b"{}".to_vec())
+        );
+        assert_eq!(
+            open_storage_line("{}".to_owned(), key.clone()).unwrap(),
+            None
+        );
+        assert!(open_storage_line(line, vec![1u8; 32]).is_err());
+        assert!(seal_storage_line(b"{}".to_vec(), vec![9u8; 16]).is_err());
+        assert!(line_is_encrypted(&storage_line_marker(), &line));
+    }
+
+    /// A host checks the marker itself, so the check has to be the one the
+    /// sealer used.
+    fn line_is_encrypted(marker: &str, line: &str) -> bool {
+        line.starts_with(marker)
     }
 
     /// The key is created once and then reused. A second key would silently

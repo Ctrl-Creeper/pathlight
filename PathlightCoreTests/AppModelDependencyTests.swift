@@ -19,6 +19,7 @@ final class AppModelDependencyTests: XCTestCase {
             // in the Rust core, which this package does not link.
             activityExclusion: { _, _ in nil },
             activityAnomalies: { _, _, _ in [] },
+            activityStorageCryptor: PlaintextActivityStorageCryptor(),
             activitySizeIndex: sizeIndex
         )
 

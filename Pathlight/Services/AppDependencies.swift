@@ -73,19 +73,24 @@ struct AppDependencies {
     }
 
     /// Every platform-specific piece is a parameter: this package holds no
-    /// monitor, no attribution, no exclusion and no anomaly policy, because
-    /// all four live in the Rust core that the app links and `swift test`
-    /// does not.
+    /// monitor, no attribution, no exclusion, no anomaly policy and no journal
+    /// line format, because all five live in the Rust core that the app links
+    /// and `swift test` does not.
+    ///
+    /// The cryptor has no default on purpose: a fallback would write plaintext
+    /// rows for a user who asked for encryption.
     static func live(
         activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory,
         activityAnomalies: @escaping ActivityAnomalyDetecting,
+        activityStorageCryptor: any ActivityStorageLineCrypting,
         activitySizeIndex: ActivitySizeIndex? = nil
     ) -> AppDependencies {
         let activityStoragePreferences = UserDefaultsActivityStoragePreferencesStore()
         let activityStorageLineCodec = ActivityStorageLineCodec(
-            preferencesStore: activityStoragePreferences
+            preferencesStore: activityStoragePreferences,
+            cryptor: activityStorageCryptor
         )
         let activitySizeIndex = activitySizeIndex ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
         return AppDependencies(

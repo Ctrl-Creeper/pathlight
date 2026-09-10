@@ -94,7 +94,7 @@ struct ActivitySizeIndexTests {
         let file = URL(filePath: "/Users/example/Downloads/sensitive.iso")
         let index = ActivitySizeIndex(
             journalURL: journalURL,
-            lineCodec: makeEncryptedActivityStorageLineCodec()
+            lineCodec: makeSealedActivityStorageLineCodec()
         )
 
         index.recordKnownSize(8_192, for: file)
@@ -102,7 +102,7 @@ struct ActivitySizeIndexTests {
         let contents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
         let reloadedIndex = ActivitySizeIndex(
             journalURL: journalURL,
-            lineCodec: makeEncryptedActivityStorageLineCodec()
+            lineCodec: makeSealedActivityStorageLineCodec()
         )
 
         #expect(contents.hasPrefix("pathlight:v1:aes-gcm:"))

@@ -1,19 +1,23 @@
-import CryptoKit
 import Foundation
 import Security
 
 nonisolated enum ActivityStorageLineCodecError: Error {
-    case invalidEncryptedLine
-    case missingCombinedRepresentation
     case randomGenerationFailed(OSStatus)
     case keychainReadFailed(OSStatus)
     case keychainWriteFailed(OSStatus)
     case keyUnavailable
 }
 
+/// The stored line, not the bytes inside it: the marker, the cipher and the
+/// framing are one format, owned by `core/src/crypt.rs`, so a host that keeps
+/// its own key implements this and nothing here knows how a row is shaped.
 nonisolated protocol ActivityStorageLineCrypting: Sendable {
-    func encrypt(_ plaintext: Data) throws -> Data
-    func decrypt(_ ciphertext: Data) throws -> Data
+    /// One journal line, sealed — whatever framing the format calls for included.
+    func seal(_ payload: Data) throws -> String
+    /// The bytes behind a stored line, or `nil` when that line was never
+    /// encrypted. Throws when the line is encrypted and unreadable, so a row
+    /// this machine cannot decrypt is never mistaken for plaintext json.
+    func open(_ line: String) throws -> Data?
 }
 
 nonisolated protocol ActivityStorageKeyProviding: Sendable {
@@ -21,20 +25,18 @@ nonisolated protocol ActivityStorageKeyProviding: Sendable {
 }
 
 nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
-    private static let encryptedPrefix = "pathlight:v1:aes-gcm:"
-
     private let preferencesStore: (any ActivityStoragePreferencesPersisting)?
     private let cryptor: any ActivityStorageLineCrypting
 
     init(
         preferencesStore: (any ActivityStoragePreferencesPersisting)? = nil,
-        cryptor: any ActivityStorageLineCrypting = AESGCMActivityStorageCryptor.live
+        cryptor: any ActivityStorageLineCrypting = PlaintextActivityStorageCryptor()
     ) {
         self.preferencesStore = preferencesStore
         self.cryptor = cryptor
     }
 
-    static let plaintext = ActivityStorageLineCodec(cryptor: PassthroughActivityStorageCryptor())
+    static let plaintext = ActivityStorageLineCodec()
 
     /// Loads the storage key without writing anything. Called at launch so a
     /// keychain prompt appears while the user is in the app, instead of silently
@@ -43,7 +45,7 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
         guard preferencesStore?.loadPreferences().encryptNewData == true else {
             return
         }
-        _ = try cryptor.encrypt(Data())
+        _ = try cryptor.seal(Data())
     }
 
     func encode(_ payload: Data) throws -> String {
@@ -51,46 +53,12 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
             return String(decoding: payload, as: UTF8.self)
         }
 
-        let encryptedPayload = try cryptor.encrypt(payload)
-        return Self.encryptedPrefix + encryptedPayload.base64EncodedString()
+        return try cryptor.seal(payload)
     }
 
     func decode(_ line: some StringProtocol) throws -> Data {
         let text = String(line)
-        guard text.hasPrefix(Self.encryptedPrefix) else {
-            return Data(text.utf8)
-        }
-
-        let encodedPayload = text.dropFirst(Self.encryptedPrefix.count)
-        guard let encryptedPayload = Data(base64Encoded: String(encodedPayload)) else {
-            throw ActivityStorageLineCodecError.invalidEncryptedLine
-        }
-        return try cryptor.decrypt(encryptedPayload)
-    }
-}
-
-nonisolated struct AESGCMActivityStorageCryptor: ActivityStorageLineCrypting {
-    let keyProvider: any ActivityStorageKeyProviding
-
-    static let live = AESGCMActivityStorageCryptor(
-        keyProvider: CachingActivityStorageKeyProvider(
-            wrapping: KeychainActivityStorageKeyProvider.live
-        )
-    )
-
-    func encrypt(_ plaintext: Data) throws -> Data {
-        let key = SymmetricKey(data: try keyProvider.loadOrCreateKey())
-        let sealedBox = try AES.GCM.seal(plaintext, using: key)
-        guard let combined = sealedBox.combined else {
-            throw ActivityStorageLineCodecError.missingCombinedRepresentation
-        }
-        return combined
-    }
-
-    func decrypt(_ ciphertext: Data) throws -> Data {
-        let key = SymmetricKey(data: try keyProvider.loadOrCreateKey())
-        let sealedBox = try AES.GCM.SealedBox(combined: ciphertext)
-        return try AES.GCM.open(sealedBox, using: key)
+        return try cryptor.open(text) ?? Data(text.utf8)
     }
 }
 
@@ -255,12 +223,14 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
     }
 }
 
-nonisolated private struct PassthroughActivityStorageCryptor: ActivityStorageLineCrypting {
-    func encrypt(_ plaintext: Data) throws -> Data {
-        plaintext
+/// What a host without encryption does: write the line as it is, and treat an
+/// encrypted row as one it cannot read rather than pretending to decode it.
+nonisolated struct PlaintextActivityStorageCryptor: ActivityStorageLineCrypting {
+    func seal(_ payload: Data) throws -> String {
+        String(decoding: payload, as: UTF8.self)
     }
 
-    func decrypt(_ ciphertext: Data) throws -> Data {
-        ciphertext
+    func open(_ line: String) throws -> Data? {
+        nil
     }
 }
