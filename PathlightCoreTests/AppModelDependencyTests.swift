@@ -13,6 +13,7 @@ final class AppModelDependencyTests: XCTestCase {
         let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: root)
         sizeIndex.recordKnownSize(4_096, for: file, scope: scope)
         let dependencies = AppDependencies.live(
+            activityMonitor: InertDiskActivityMonitor(),
             activityAttribution: stubActivityAttribution,
             // Nothing is excluded and nothing is an anomaly here: both live
             // in the Rust core, which this package does not link.
@@ -99,6 +100,7 @@ final class AppModelDependencyTests: XCTestCase {
     ) -> AppDependencies {
         AppDependencies(
             systemActions: .inert,
+            activityMonitor: InertDiskActivityMonitor(),
             activityAttribution: stubActivityAttribution,
             activityEventStore: nil,
             longTermWatchTargets: longTermWatchTargets ?? LongTermWatchTargetStore(

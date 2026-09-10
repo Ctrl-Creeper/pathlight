@@ -47,7 +47,7 @@ let package = Package(
                 "Services/AppDependencies.swift",
                 "Services/AppSystemActions.swift",
                 "Services/CommandLineToolInstaller.swift",
-                "Services/DiskActivityMonitor.swift",
+                "Services/DiskActivityMonitoring.swift",
                 "Services/DiskActivityModels.swift",
                 "Services/FileSizeFormatter.swift",
                 "Services/LaunchAtLoginService.swift",

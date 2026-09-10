@@ -36,7 +36,7 @@ struct AppDependencies {
 
     init(
         systemActions: AppSystemActions,
-        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory = { _, _ in nil },
         activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
@@ -72,12 +72,12 @@ struct AppDependencies {
         self.activityStorageKeyWarmUp = activityStorageKeyWarmUp
     }
 
-    /// `activityMonitor` defaults to the in-process FSEvents wrapper; the app
-    /// passes the Rust-backed monitor instead, and has to pass attribution,
-    /// exclusion and anomaly detection because this package holds no
-    /// implementation of any of them.
+    /// Every platform-specific piece is a parameter: this package holds no
+    /// monitor, no attribution, no exclusion and no anomaly policy, because
+    /// all four live in the Rust core that the app links and `swift test`
+    /// does not.
     static func live(
-        activityMonitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory,
         activityAnomalies: @escaping ActivityAnomalyDetecting,

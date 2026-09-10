@@ -118,3 +118,15 @@ let stubActivityAttribution: ActivityAttributionFactory = { _, sizes in
         }
     }
 }
+
+/// A monitor that never reports anything, for the tests that need dependencies
+/// but no filesystem. The real ones live in the Rust core.
+nonisolated struct InertDiskActivityMonitor: DiskActivityMonitoring {
+    func events(
+        for root: URL,
+        since eventID: UInt64?,
+        latency: TimeInterval
+    ) -> AsyncStream<DiskActivityStreamEvent> {
+        AsyncStream { $0.finish() }
+    }
+}

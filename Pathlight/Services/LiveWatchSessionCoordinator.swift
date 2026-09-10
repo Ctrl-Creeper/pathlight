@@ -11,7 +11,7 @@ struct LiveWatchSessionCoordinator: Sendable {
     nonisolated static let processHintValidity: TimeInterval = 30
 
     init(
-        monitor: any DiskActivityMonitoring = FSEventsDiskActivityMonitor(),
+        monitor: any DiskActivityMonitoring,
         attribution: @escaping ActivityAttributionFactory,
         processHints: (any ProcessHinting)? = nil
     ) {
