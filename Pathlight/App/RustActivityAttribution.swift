@@ -16,7 +16,9 @@ nonisolated final class RustActivityAttribution: ActivityAttributing, @unchecked
             options: AggregationOptions(
                 minimumRecordedByteDelta: options.minimumRecordedByteDelta,
                 aggregationWindowSecs: UInt64(max(options.aggregationWindow, 0)),
-                recordsFileNames: options.longTermRecordsFileNames
+                recordsFileNames: options.longTermRecordsFileNames,
+                minFileBytes: options.minimumFileBytes,
+                maxFileBytes: options.maximumFileBytes
             ),
             sizes: RustSizeLookup(providers: sizeProviders)
         )

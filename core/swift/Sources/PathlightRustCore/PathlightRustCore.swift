@@ -1917,6 +1917,13 @@ public struct AggregationOptions: Equatable, Hashable {
      * When true, individual file rows are kept (no aggregation).
      */
     public var recordsFileNames: Bool
+    /**
+     * Smallest and largest file this watch records at all, in bytes; `None`
+     * is no bound. Judged on the file's own size, not on how much of it
+     * changed, which is what `minimum_recorded_byte_delta` does.
+     */
+    public var minFileBytes: Int64?
+    public var maxFileBytes: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1929,10 +1936,17 @@ public struct AggregationOptions: Equatable, Hashable {
          */aggregationWindowSecs: UInt64, 
         /**
          * When true, individual file rows are kept (no aggregation).
-         */recordsFileNames: Bool) {
+         */recordsFileNames: Bool, 
+        /**
+         * Smallest and largest file this watch records at all, in bytes; `None`
+         * is no bound. Judged on the file's own size, not on how much of it
+         * changed, which is what `minimum_recorded_byte_delta` does.
+         */minFileBytes: Int64?, maxFileBytes: Int64?) {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindowSecs = aggregationWindowSecs
         self.recordsFileNames = recordsFileNames
+        self.minFileBytes = minFileBytes
+        self.maxFileBytes = maxFileBytes
     }
 
     
@@ -1953,7 +1967,9 @@ public struct FfiConverterTypeAggregationOptions: FfiConverterRustBuffer {
             try AggregationOptions(
                 minimumRecordedByteDelta: FfiConverterInt64.read(from: &buf), 
                 aggregationWindowSecs: FfiConverterUInt64.read(from: &buf), 
-                recordsFileNames: FfiConverterBool.read(from: &buf)
+                recordsFileNames: FfiConverterBool.read(from: &buf), 
+                minFileBytes: FfiConverterOptionInt64.read(from: &buf), 
+                maxFileBytes: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -1961,6 +1977,8 @@ public struct FfiConverterTypeAggregationOptions: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.minimumRecordedByteDelta, into: &buf)
         FfiConverterUInt64.write(value.aggregationWindowSecs, into: &buf)
         FfiConverterBool.write(value.recordsFileNames, into: &buf)
+        FfiConverterOptionInt64.write(value.minFileBytes, into: &buf)
+        FfiConverterOptionInt64.write(value.maxFileBytes, into: &buf)
     }
 }
 

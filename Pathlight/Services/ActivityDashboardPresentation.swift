@@ -30,6 +30,8 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let isEnabled: Bool
         let growthAlertThresholdBytes: Int64?
         let exclusionPatterns: [String]
+        let minimumFileBytes: Int64?
+        let maximumFileBytes: Int64?
         let rootPath: URL
     }
 
@@ -233,15 +235,33 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             statusText: statusText(for: status),
             changeText: history.map { "\(signedSize($0.totalNetByteDelta)) net" } ?? "No history",
             eventText: history.map { eventCountText($0.eventCount) } ?? "0 events",
-            thresholdText: "Records changes over \(PathlightFormatters.size(target.options.minimumRecordedByteDelta))",
+            thresholdText: thresholdText(for: target.options),
             lastActivityText: lastActivityText(for: status, history: history),
             hasHistoryGap: status.state == .historyGap,
             unobservableLinkNote: unobservableLinkNote(for: target.baseline),
             isEnabled: target.isEnabled,
             growthAlertThresholdBytes: target.options.growthAlertThresholdBytes,
             exclusionPatterns: target.options.exclusionPatterns,
+            minimumFileBytes: target.options.minimumFileBytes,
+            maximumFileBytes: target.options.maximumFileBytes,
             rootPath: target.rootPath
         )
+    }
+
+    /// What this watch records, in the two ways it can be limited: how much of
+    /// a file has to change, and how big the file itself may be.
+    static func thresholdText(for options: LongTermWatchTargetOptions) -> String {
+        let changes = "Records changes over \(PathlightFormatters.size(options.minimumRecordedByteDelta))"
+        switch (options.minimumFileBytes, options.maximumFileBytes) {
+        case (nil, nil):
+            return changes
+        case let (minimum?, maximum?):
+            return "\(changes) · files \(PathlightFormatters.size(minimum))–\(PathlightFormatters.size(maximum))"
+        case let (minimum?, nil):
+            return "\(changes) · files over \(PathlightFormatters.size(minimum))"
+        case let (nil, maximum?):
+            return "\(changes) · files under \(PathlightFormatters.size(maximum))"
+        }
     }
 
     static func displayName(for url: URL) -> String {

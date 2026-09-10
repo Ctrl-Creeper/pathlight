@@ -88,6 +88,11 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
     let minimumRecordedByteDelta: Int64
     let aggregationWindow: TimeInterval
     let longTermRecordsFileNames: Bool
+    /// Smallest and largest file this watch records at all; nil is no bound.
+    /// The file's own size, not how much of it changed — a file outside these
+    /// bounds is not watched, however much of it is rewritten.
+    var minimumFileBytes: Int64?
+    var maximumFileBytes: Int64?
 
     /// Names on by default: the byte threshold already keeps the journal small,
     /// and "which file grew" is the answer the dashboard exists to give. Turning

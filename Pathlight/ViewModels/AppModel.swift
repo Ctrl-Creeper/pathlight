@@ -863,25 +863,53 @@ final class AppModel: ObservableObject {
     }
 
     func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
+        editOptions(rootPath: rootPath) { options in
+            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+        }
+    }
+
+    /// Everything that decides what this watch records, applied in one edit so
+    /// changing two of them restarts the stream once.
+    ///
+    /// A byte bound of nil is no bound. Zero would read as one — "at least 0
+    /// bytes" excludes nothing but claims to be a limit — so the editor sends
+    /// nil for an empty field.
+    func setRecordingFilters(
+        patterns: [String],
+        minimumFileBytes: Int64?,
+        maximumFileBytes: Int64?,
+        rootPath: URL
+    ) {
+        editOptions(rootPath: rootPath) { options in
+            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.minimumFileBytes = minimumFileBytes
+            options.maximumFileBytes = maximumFileBytes
+        }
+    }
+
+    /// One edit of a watch's stored options. The running stream is restarted so
+    /// the change takes effect now instead of on the next reconnect; an edit
+    /// that changes nothing restarts nothing.
+    private func editOptions(
+        rootPath: URL,
+        _ edit: (inout LongTermWatchTargetOptions) -> Void
+    ) {
         let targetID = rootPath.standardizedFileURL.path
         guard let target = longTermWatchTargets.first(where: { $0.id == targetID }) else {
             return
         }
 
         var options = target.options
-        let normalizedPatterns = ActivityExclusionPatterns.normalized(patterns)
-        guard normalizedPatterns != options.exclusionPatterns else {
+        edit(&options)
+        guard options != target.options else {
             return
         }
 
-        options.exclusionPatterns = normalizedPatterns
         longTermWatchTargets = dependencies.longTermWatchTargets.updateOptions(
             options,
             forRootPath: target.rootPath,
             currentTargets: longTermWatchTargets
         )
-        // Restart the watch so the running stream picks up the new filter now
-        // instead of on the next reconnect.
         if let updatedTarget = longTermWatchTargets.first(where: { $0.id == targetID }),
            updatedTarget.isEnabled {
             startLongTermWatch(for: updatedTarget)

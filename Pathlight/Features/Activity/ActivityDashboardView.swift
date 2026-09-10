@@ -9,7 +9,7 @@ struct ActivityDashboardActions {
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
-    let setExclusionPatterns: ([String], URL) -> Void
+    let setRecordingFilters: ([String], Int64?, Int64?, URL) -> Void
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
     let addFolder: () -> Void
@@ -212,8 +212,8 @@ struct ActivityDashboardView: View {
                         onSetGrowthAlertThreshold: {
                             actions.setGrowthAlertThreshold($0, row.rootPath)
                         },
-                        onSetExclusionPatterns: {
-                            actions.setExclusionPatterns($0, row.rootPath)
+                        onSetRecordingFilters: { patterns, minimumBytes, maximumBytes in
+                            actions.setRecordingFilters(patterns, minimumBytes, maximumBytes, row.rootPath)
                         }
                     )
                     .transition(.opacity)
@@ -293,7 +293,7 @@ private struct ActivityDashboardTargetRow: View {
     let onRemove: () -> Void
     let onClearHistoryGap: () -> Void
     let onSetGrowthAlertThreshold: (Int64?) -> Void
-    let onSetExclusionPatterns: ([String]) -> Void
+    let onSetRecordingFilters: ([String], Int64?, Int64?) -> Void
 
     @State private var showsExclusionEditor = false
 
@@ -396,19 +396,23 @@ private struct ActivityDashboardTargetRow: View {
                     showsExclusionEditor = true
                 } label: {
                     Label(
-                        "Ignored Patterns",
+                        "What This Watch Records",
                         systemImage: row.exclusionPatterns.isEmpty
+                            && row.minimumFileBytes == nil
+                            && row.maximumFileBytes == nil
                             ? "line.3.horizontal.decrease.circle"
                             : "line.3.horizontal.decrease.circle.fill"
                     )
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
-                .help("Edit ignored patterns")
+                .help("Edit which files this watch records")
                 .popover(isPresented: $showsExclusionEditor, arrowEdge: .bottom) {
-                    ActivityExclusionPatternEditor(
+                    ActivityRecordingFilterEditor(
                         patterns: row.exclusionPatterns,
-                        onApply: onSetExclusionPatterns
+                        minimumFileBytes: row.minimumFileBytes,
+                        maximumFileBytes: row.maximumFileBytes,
+                        onApply: onSetRecordingFilters
                     )
                 }
 
@@ -512,21 +516,65 @@ private struct ActivityLaunchAtLoginNudge: View {
     }
 }
 
-private struct ActivityExclusionPatternEditor: View {
-    let onApply: ([String]) -> Void
+private struct ActivityRecordingFilterEditor: View {
+    let onApply: ([String], Int64?, Int64?) -> Void
 
     @State private var text: String
+    @State private var minimumText: String
+    @State private var maximumText: String
     @Environment(\.dismiss) private var dismiss
 
-    init(patterns: [String], onApply: @escaping ([String]) -> Void) {
+    /// Bounds are typed and shown in megabytes: bytes are unreadable at the
+    /// sizes anybody sets a bound at, and this is the unit the rest of the
+    /// dashboard counts in.
+    private static let bytesPerUnit: Double = 1_000_000
+
+    init(
+        patterns: [String],
+        minimumFileBytes: Int64?,
+        maximumFileBytes: Int64?,
+        onApply: @escaping ([String], Int64?, Int64?) -> Void
+    ) {
         self.onApply = onApply
         _text = State(initialValue: patterns.joined(separator: "\n"))
+        _minimumText = State(initialValue: Self.unitText(for: minimumFileBytes))
+        _maximumText = State(initialValue: Self.unitText(for: maximumFileBytes))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ignored Patterns")
+            Text("What This Watch Records")
                 .font(.headline)
+
+            Text("File size, in MB. Leave a field empty for no limit. A file whose size cannot be read — a deletion, usually — is always recorded.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                LabeledContent("At least") {
+                    TextField("Any", text: $minimumText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                }
+                LabeledContent("At most") {
+                    TextField("Any", text: $maximumText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            .labeledContentStyle(.automatic)
+
+            if let note = boundsNote {
+                Label(note, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
 
             Text("One gitignore-style pattern per line. Matching files and folders are left out of monitoring. Leave empty to record everything.")
                 .font(.caption)
@@ -535,7 +583,7 @@ private struct ActivityExclusionPatternEditor: View {
 
             TextEditor(text: $text)
                 .font(.body.monospaced())
-                .frame(height: 180)
+                .frame(height: 140)
                 .overlay {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .strokeBorder(.quaternary)
@@ -544,19 +592,58 @@ private struct ActivityExclusionPatternEditor: View {
             HStack {
                 Button("Restore Defaults") {
                     text = ActivityExclusionPatterns.defaults.joined(separator: "\n")
+                    minimumText = ""
+                    maximumText = ""
                 }
 
                 Spacer()
 
                 Button("Apply") {
-                    onApply(patternLines)
+                    onApply(patternLines, bytes(from: minimumText), bytes(from: maximumText))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(boundsNote != nil)
             }
         }
         .padding(16)
         .frame(width: 340)
+    }
+
+    /// Why Apply is refused, or nil when the bounds are usable. A field that
+    /// cannot be read must not be applied as "no limit": the user would be
+    /// told the watch is bounded while it records everything.
+    private var boundsNote: String? {
+        if !isReadable(minimumText) || !isReadable(maximumText) {
+            return "Sizes are in MB, digits only."
+        }
+        if let minimum = bytes(from: minimumText),
+           let maximum = bytes(from: maximumText),
+           minimum > maximum {
+            return "The smallest size is above the largest, which records nothing."
+        }
+        return nil
+    }
+
+    private func isReadable(_ field: String) -> Bool {
+        let trimmed = field.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || (Double(trimmed).map { $0 >= 0 } == true)
+    }
+
+    private func bytes(from field: String) -> Int64? {
+        let trimmed = field.trimmingCharacters(in: .whitespaces)
+        guard let value = Double(trimmed), value > 0 else {
+            return nil
+        }
+        return Int64(value * Self.bytesPerUnit)
+    }
+
+    private static func unitText(for bytes: Int64?) -> String {
+        guard let bytes else {
+            return ""
+        }
+        let value = Double(bytes) / bytesPerUnit
+        return value == value.rounded() ? String(Int64(value)) : String(value)
     }
 
     private var patternLines: [String] {

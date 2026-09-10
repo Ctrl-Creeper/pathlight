@@ -9,19 +9,26 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     /// Gitignore-style patterns filtered out of this target's event stream.
     /// Empty means record everything.
     var exclusionPatterns: [String]
+    /// Bounds on the size of the files this watch records; nil is no bound.
+    var minimumFileBytes: Int64?
+    var maximumFileBytes: Int64?
 
     init(
         minimumRecordedByteDelta: Int64,
         aggregationWindow: TimeInterval,
         recordsFileNames: Bool,
         growthAlertThresholdBytes: Int64? = nil,
-        exclusionPatterns: [String] = ActivityExclusionPatterns.defaults
+        exclusionPatterns: [String] = ActivityExclusionPatterns.defaults,
+        minimumFileBytes: Int64? = nil,
+        maximumFileBytes: Int64? = nil
     ) {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindow = aggregationWindow
         self.recordsFileNames = recordsFileNames
         self.growthAlertThresholdBytes = growthAlertThresholdBytes
         self.exclusionPatterns = exclusionPatterns
+        self.minimumFileBytes = minimumFileBytes
+        self.maximumFileBytes = maximumFileBytes
     }
 
     init(from decoder: any Decoder) throws {
@@ -33,6 +40,10 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         // Targets persisted before exclusions existed adopt the defaults.
         exclusionPatterns = try container.decodeIfPresent([String].self, forKey: .exclusionPatterns)
             ?? ActivityExclusionPatterns.defaults
+        // Absent in targets persisted before size bounds existed, which is also
+        // how "no bound" is stored: unbounded is the default a watch keeps.
+        minimumFileBytes = try container.decodeIfPresent(Int64.self, forKey: .minimumFileBytes)
+        maximumFileBytes = try container.decodeIfPresent(Int64.self, forKey: .maximumFileBytes)
     }
 
     static let `default` = LongTermWatchTargetOptions(
@@ -45,7 +56,9 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         DiskActivityAggregationOptions(
             minimumRecordedByteDelta: minimumRecordedByteDelta,
             aggregationWindow: aggregationWindow,
-            longTermRecordsFileNames: recordsFileNames
+            longTermRecordsFileNames: recordsFileNames,
+            minimumFileBytes: minimumFileBytes,
+            maximumFileBytes: maximumFileBytes
         )
     }
 }

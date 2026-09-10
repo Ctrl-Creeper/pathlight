@@ -207,6 +207,8 @@ fn aggregated_small_writes_are_judged_as_one_change() {
             minimum_recorded_byte_delta: 1_000,
             aggregation_window_secs: 300,
             records_file_names: false,
+            min_file_bytes: None,
+            max_file_bytes: None,
         },
         &size,
         &none,
@@ -252,6 +254,8 @@ fn a_lone_change_loses_its_file_name_too() {
             minimum_recorded_byte_delta: 0,
             aggregation_window_secs: 300,
             records_file_names: false,
+            min_file_bytes: None,
+            max_file_bytes: None,
         },
         &size,
         &none,
@@ -294,4 +298,99 @@ fn the_ffi_attributor_measures_through_the_hosts_lookups() {
     let deltas: Vec<Option<i64>> = events.iter().map(|event| event.byte_delta).collect();
     assert_eq!(deltas, [Some(2_000), Some(-2_048)]);
     assert_eq!(events[0].path, format!("{ROOT}/report.pdf"));
+}
+
+/// The bound is on the file, not on how much of it changed: a 4 KiB scratch
+/// file is not recorded by a watch that was told to look at big files, however
+/// much of it was rewritten.
+#[test]
+fn a_watch_records_only_files_inside_its_size_bounds() {
+    let sizes = |path: &str| match path {
+        _ if path.ends_with("tiny.txt") => Some(4_096),
+        _ if path.ends_with("big.iso") => Some(8_000_000_000),
+        _ => Some(50_000_000),
+    };
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 0,
+            aggregation_window_secs: 0,
+            records_file_names: true,
+            min_file_bytes: Some(1_000_000),
+            max_file_bytes: Some(1_000_000_000),
+        },
+        &sizes,
+        &none,
+        &none,
+    );
+
+    let events = attributor.process(&[
+        change(ChangeKind::Modified, "tiny.txt", 1),
+        change(ChangeKind::Modified, "big.iso", 1),
+        change(ChangeKind::Modified, "movie.mp4", 1),
+    ]);
+
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.path.as_str())
+            .collect::<Vec<_>>(),
+        [format!("{ROOT}/movie.mp4")]
+    );
+}
+
+/// A file whose size cannot be read was never tested against the bounds, so it
+/// stays recorded. Deletions are the common case, and a deletion this app drops
+/// silently is worse than a row the user did not ask for.
+#[test]
+fn a_file_of_unknown_size_is_recorded_whatever_the_bounds_say() {
+    let unknown = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 0,
+            aggregation_window_secs: 0,
+            records_file_names: true,
+            min_file_bytes: Some(1_000_000_000),
+            max_file_bytes: Some(2_000_000_000),
+        },
+        &unknown,
+        &unknown,
+        &unknown,
+    );
+
+    let events = attributor.process(&[change(ChangeKind::Deleted, "gone.bin", 1)]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].byte_delta, None);
+}
+
+/// The bounds are asked about the file that was deleted, using the size the
+/// watch last knew, so a small file's removal is filtered by a big-file watch
+/// while a big one's removal still lands.
+#[test]
+fn a_removal_is_judged_by_the_size_the_watch_last_knew() {
+    let gone = |_: &str| None;
+    let small = |_: &str| Some(4_096);
+    let large = |_: &str| Some(4_000_000_000);
+    let options = AggregationOptions {
+        minimum_recorded_byte_delta: 0,
+        aggregation_window_secs: 0,
+        records_file_names: true,
+        min_file_bytes: Some(1_000_000),
+        max_file_bytes: None,
+    };
+
+    let filtered = Attributor::new(options, &gone, &small, &gone).process(&[change(
+        ChangeKind::Deleted,
+        "scratch.tmp",
+        1,
+    )]);
+    let kept = Attributor::new(options, &gone, &large, &gone).process(&[change(
+        ChangeKind::Deleted,
+        "backup.dmg",
+        1,
+    )]);
+
+    assert!(filtered.is_empty());
+    assert_eq!(kept.len(), 1);
 }

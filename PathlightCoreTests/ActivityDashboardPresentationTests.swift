@@ -57,6 +57,30 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.timelineRows.map(\.title) == ["Created movie.mov", "Deleted missing.zip"])
     }
 
+    @Test("names both limits on what a watch records")
+    func namesBothLimitsOnWhatAWatchRecords() {
+        let options = LongTermWatchTargetOptions(
+            minimumRecordedByteDelta: 1_024 * 1_024,
+            aggregationWindow: 300,
+            recordsFileNames: true
+        )
+        var bounded = options
+        bounded.minimumFileBytes = 1_000_000
+        bounded.maximumFileBytes = 1_000_000_000
+        var floorOnly = options
+        floorOnly.minimumFileBytes = 1_000_000
+        var ceilingOnly = options
+        ceilingOnly.maximumFileBytes = 1_000_000_000
+
+        #expect(ActivityDashboardPresentation.thresholdText(for: options) == "Records changes over 1 MB")
+        #expect(ActivityDashboardPresentation.thresholdText(for: bounded)
+            == "Records changes over 1 MB · files 1 MB–1 GB")
+        #expect(ActivityDashboardPresentation.thresholdText(for: floorOnly)
+            == "Records changes over 1 MB · files over 1 MB")
+        #expect(ActivityDashboardPresentation.thresholdText(for: ceilingOnly)
+            == "Records changes over 1 MB · files under 1 GB")
+    }
+
     @Test("shows runtime watch state and last activity time")
     func showsRuntimeWatchStateAndLastActivityTime() {
         let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

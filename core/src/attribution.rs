@@ -17,6 +17,11 @@ pub struct AggregationOptions {
     pub aggregation_window_secs: u64,
     /// When true, individual file rows are kept (no aggregation).
     pub records_file_names: bool,
+    /// Smallest and largest file this watch records at all, in bytes; `None`
+    /// is no bound. Judged on the file's own size, not on how much of it
+    /// changed, which is what `minimum_recorded_byte_delta` does.
+    pub min_file_bytes: Option<i64>,
+    pub max_file_bytes: Option<i64>,
 }
 
 impl AggregationOptions {
@@ -25,6 +30,8 @@ impl AggregationOptions {
         minimum_recorded_byte_delta: 10 * 1024 * 1024,
         aggregation_window_secs: 5 * 60,
         records_file_names: false,
+        min_file_bytes: None,
+        max_file_bytes: None,
     };
 
     /// Live monitor default: everything, individually.
@@ -32,7 +39,32 @@ impl AggregationOptions {
         minimum_recorded_byte_delta: 0,
         aggregation_window_secs: 0,
         records_file_names: true,
+        min_file_bytes: None,
+        max_file_bytes: None,
     };
+
+    /// Whether a file of this size is watched at all.
+    ///
+    /// A size that could not be read is watched. A change whose file cannot be
+    /// measured — a deletion, usually — must not vanish because of a bound it
+    /// was never tested against; under-reporting a deletion is the one failure
+    /// this app cannot afford.
+    pub fn watches_file(&self, size: Option<i64>) -> bool {
+        let Some(size) = size else {
+            return true;
+        };
+        if let Some(min) = self.min_file_bytes {
+            if size < min {
+                return false;
+            }
+        }
+        if let Some(max) = self.max_file_bytes {
+            if size > max {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Allocated on-disk size; directories count as 0 so readable folders are not
@@ -192,25 +224,33 @@ impl<'a> Attributor<'a> {
         };
         let sized = |kind, previous_path: Option<String>| {
             let known = (self.known_size)(&change.path);
-            (self.size)(&change.path).map(|size| {
-                let (byte_delta, confidence) = match (kind, known) {
-                    (EventKind::Modified, None) => (None, Confidence::Unknown),
-                    (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
-                    (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
-                    (_, None) => (None, Confidence::Unknown),
-                };
-                base(kind, byte_delta, confidence, previous_path)
-            })
+            // The bound is on the file, so it is asked before the event is
+            // built and before aggregation: a file this watch does not record
+            // contributes nothing, not even to a directory row.
+            (self.size)(&change.path)
+                .filter(|size| self.options.watches_file(Some(*size)))
+                .map(|size| {
+                    let (byte_delta, confidence) = match (kind, known) {
+                        (EventKind::Modified, None) => (None, Confidence::Unknown),
+                        (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
+                        (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
+                        (_, None) => (None, Confidence::Unknown),
+                    };
+                    base(kind, byte_delta, confidence, previous_path)
+                })
         };
         let vanished = |kind, previous_path: Option<String>| match (self.prior_size)(&change.path) {
-            Some(prior) => base(kind, Some(-prior), Confidence::Estimated, previous_path),
-            None => base(kind, None, Confidence::Unknown, previous_path),
+            Some(prior) => self
+                .options
+                .watches_file(Some(prior))
+                .then(|| base(kind, Some(-prior), Confidence::Estimated, previous_path)),
+            None => Some(base(kind, None, Confidence::Unknown, previous_path)),
         };
 
         match &change.kind {
             ChangeKind::Created => sized(EventKind::Created, None),
             ChangeKind::Modified => sized(EventKind::Modified, None),
-            ChangeKind::Deleted => Some(vanished(EventKind::Deleted, None)),
+            ChangeKind::Deleted => vanished(EventKind::Deleted, None),
             // Consume the departed path's size first so a move inside the root nets
             // to its real growth (usually zero). A rename whose destination is gone
             // is the departure side (e.g. into the Trash); attribute it like a deletion.
@@ -219,7 +259,9 @@ impl<'a> Attributor<'a> {
                 let within_root = previous_path
                     .as_deref()
                     .is_some_and(|p| crate::paths::is_inside(&change.root_path, p));
-                match (self.size)(&change.path) {
+                match (self.size)(&change.path)
+                    .filter(|size| self.options.watches_file(Some(*size)))
+                {
                     Some(size) => {
                         let delta = if within_root {
                             size - previous_known.unwrap_or(0)
@@ -238,7 +280,7 @@ impl<'a> Attributor<'a> {
                             previous_path.clone(),
                         ))
                     }
-                    None => Some(vanished(EventKind::Moved, previous_path.clone())),
+                    None => vanished(EventKind::Moved, previous_path.clone()),
                 }
             }
         }
