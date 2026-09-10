@@ -201,6 +201,21 @@ fn the_bare_command_says_what_the_commands_are() {
     }
 }
 
+/// A bug report that cannot name the build it came from is a bug nobody can
+/// reproduce, so every host prints its own version and the core's.
+#[test]
+fn the_command_says_which_build_it_is() {
+    let home = tempfile::tempdir().unwrap();
+    for flag in ["version", "--version", "-V"] {
+        let shown = text(&run(home.path(), &[flag]));
+        assert!(shown.starts_with("pathlight-monitor "), "{shown}");
+        assert!(shown.contains("core "), "{shown}");
+        // The watcher's promises travel with the version for the same reason:
+        // "it missed something" is only readable next to what was promised.
+        assert!(shown.contains("this watcher "), "{shown}");
+    }
+}
+
 /// Where this install keeps its records, as the command itself reports it: the
 /// test writes rows the way the windows do, into the file both hosts share.
 fn records_dir(home: &Path) -> String {

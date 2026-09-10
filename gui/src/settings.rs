@@ -209,12 +209,12 @@ impl Draft {
             .small()
             .color(ui.visuals().weak_text_color()),
         );
-        // What this platform's watcher promises: not a setting, and the thing
-        // that says how much the rows can be trusted.
+        // Which build this is and what its watcher promises: not settings,
+        // and between them the two things a bug report cannot be read without.
         ui.label(
-            egui::RichText::new(format!(
-                "This watcher {}.",
-                pathlight_core::text::guarantees(&pathlight_core::monitor::watcher_capabilities())
+            egui::RichText::new(pathlight_core::text::version(
+                "Pathlight",
+                env!("CARGO_PKG_VERSION"),
             ))
             .small()
             .color(ui.visuals().weak_text_color()),

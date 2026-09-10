@@ -303,6 +303,7 @@ Usage: pathlight-monitor <command> [arguments]
                           two interval snapshots. JOURNAL must be outside
                           FOLDER, and registration and scans add to the
                           duration.
+  version                 Which build this is, and what its watcher promises.
   install-cli             Put this command in your own home, on your PATH.
   uninstall [--yes]       List Pathlight's own storage, and with --yes remove it.
 
@@ -879,6 +880,13 @@ fn run() -> io::Result<()> {
     {
         "" | "-h" | "--help" | "help" => {
             print!("{HELP}");
+            return Ok(());
+        }
+        "-V" | "--version" | "version" => {
+            println!(
+                "{}",
+                pathlight_core::text::version("pathlight-monitor", env!("CARGO_PKG_VERSION"))
+            );
             return Ok(());
         }
         "uninstall" => return uninstall(&args[1..]),

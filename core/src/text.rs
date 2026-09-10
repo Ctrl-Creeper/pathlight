@@ -110,6 +110,18 @@ pub fn guarantees(capabilities: &crate::monitor::Capabilities) -> String {
     }
 }
 
+/// Which build somebody is running, in the one form a bug report needs: the
+/// host's own version and the core it linked. The two can differ — `gui/` and
+/// the app ship separately from the library — and a report that names only one
+/// of them cannot be reproduced.
+pub fn version(host: &str, host_version: &str) -> String {
+    format!(
+        "{host} {host_version} · core {} · this watcher {}",
+        crate::core_version(),
+        guarantees(&crate::monitor::watcher_capabilities())
+    )
+}
+
 /// A finding's headline, naming the folder it is about.
 pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     let name = leaf(root);

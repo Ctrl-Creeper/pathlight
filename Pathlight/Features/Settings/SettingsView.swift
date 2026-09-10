@@ -87,6 +87,7 @@ private struct GeneralSettingsPane: View {
             }
 
             Section("About") {
+                LabeledContent("Version", value: Self.appVersion)
                 LabeledContent("Monitoring core", value: "Rust \(coreVersion())")
                 LabeledContent("Watcher guarantees", value: Self.watcherGuarantees)
             }
@@ -103,6 +104,18 @@ private struct GeneralSettingsPane: View {
         } catch {
             return error.localizedDescription
         }
+    }
+
+    /// Which build this is. The other two hosts print the same pair — their
+    /// own version and the core's — because a bug report that names only one
+    /// of them cannot be reproduced.
+    private static var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+        guard let build = info?["CFBundleVersion"] as? String, build != short else {
+            return short
+        }
+        return "\(short) (\(build))"
     }
 
     /// What this platform's watcher promises. The guarantees differ per OS by
