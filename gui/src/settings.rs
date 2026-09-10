@@ -9,7 +9,9 @@ use std::path::Path;
 
 use eframe::egui;
 use pathlight_core::exclusion::DEFAULT_PATTERNS;
-use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS};
+use pathlight_core::store::{
+    Storage, BACKGROUND_LATENCY_MS, DEFAULT_AGGREGATION_WINDOW_SECS, DEFAULT_LATENCY_MS,
+};
 use pathlight_core::text::human_bytes;
 
 use crate::BYTES_PER_MB;
@@ -18,11 +20,16 @@ use crate::BYTES_PER_MB;
 /// half-typed number is not a setting and must not be saved as one.
 pub struct Draft {
     days: String,
+    aggregate_days: String,
     cap_mb: String,
     /// The smallest change worth a row, in KB — the unit the number is
     /// actually chosen in, where MB would mean "0" for every useful value.
     least_kb: String,
     power_saving: bool,
+    /// Whether a row names the file that changed or says how much changed in
+    /// the folder, and how wide a group is when it does the latter.
+    records_file_names: bool,
+    window_minutes: String,
     patterns: String,
     /// Whether Pathlight starts with the machine, and why it could not be
     /// asked. A login item is a file or a registry value, and either can fail
@@ -46,12 +53,21 @@ impl Draft {
     /// The settings as they are stored, ready to be edited.
     pub fn read(storage: &Storage) -> Self {
         let (days, cap) = storage.retention();
+        let options = storage.options();
         let item = pathlight_core::autostart::login_item(&[HIDDEN]);
         Self {
             days: days.to_string(),
+            aggregate_days: storage.aggregate_retention_days().to_string(),
             cap_mb: (cap / BYTES_PER_MB as u64).to_string(),
-            least_kb: (storage.options().minimum_recorded_byte_delta / 1000).to_string(),
+            least_kb: (options.minimum_recorded_byte_delta / 1000).to_string(),
             power_saving: storage.latency_ms() >= BACKGROUND_LATENCY_MS,
+            records_file_names: options.records_file_names,
+            window_minutes: (match options.aggregation_window_secs {
+                0 => DEFAULT_AGGREGATION_WINDOW_SECS,
+                window => window,
+            } / 60)
+                .max(1)
+                .to_string(),
             patterns: storage.patterns().join("\n"),
             at_login: item.as_ref().ok().map(|item| item.is_enabled()),
             login_error: item.err().map(|error| error.to_string()),
@@ -82,8 +98,38 @@ impl Draft {
             );
         }
 
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("What a row says").strong());
+        ui.radio_value(
+            &mut self.records_file_names,
+            true,
+            "The file that changed, by name",
+        );
+        ui.radio_value(
+            &mut self.records_file_names,
+            false,
+            "Only how much changed in the folder, grouped",
+        );
+        if !self.records_file_names {
+            number(
+                ui,
+                "Group changes within (minutes)",
+                &mut self.window_minutes,
+            );
+        }
+        ui.label(
+            egui::RichText::new(
+                "Grouping is what makes watching a whole disk affordable: one row per folder \
+                 per group instead of one per file. Naming files is what answers \"what \
+                 happened to my document\".",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+
         ui.add_space(10.0);
         number(ui, "Keep records for (days)", &mut self.days);
+        number(ui, "Keep grouped rows for (days)", &mut self.aggregate_days);
         number(ui, "Stop recording past (MB)", &mut self.cap_mb);
         number(ui, "Smallest change to record (KB)", &mut self.least_kb);
         ui.label(
@@ -170,6 +216,8 @@ impl Draft {
     /// leaves the user guessing which half.
     pub fn save(&self, storage: &Storage) -> Result<(), String> {
         let days: u32 = digits(&self.days, "Keep records for")?;
+        let aggregate_days: u32 = digits(&self.aggregate_days, "Keep grouped rows for")?;
+        let window_minutes: u64 = digits(&self.window_minutes, "Group changes within")?;
         let cap_mb: u64 = digits(&self.cap_mb, "Stop recording past")?;
         let least_kb: i64 = digits(&self.least_kb, "Smallest change to record")?;
         let cap = cap_mb
@@ -188,6 +236,12 @@ impl Draft {
         storage
             .set_retention(days, cap)
             .map_err(|error| format!("Could not save how long records are kept: {error}"))?;
+        storage
+            .set_aggregate_retention_days(aggregate_days)
+            .map_err(|error| format!("Could not save how long grouped rows are kept: {error}"))?;
+        storage
+            .set_recording(self.records_file_names, window_minutes.saturating_mul(60))
+            .map_err(|error| format!("Could not save what a row says: {error}"))?;
         storage
             .set_minimum_byte_delta(least)
             .map_err(|error| format!("Could not save the smallest change: {error}"))?;
@@ -266,6 +320,9 @@ mod tests {
         );
 
         draft.days = "30".to_owned();
+        draft.aggregate_days = "365".to_owned();
+        draft.records_file_names = false;
+        draft.window_minutes = "2".to_owned();
         draft.cap_mb = "500".to_owned();
         draft.least_kb = "4".to_owned();
         draft.power_saving = true;
@@ -273,6 +330,9 @@ mod tests {
         draft.save(&storage).unwrap();
 
         assert_eq!(storage.retention(), (30, 500 * BYTES_PER_MB as u64));
+        assert_eq!(storage.aggregate_retention_days(), 365);
+        assert!(!storage.options().records_file_names);
+        assert_eq!(storage.options().aggregation_window_secs, 120);
         assert_eq!(storage.options().minimum_recorded_byte_delta, 4000);
         assert_eq!(storage.latency_ms(), BACKGROUND_LATENCY_MS);
         assert_eq!(storage.patterns(), ["*.tmp", "node_modules/"]);
@@ -281,6 +341,8 @@ mod tests {
         let reread = Draft::read(&storage);
         assert_eq!(reread.days, "30");
         assert_eq!(reread.least_kb, "4");
+        assert_eq!(reread.aggregate_days, "365");
+        assert_eq!(reread.window_minutes, "2");
         assert!(reread.power_saving);
     }
 

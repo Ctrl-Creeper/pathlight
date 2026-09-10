@@ -23,7 +23,13 @@ const WATCHES_FILE: &str = "watches.json";
 /// (`ActivityStoragePreferences.defaults`), so one journal read on either host
 /// means the same thing.
 pub const DEFAULT_RETENTION_DAYS: u32 = 180;
+/// Grouped rows outlive the file-level rows they were made of: "this folder
+/// grew by 4 GB in March" is worth keeping long after the list of files is.
+pub const DEFAULT_AGGREGATE_RETENTION_DAYS: u32 = 730;
 pub const DEFAULT_JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+/// How wide a group is when rows are grouped rather than named, matching the
+/// macOS app's long-term default.
+pub const DEFAULT_AGGREGATION_WINDOW_SECS: u64 = 5 * 60;
 /// The interactive coalescing window: wide enough that a save is one event
 /// rather than five, short enough to feel immediate.
 pub const DEFAULT_LATENCY_MS: u64 = 250;
@@ -108,7 +114,8 @@ impl Storage {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let (days, limit) = self.retention();
-        self.journal_handle().trim(days, limit)
+        self.journal_handle()
+            .trim(days, self.aggregate_retention_days(), limit)
     }
 
     /// What was recorded for one folder, folded into buckets and totals.
@@ -220,6 +227,26 @@ impl Storage {
         )
     }
 
+    /// How long a grouped row is kept, which is longer than a file-level one:
+    /// the point of grouping is the history that outlives the detail.
+    pub fn aggregate_retention_days(&self) -> u32 {
+        self.settings()
+            .aggregate_retention_days
+            .unwrap_or(DEFAULT_AGGREGATE_RETENTION_DAYS)
+    }
+
+    pub fn set_aggregate_retention_days(&self, days: u32) -> io::Result<()> {
+        if days == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a retention of nothing would delete every grouped row as soon as it was written",
+            ));
+        }
+        let mut settings = self.settings();
+        settings.aggregate_retention_days = Some(days);
+        self.save(&settings)
+    }
+
     /// Neither is allowed to be zero: a retention of nothing is a monitor that
     /// records and then immediately forgets, which reads as a broken journal
     /// rather than as a setting.
@@ -281,12 +308,40 @@ impl Storage {
     /// the window's would.
     pub fn options(&self) -> AggregationOptions {
         let settings = self.settings();
+        let records_file_names = settings.records_file_names.unwrap_or(true);
         AggregationOptions {
             minimum_recorded_byte_delta: settings.minimum_recorded_byte_delta.unwrap_or(0).max(0),
             min_file_bytes: settings.min_file_bytes,
             max_file_bytes: settings.max_file_bytes,
-            ..AggregationOptions::SHORT_TERM
+            records_file_names,
+            // Named rows are never grouped, so a window left over from a spell
+            // of grouping cannot quietly fold them.
+            aggregation_window_secs: match records_file_names {
+                true => 0,
+                false => settings
+                    .aggregation_window_secs
+                    .unwrap_or(DEFAULT_AGGREGATION_WINDOW_SECS)
+                    .max(1),
+            },
         }
+    }
+
+    /// Whether rows name the files that changed, or say how much changed in
+    /// the folder over a window.
+    ///
+    /// Grouping is what makes watching a whole disk for a year affordable: one
+    /// row per folder per window instead of one per file. Naming files is what
+    /// makes a watch answer "what happened to my document", so this is the
+    /// user's choice, per install, exactly as it is per watch on macOS.
+    pub fn set_recording(
+        &self,
+        records_file_names: bool,
+        aggregation_window_secs: u64,
+    ) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.records_file_names = Some(records_file_names);
+        settings.aggregation_window_secs = Some(aggregation_window_secs);
+        self.save(&settings)
     }
 
     pub fn set_minimum_byte_delta(&self, bytes: i64) -> io::Result<()> {
@@ -397,11 +452,19 @@ struct Settings {
     #[serde(default)]
     retention_days: Option<u32>,
     #[serde(default)]
+    aggregate_retention_days: Option<u32>,
+    #[serde(default)]
     journal_limit_bytes: Option<u64>,
     #[serde(default)]
     minimum_recorded_byte_delta: Option<i64>,
     #[serde(default)]
     latency_ms: Option<u64>,
+    /// Absent means rows name the files that changed, which is what a person
+    /// opening a monitor for the first time is looking for.
+    #[serde(default)]
+    records_file_names: Option<bool>,
+    #[serde(default)]
+    aggregation_window_secs: Option<u64>,
     /// Absent means the shipped patterns; an empty list means the user asked
     /// for everything to be recorded.
     #[serde(default)]
@@ -411,6 +474,41 @@ struct Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Grouping is the setting that makes a whole-disk watch affordable, and
+    /// the pair has to stay coherent: named rows are never grouped, and a
+    /// grouped one has a window to group over.
+    #[test]
+    fn choosing_grouped_rows_gives_them_a_window_and_naming_files_takes_it_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+
+        // Shipped: files by name, no grouping.
+        let options = storage.options();
+        assert!(options.records_file_names);
+        assert_eq!(options.aggregation_window_secs, 0);
+
+        storage.set_recording(false, 60).unwrap();
+        let options = storage.options();
+        assert!(!options.records_file_names);
+        assert_eq!(options.aggregation_window_secs, 60);
+
+        // Back to names, and the window it was grouping over cannot quietly
+        // fold the named rows.
+        storage.set_recording(true, 60).unwrap();
+        assert_eq!(storage.options().aggregation_window_secs, 0);
+
+        // Grouped rows are kept longer than file-level ones, and neither
+        // retention may be nothing.
+        assert_eq!(
+            storage.aggregate_retention_days(),
+            DEFAULT_AGGREGATE_RETENTION_DAYS
+        );
+        storage.set_aggregate_retention_days(365).unwrap();
+        assert_eq!(storage.aggregate_retention_days(), 365);
+        assert!(storage.set_aggregate_retention_days(0).is_err());
+        assert_eq!(storage.aggregate_retention_days(), 365);
+    }
 
     /// A sibling whose name merely starts the same way is somebody else's
     /// folder, so the separator has to be part of the match. Getting this

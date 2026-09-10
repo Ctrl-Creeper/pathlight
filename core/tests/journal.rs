@@ -45,7 +45,7 @@ fn rows_past_the_retention_window_are_dropped_and_the_rest_stay_readable() {
         .append(vec![event("old.bin", 400), event("recent.bin", 3)])
         .unwrap();
 
-    assert_eq!(journal.trim(180, 0).unwrap(), 1);
+    assert_eq!(journal.trim(180, 180, 0).unwrap(), 1);
 
     let kept = journal.load(ROOT.to_owned(), 100).unwrap();
     assert_eq!(kept.len(), 1, "kept: {kept:#?}");
@@ -68,7 +68,7 @@ fn a_cap_drops_the_oldest_until_the_file_fits() {
         .unwrap();
     let one_row = lines(dir.path())[0].len() as u64 + 1;
 
-    let dropped = journal.trim(0, one_row * 3).unwrap();
+    let dropped = journal.trim(0, 0, one_row * 3).unwrap();
 
     assert_eq!(dropped, 7);
     let kept = journal.load(ROOT.to_owned(), 100).unwrap();
@@ -93,7 +93,7 @@ fn a_row_this_build_cannot_read_is_not_aged_out() {
     std::io::Write::write_all(&mut file, b"pathlight:v1:aes-gcm:ciphertext\n").unwrap();
     drop(file);
 
-    assert_eq!(journal.trim(180, 0).unwrap(), 1);
+    assert_eq!(journal.trim(180, 180, 0).unwrap(), 1);
 
     assert_eq!(lines(dir.path()), ["pathlight:v1:aes-gcm:ciphertext"]);
 }
@@ -108,7 +108,7 @@ fn nothing_to_drop_leaves_the_file_untouched() {
         .modified()
         .unwrap();
 
-    assert_eq!(journal.trim(180, 1 << 30).unwrap(), 0);
+    assert_eq!(journal.trim(180, 180, 1 << 30).unwrap(), 0);
 
     assert_eq!(
         fs::metadata(dir.path().join("activity-events.jsonl"))
@@ -121,7 +121,7 @@ fn nothing_to_drop_leaves_the_file_untouched() {
     // A journal with no file yet is the first-run state, not an error.
     let empty = tempfile::tempdir().unwrap();
     let unwritten = at(empty.path());
-    assert_eq!(unwritten.trim(180, 1 << 30).unwrap(), 0);
+    assert_eq!(unwritten.trim(180, 180, 1 << 30).unwrap(), 0);
 }
 
 /// The whole point of the setting: what lands on disk is not readable by
@@ -154,9 +154,9 @@ fn encrypted_rows_are_unreadable_on_disk_and_readable_through_the_journal() {
 
     // And retention still applies to a row it can read, which is what would
     // silently stop working if encrypted rows were only ever skipped.
-    assert_eq!(journal.trim(180, 0).unwrap(), 0);
+    assert_eq!(journal.trim(180, 180, 0).unwrap(), 0);
     journal.append(vec![event("old.bin", 400)]).unwrap();
-    assert_eq!(journal.trim(180, 0).unwrap(), 1);
+    assert_eq!(journal.trim(180, 180, 0).unwrap(), 1);
 }
 
 /// Without the key the rows stay on disk and stay unread. A journal copied
@@ -177,8 +177,34 @@ fn a_journal_without_its_key_reads_nothing_and_deletes_nothing() {
     let journal = Journal::new(path);
     assert!(journal.load(ROOT.to_owned(), 10).unwrap().is_empty());
     assert_eq!(
-        journal.trim(180, 0).unwrap(),
+        journal.trim(180, 180, 0).unwrap(),
         0,
         "a row it cannot date was aged out on a guess"
     );
+}
+
+/// The long tail: a grouped row says how much a folder changed and outlives
+/// the file-level rows it was made of, so a year-old total survives a
+/// retention that the list of files does not.
+#[test]
+fn a_grouped_row_outlives_the_file_rows_it_was_made_of() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    let mut grouped = event("", 400);
+    grouped.kind = EventKind::Aggregate;
+    grouped.path = format!("{ROOT}/");
+    journal
+        .append(vec![event("old.bin", 400), grouped, event("recent.bin", 3)])
+        .unwrap();
+
+    assert_eq!(journal.trim(180, 730, 0).unwrap(), 1);
+    let kept = journal.load(ROOT.to_owned(), 100).unwrap();
+    assert_eq!(kept.len(), 2, "kept: {kept:#?}");
+    assert!(kept.iter().any(|row| row.kind == EventKind::Aggregate));
+    assert!(kept.iter().any(|row| row.path.ends_with("recent.bin")));
+
+    // And a grouped row past its own retention goes like anything else: this
+    // is a longer window, not an exemption.
+    assert_eq!(journal.trim(180, 365, 0).unwrap(), 1);
+    assert_eq!(journal.load(ROOT.to_owned(), 100).unwrap().len(), 1);
 }

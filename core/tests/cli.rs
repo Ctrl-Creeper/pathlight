@@ -69,21 +69,28 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     let home = tempfile::tempdir().unwrap();
 
     let shown = text(&run(home.path(), &["settings"]));
-    assert!(shown.contains("retention-days     180"), "{shown}");
+    assert!(shown.contains("retention-days            180"), "{shown}");
 
     run(home.path(), &["settings", "retention-days", "30"]);
     run(home.path(), &["settings", "latency", "power-saving"]);
     run(home.path(), &["settings", "min-file-bytes", "1024"]);
     run(home.path(), &["settings", "encrypt", "on"]);
     run(home.path(), &["settings", "patterns", "*.tmp", "logs/"]);
+    run(home.path(), &["settings", "records", "grouped", "120"]);
+    run(
+        home.path(),
+        &["settings", "aggregate-retention-days", "365"],
+    );
 
     let shown = text(&run(home.path(), &["settings"]));
     for expected in [
-        "retention-days     30",
-        "latency            30000 ms",
-        "min-file-bytes     1024",
-        "encrypt            true",
-        "patterns           *.tmp logs/",
+        "retention-days            30",
+        "latency                   30000 ms",
+        "min-file-bytes            1024",
+        "encrypt                   true",
+        "patterns                  *.tmp logs/",
+        "records                   grouped 120",
+        "aggregate-retention-days  365",
     ] {
         assert!(shown.contains(expected), "{expected} missing from {shown}");
     }
@@ -97,7 +104,7 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     // zero, which would delete every row as it was written.
     let refused = run(home.path(), &["settings", "retention-days", "a while"]);
     assert!(!refused.status.success());
-    assert!(text(&run(home.path(), &["settings"])).contains("retention-days     30"));
+    assert!(text(&run(home.path(), &["settings"])).contains("retention-days            30"));
 }
 
 #[test]

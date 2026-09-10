@@ -187,7 +187,8 @@ fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
 const SETTING_VALUES: &str = "
 Change one with `settings KEY VALUE`: latency takes immediate, power-saving or a number
 of milliseconds; the file bounds take a byte count or `any`; encrypt takes on or off;
-patterns takes a list, `default` for the shipped one, or `none` to record everything.";
+records takes file-names or `grouped [SECONDS]`; patterns takes a list, `default` for the
+shipped one, or `none` to record everything.";
 
 const HELP: &str = "\
 Usage: pathlight-monitor <command> [arguments]
@@ -493,7 +494,28 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
             })?;
             storage.set_retention(days, cap)?;
         }
+        "aggregate-retention-days" => storage.set_aggregate_retention_days(number(first, key)?)?,
         "min-delta-bytes" => storage.set_minimum_byte_delta(number(first, key)?)?,
+        "records" => match first {
+            // Named rows and grouped rows are the two answers; the window only
+            // means anything for the second.
+            "file-names" => {
+                storage.set_recording(true, storage.options().aggregation_window_secs)?
+            }
+            "grouped" => storage.set_recording(
+                false,
+                match values.get(1) {
+                    Some(seconds) => number(seconds, "records grouped")?,
+                    None => pathlight_core::store::DEFAULT_AGGREGATION_WINDOW_SECS,
+                },
+            )?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "records takes file-names, or grouped [SECONDS]",
+                ))
+            }
+        },
         "min-file-bytes" | "max-file-bytes" => {
             let bound = match first {
                 "" | "none" | "any" => None,
@@ -547,29 +569,49 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     let (min, max) = storage.size_bounds();
     let bound =
         |value: Option<i64>| value.map_or_else(|| "any".to_owned(), |value| value.to_string());
-    println!("records            {}", storage.dir().display());
-    println!(
-        "journal            {}",
+    // Padded so the keys read as a column; the first two are what this install
+    // is, not settings, and are named as such.
+    let say = |key: &str, value: String| println!("{key:<26}{value}");
+    say("folder", storage.dir().to_string_lossy().into_owned());
+    say(
+        "recorded",
         match std::fs::metadata(storage.journal()).map(|meta| meta.len()) {
             Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
             Err(_) => "nothing recorded yet".to_owned(),
-        }
+        },
     );
-    println!("retention-days     {days}");
-    println!("journal-limit-mb   {}", cap / 1_000_000);
-    println!("min-delta-bytes    {}", options.minimum_recorded_byte_delta);
-    println!("min-file-bytes     {}", bound(min));
-    println!("max-file-bytes     {}", bound(max));
-    println!(
-        "latency            {} ms{}",
-        storage.latency_ms(),
-        match storage.latency_ms() >= BACKGROUND_LATENCY_MS {
-            true => "  (power-saving)",
-            false => "  (immediate)",
-        }
+    say("retention-days", days.to_string());
+    say(
+        "aggregate-retention-days",
+        storage.aggregate_retention_days().to_string(),
     );
-    println!("encrypt            {}", storage.encrypting());
-    println!("patterns           {}", storage.patterns().join(" "));
+    say("journal-limit-mb", (cap / 1_000_000).to_string());
+    say(
+        "min-delta-bytes",
+        options.minimum_recorded_byte_delta.to_string(),
+    );
+    say("min-file-bytes", bound(min));
+    say("max-file-bytes", bound(max));
+    say(
+        "records",
+        match options.records_file_names {
+            true => "file-names".to_owned(),
+            false => format!("grouped {}", options.aggregation_window_secs),
+        },
+    );
+    say(
+        "latency",
+        format!(
+            "{} ms  ({})",
+            storage.latency_ms(),
+            match storage.latency_ms() >= BACKGROUND_LATENCY_MS {
+                true => "power-saving",
+                false => "immediate",
+            }
+        ),
+    );
+    say("encrypt", storage.encrypting().to_string());
+    say("patterns", storage.patterns().join(" "));
     println!("{SETTING_VALUES}");
     Ok(())
 }

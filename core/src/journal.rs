@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::{ActivityEvent, CoreError};
+use crate::{ActivityEvent, CoreError, EventKind};
 
 /// Rows written with encryption on, by either host. The key is per machine —
 /// Swift's is in the macOS Keychain, this build's is beside the journal — so a
@@ -88,11 +88,19 @@ impl Journal {
     /// build cannot date (an encrypted line, or a line from a newer format)
     /// must not be aged out on a guess. It still counts against the cap, and
     /// the cap drops from the front, which is oldest for an append-only file.
+    /// Grouped rows are kept for `aggregate_days` instead, which is how the
+    /// long tail of "this folder grew by 4 GB in March" outlives the file-level
+    /// rows it was made of without keeping the whole journal that long.
     // ponytail: no daily rollup. Swift's `retainedEvents` summarizes older
     // detailed rows into one row per day instead of dropping them; port that
-    // here when a host wants the long tail, not before.
-    pub fn trim(&self, retention_days: u32, limit_bytes: u64) -> Result<u64, CoreError> {
-        if (retention_days == 0 && limit_bytes == 0) || !self.path.exists() {
+    // here when a host wants the long tail from rows it never grouped.
+    pub fn trim(
+        &self,
+        retention_days: u32,
+        aggregate_days: u32,
+        limit_bytes: u64,
+    ) -> Result<u64, CoreError> {
+        if (retention_days == 0 && aggregate_days == 0 && limit_bytes == 0) || !self.path.exists() {
             return Ok(0);
         }
         // Read whole: the file is what the previous trim left, so it is
@@ -103,15 +111,22 @@ impl Journal {
         let total = kept.len();
         let key = self.key_for(&contents);
 
-        if retention_days > 0 {
-            let cutoff = SystemTime::now()
-                .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400));
-            if let Some(cutoff) = cutoff {
-                kept.retain(|line| match dated(line, key.as_ref()) {
-                    Some(timestamp) => timestamp >= cutoff,
-                    None => true,
-                });
-            }
+        if retention_days > 0 || aggregate_days > 0 {
+            let now = SystemTime::now();
+            let cutoff = |days: u32| {
+                (days > 0)
+                    .then(|| now.checked_sub(Duration::from_secs(u64::from(days) * 86_400)))
+                    .flatten()
+            };
+            let (detailed, aggregate) = (cutoff(retention_days), cutoff(aggregate_days));
+            kept.retain(|line| match row(line, key.as_ref()) {
+                Some((timestamp, EventKind::Aggregate)) => {
+                    aggregate.is_none_or(|cutoff| timestamp >= cutoff)
+                }
+                Some((timestamp, _)) => detailed.is_none_or(|cutoff| timestamp >= cutoff),
+                // A row this build cannot read is not aged out on a guess.
+                None => true,
+            });
         }
 
         if limit_bytes > 0 {
@@ -210,11 +225,12 @@ fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
     String::from_utf8(crate::crypt::open(key?, line)?).ok()
 }
 
-/// The timestamp of a row this build can read, or `None` when it cannot.
-fn dated(line: &str, key: Option<&[u8; 32]>) -> Option<SystemTime> {
+/// When a row this build can read was written and what kind it is, or `None`
+/// when it cannot read it.
+fn row(line: &str, key: Option<&[u8; 32]>) -> Option<(SystemTime, EventKind)> {
     ActivityEvent::from_json_line(&readable(line, key)?)
         .ok()
-        .map(|event| event.timestamp)
+        .map(|event| (event.timestamp, event.kind))
 }
 
 #[cfg(unix)]
