@@ -139,6 +139,31 @@ impl Storage {
         }
     }
 
+    /// The sizes of file every watch here records at all, in bytes, smallest
+    /// first; `None` is no bound. Judged on the file's own size, not on how
+    /// much of it changed.
+    ///
+    /// One pair for the install rather than one per watch, which is the shape
+    /// this settings file already has for retention and encryption.
+    // ponytail: per-watch bounds when somebody watches two folders that want
+    // different ones. Until then a second list in `watches.json` is a shape
+    // nobody asked for.
+    pub fn size_bounds(&self) -> (Option<i64>, Option<i64>) {
+        let settings = self.settings();
+        (settings.min_file_bytes, settings.max_file_bytes)
+    }
+
+    pub fn set_size_bounds(
+        &self,
+        min_bytes: Option<i64>,
+        max_bytes: Option<i64>,
+    ) -> io::Result<()> {
+        let mut settings = self.settings();
+        settings.min_file_bytes = min_bytes;
+        settings.max_file_bytes = max_bytes;
+        self.save(&settings)
+    }
+
     /// The folders the user chose, dropping any that no longer exist so a
     /// stale entry cannot look like a live watch.
     pub fn load_watches(&self) -> Vec<String> {
@@ -194,6 +219,12 @@ struct Settings {
     /// them with.
     #[serde(default)]
     encrypt: bool,
+    /// Absent in a file written before size bounds existed, which is also how
+    /// "no bound" is stored.
+    #[serde(default)]
+    min_file_bytes: Option<i64>,
+    #[serde(default)]
+    max_file_bytes: Option<i64>,
 }
 
 #[cfg(test)]
@@ -258,6 +289,27 @@ mod tests {
         let _ = std::fs::remove_file(&link);
 
         assert!(storage.is_own(&paths::normalize(&resolved_event.to_string_lossy())));
+    }
+
+    #[test]
+    fn saved_size_bounds_survive_a_restart_and_default_to_no_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+
+        assert_eq!(storage.size_bounds(), (None, None));
+        storage.set_size_bounds(Some(1_000_000), None).unwrap();
+
+        assert_eq!(
+            Storage::at(dir.path()).size_bounds(),
+            (Some(1_000_000), None)
+        );
+        // And a folder list saved afterwards keeps them: both live in one
+        // file, so a write of either must not drop the other.
+        storage.save_watches(&["/a".to_owned()]).unwrap();
+        assert_eq!(
+            Storage::at(dir.path()).size_bounds(),
+            (Some(1_000_000), None)
+        );
     }
 
     #[test]

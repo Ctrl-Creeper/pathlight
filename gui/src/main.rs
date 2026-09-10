@@ -71,6 +71,11 @@ struct App {
     /// Whether new rows are written encrypted, mirrored from storage so the
     /// checkbox does not read a file every frame.
     encrypt: bool,
+    /// What the two size boxes hold while they are being typed, in MB. Text
+    /// rather than numbers, because an empty box is "no bound" and a
+    /// half-typed one must not be read as a bound the user did not finish.
+    min_mb: String,
+    max_mb: String,
     /// The tray icon, once the first frame has had a chance to make one, and
     /// `None` on a desktop that would not give us one.
     tray: Option<Tray>,
@@ -96,8 +101,14 @@ impl App {
             .map(Storage::load_watches)
             .unwrap_or_default();
         let encrypt = storage.as_ref().is_ok_and(Storage::encrypting);
+        let (min_bytes, max_bytes) = storage
+            .as_ref()
+            .map(Storage::size_bounds)
+            .unwrap_or_default();
         Self {
             encrypt,
+            min_mb: mb_text(min_bytes),
+            max_mb: mb_text(max_bytes),
             selected: roots.first().cloned(),
             storage,
             roots,
@@ -273,6 +284,43 @@ impl App {
         match storage.set_encrypting(encrypt) {
             Ok(()) => self.encrypt = encrypt,
             Err(error) => self.notice = Some(format!("Could not save the setting: {error}")),
+        }
+    }
+
+    /// Saves the sizes of file the watches record, as typed in the two boxes.
+    ///
+    /// Nothing is saved while the numbers cannot be read, and nothing is saved
+    /// when they did not change: this runs whenever a box loses focus, and a
+    /// save that restarts every watch on a stray click would cost the live
+    /// counters for no edit at all.
+    fn apply_size_bounds(&mut self) {
+        let (Some(min_bytes), Some(max_bytes)) = (parse_mb(&self.min_mb), parse_mb(&self.max_mb))
+        else {
+            self.notice = Some("Sizes are in MB, digits only.".to_owned());
+            return;
+        };
+        if min_bytes.zip(max_bytes).is_some_and(|(min, max)| min > max) {
+            self.notice =
+                Some("The smallest size is above the largest, which records nothing.".to_owned());
+            return;
+        }
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if storage.size_bounds() == (min_bytes, max_bytes) {
+            return;
+        }
+        if let Err(error) = storage.set_size_bounds(min_bytes, max_bytes) {
+            self.notice = Some(format!("Could not save the setting: {error}"));
+            return;
+        }
+        // The bounds are read when a watch opens, so a watch already running
+        // would otherwise keep the old ones until it was stopped by hand.
+        // ponytail: the live counters start over with the watch. They are the
+        // session's, and this is a new session with different rules.
+        for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
+            self.sessions.remove(&root);
+            self.toggle(&root);
         }
     }
 
@@ -486,6 +534,49 @@ impl App {
         self.hidden = true;
     }
 
+    /// The sizes of file every watch here records at all.
+    ///
+    /// Beside the folder list rather than in the footer with the other
+    /// settings, because it decides what the list records and reads as a
+    /// caption on it.
+    fn size_bounds(&mut self, ui: &mut egui::Ui) {
+        let weak = ui.visuals().weak_text_color();
+        let mut edited = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Record files sized (MB)")
+                    .small()
+                    .color(weak),
+            );
+        });
+        ui.horizontal(|ui| {
+            let least = ui.label(egui::RichText::new("at least").small().color(weak));
+            let min = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.min_mb)
+                        .desired_width(44.0)
+                        .hint_text("Any"),
+                )
+                .labelled_by(least.id);
+            let most = ui.label(egui::RichText::new("at most").small().color(weak));
+            let max = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.max_mb)
+                        .desired_width(44.0)
+                        .hint_text("Any"),
+                )
+                .labelled_by(most.id);
+            edited = min.lost_focus() || max.lost_focus();
+        })
+        .response
+        .on_hover_text(
+            "Only files of these sizes are recorded, for every folder here — judged on the              file's own size, not on how much of it changed. Leave a box empty for no bound.              A file whose size cannot be read is always recorded, so a deletion is never              missed. Changing this restarts the watches that are running.",
+        );
+        if edited {
+            self.apply_size_bounds();
+        }
+    }
+
     fn watch_list(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -496,6 +587,8 @@ impl App {
                 }
             });
         });
+        ui.add_space(6.0);
+        self.size_bounds(ui);
         ui.add_space(6.0);
 
         if self.roots.is_empty() {
@@ -915,6 +1008,30 @@ fn relative_path(path: &str, root: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
+/// What the size boxes count in. Megabytes as a person means them on a
+/// storage label, and the unit the macOS window uses, so the same number
+/// typed on either host bounds the same files.
+const BYTES_PER_MB: i64 = 1_000_000;
+
+/// A stored bound as the box shows it: empty for no bound.
+fn mb_text(bytes: Option<i64>) -> String {
+    bytes.map_or_else(String::new, |bytes| (bytes / BYTES_PER_MB).to_string())
+}
+
+/// A typed box as bytes: `None` for text that is not a size, `Some(None)` for
+/// an empty box, which is how "no bound" is said.
+fn parse_mb(text: &str) -> Option<Option<i64>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(None);
+    }
+    text.parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0)
+        .and_then(|value| value.checked_mul(BYTES_PER_MB))
+        .map(Some)
+}
+
 fn human_bytes(bytes: i64) -> String {
     let sign = if bytes < 0 { "-" } else { "+" };
     let mut value = bytes.unsigned_abs() as f64;
@@ -970,6 +1087,8 @@ mod tests {
             uninstall_prompt: None,
             uninstalled: false,
             encrypt: false,
+            min_mb: String::new(),
+            max_mb: String::new(),
             tray: None,
             // Never in a test: a tray icon needs the platform's event loop,
             // and a test that made one would leave it in the tester's tray.
@@ -1142,6 +1261,52 @@ mod tests {
         // And the shell still reads it back, which is the half of the promise
         // that a wrong key would break silently.
         assert_eq!(storage.rows("/watched/folder").unwrap().len(), 1);
+    }
+
+    /// Typed through the real boxes, and checked on disk: the setting is only
+    /// worth having if the next watch reads it back.
+    #[test]
+    fn typing_a_size_bound_saves_it_in_megabytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let mut harness = harness(app(dir.path(), Vec::new()));
+
+        harness.get_by_label("at least").focus();
+        harness.run();
+        harness.get_by_label("at least").type_text("5");
+        harness.run();
+        // Enter is how a single-line box is finished, which is what commits it.
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        assert_eq!(storage.size_bounds(), (Some(5_000_000), None));
+        // And a box that is not a size changes nothing, rather than being read
+        // as a bound the user never typed.
+        harness.get_by_label("at most").focus();
+        harness.run();
+        harness.get_by_label("at most").type_text("half");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        assert_eq!(storage.size_bounds(), (Some(5_000_000), None));
+        assert!(
+            harness.state().notice.is_some(),
+            "nothing said what was wrong"
+        );
+    }
+
+    #[test]
+    fn a_size_box_reads_back_what_was_saved() {
+        assert_eq!(mb_text(None), "");
+        assert_eq!(mb_text(Some(1_000_000)), "1");
+        assert_eq!(parse_mb(""), Some(None));
+        assert_eq!(parse_mb("  2 "), Some(Some(2_000_000)));
+        assert_eq!(parse_mb("-1"), None);
+        assert_eq!(parse_mb("1.5"), None);
+        // A number too large to be bytes is not a bound; the alternative is a
+        // silent wrap into a small one.
+        assert_eq!(parse_mb(&i64::MAX.to_string()), None);
     }
 
     #[test]

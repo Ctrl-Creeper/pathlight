@@ -89,6 +89,15 @@ impl Session {
         // events started arriving would record the noise it exists to drop.
         let exclusions =
             ExclusionFilter::new(DEFAULT_PATTERNS, root).map_err(|error| error.to_string())?;
+        // Read once, here: a watch runs for months, and re-reading the file
+        // per event would be a disk read on the path that must stay cheap.
+        // The window restarts what is running when the bounds change.
+        let (min_file_bytes, max_file_bytes) = storage.size_bounds();
+        let options = AggregationOptions {
+            min_file_bytes,
+            max_file_bytes,
+            ..AggregationOptions::SHORT_TERM
+        };
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
@@ -106,6 +115,7 @@ impl Session {
         let worker = Worker {
             scope: root.to_owned(),
             storage,
+            options,
             exclusions,
             live: live.clone(),
             dropped,
@@ -166,6 +176,9 @@ fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>) -> Option<ScanSnapshot> {
 struct Worker {
     scope: String,
     storage: Storage,
+    /// What is recorded and how it is folded together, including the sizes of
+    /// file this watch records at all.
+    options: AggregationOptions,
     /// The noise nobody asked to be told about: `.DS_Store`, trashes,
     /// caches, half-finished downloads.
     // ponytail: the shipped defaults, not per-watch patterns. Add an editor
@@ -192,12 +205,7 @@ impl Worker {
         };
         let prior_size = |path: &str| index.take(scope, path);
         let known_size = |path: &str| index.peek(scope, path);
-        let attributor = Attributor::new(
-            AggregationOptions::SHORT_TERM,
-            &size,
-            &prior_size,
-            &known_size,
-        );
+        let attributor = Attributor::new(self.options, &size, &prior_size, &known_size);
         let mut pending: Vec<Change> = Vec::new();
         // What the folder looked like when the watch opened. Without it a gap
         // can only ever be counted; with it the gap becomes a list of files.
@@ -492,6 +500,32 @@ mod tests {
         assert!(journal.contains("report.bin"), "journal was {journal:?}");
     }
 
+    /// The setting the window offers, end to end: a saved bound is read when
+    /// the watch opens, and the file under it never reaches the journal. The
+    /// large file proves the watch was alive, so a silent watcher cannot pass.
+    #[test]
+    fn a_watch_skips_the_files_the_saved_bounds_exclude() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        Storage::at(storage_dir.path())
+            .set_size_bounds(Some(1_000_000), None)
+            .unwrap();
+        let session = watch(root.path(), storage_dir.path());
+
+        fs::write(root.path().join("tiny.txt"), b"small").unwrap();
+        fs::write(root.path().join("large.bin"), vec![7u8; 2 * 1024 * 1024]).unwrap();
+
+        eventually(&session, "the large file to be recorded", |live| {
+            live.rows.iter().any(|row| row.path.ends_with("large.bin"))
+        });
+        let live = session.live();
+        assert!(
+            !live.rows.iter().any(|row| row.path.ends_with("tiny.txt")),
+            "rows: {:#?}",
+            live.rows
+        );
+    }
+
     /// The feedback loop, with the storage deliberately placed inside the
     /// watched tree: recording a journal write appends a row, whose write is
     /// another event. The ordinary file proves the watch was alive the whole
@@ -597,6 +631,7 @@ mod tests {
             exclusions: ExclusionFilter::new(DEFAULT_PATTERNS, &scope).unwrap(),
             scope,
             storage: Storage::at(storage_dir.path()),
+            options: AggregationOptions::SHORT_TERM,
             live: Arc::new(Mutex::new(Live::default())),
             dropped: Arc::new(AtomicU64::new(0)),
             alerts: Mutex::new(Alerts::default()),
