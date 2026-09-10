@@ -272,9 +272,9 @@ mod tests {
             open_storage_line("{}".to_owned(), key.clone()).unwrap(),
             None
         );
-        assert!(open_storage_line(line, vec![1u8; 32]).is_err());
-        assert!(seal_storage_line(b"{}".to_vec(), vec![9u8; 16]).is_err());
         assert!(line_is_encrypted(&storage_line_marker(), &line));
+        assert!(seal_storage_line(b"{}".to_vec(), vec![9u8; 16]).is_err());
+        assert!(open_storage_line(line, vec![1u8; 32]).is_err());
     }
 
     /// A host checks the marker itself, so the check has to be the one the
