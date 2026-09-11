@@ -149,7 +149,7 @@ final class AppModelRecoveryTests: XCTestCase {
         }
     }
 
-    func testDeniedKeychainAccessIsReportedAtLaunch() async throws {
+    func testUnavailableEncryptionKeyIsReportedAtLaunch() async throws {
         let monitor = RecoveryTestMonitor()
         let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
         let attempts = RecoveryCallCounter()
@@ -159,11 +159,94 @@ final class AppModelRecoveryTests: XCTestCase {
         })
         defer { model.cleanup() }
 
-        try await eventually("keychain access reported") {
-            model.monitoringStatusMessage?.contains("needs keychain access") == true
+        try await eventually("encryption key failure reported") {
+            model.monitoringStatusMessage?.contains("activity encryption key") == true
         }
         // A denial must not re-prompt; only a timeout is worth waiting out.
         XCTAssertEqual(attempts.count, 1)
+    }
+
+    func testClearingGapDuringAppendCannotBeUndoneByItsOldCheckpoint() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+        monitor.send(.requiresRescan(eventID: 10))
+        try await eventually("history gap persisted") {
+            model.longTermWatchTargets.first?.checkpoint?.hasHistoryGap == true
+        }
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "during-gap.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 42
+        ))
+        try await eventually("gap checkpoint entered append") { store.appendStarted }
+
+        model.clearLongTermWatchHistoryGap(rootPath: root)
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.hasHistoryGap, false)
+        store.release()
+        try await eventually("append cursor committed without reviving gap") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 42
+        }
+        XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.hasHistoryGap, false)
+    }
+
+    func testResetInvalidatesAnAppendAlreadyInFlight() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let reset = RecoveryCallCounter()
+        let (model, _, root) = makeModel(
+            monitor: monitor,
+            scan: scan,
+            eventStore: store,
+            storageReset: { _ = reset.increment() }
+        )
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "before-reset.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 42
+        ))
+        try await eventually("append entered storage") { store.appendStarted }
+
+        model.resetActivityStorage()
+        try await eventually("storage reset completed") { reset.count == 1 }
+        try await eventually("watch restarted after reset") { monitor.subscriptionCount >= 2 }
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "after-reset.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 43
+        ))
+        store.release()
+        try await eventually("post-reset batch reached storage") { store.appendCallCount == 2 }
+        store.release()
+        try await eventually("post-reset cursor committed") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 43
+        }
+
+        XCTAssertNotEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 42)
     }
 
     func testSlowKeychainPromptIsWaitedOutWithoutComplaining() async throws {
@@ -337,7 +420,8 @@ final class AppModelRecoveryTests: XCTestCase {
         monitor: RecoveryTestMonitor,
         scan: RecoveryScanGate,
         eventStore: (any ActivityEventStoring)? = nil,
-        keyWarmUp: @escaping @Sendable () throws -> Void = {}
+        keyWarmUp: @escaping @Sendable () throws -> Void = {},
+        storageReset: (@Sendable () async throws -> Void)? = nil
     ) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
         let suite = "AppModelRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -365,6 +449,7 @@ final class AppModelRecoveryTests: XCTestCase {
                 contentsProvider: { scan.contents(at: $0) },
             ),
             activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
+            activityStorageReset: storageReset,
             launchAtLoginService: RecoveryTestLoginService(),
             activityStorageKeyWarmUp: keyWarmUp
         ))
@@ -470,14 +555,17 @@ private final class RecoveryTestLoginService: LaunchAtLoginControlling {
 private final class BlockingRecoveryEventStore: ActivityEventStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var started = false
+    private var calls = 0
     private var appendContinuation: CheckedContinuation<Void, Never>?
 
     var appendStarted: Bool { lock.withLock { started } }
+    var appendCallCount: Int { lock.withLock { calls } }
 
     func append(_ events: [DiskActivityEvent]) async throws {
         await withCheckedContinuation { continuation in
             lock.withLock {
                 started = true
+                calls += 1
                 appendContinuation = continuation
             }
         }

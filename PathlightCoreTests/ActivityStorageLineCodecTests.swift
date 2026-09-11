@@ -82,6 +82,46 @@ struct ActivityStorageLineCodecTests {
             try codec.decode(SealedActivityStorageCryptor.marker + "!not base64!")
         }
     }
+
+    @Test("migrates the legacy macOS key into the key file shared with Rust")
+    func migratesLegacyKeyIntoSharedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightSharedKey-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keyURL = directory.appending(path: "activity-events.key")
+        let legacyKey = Data(repeating: 0x2A, count: 32)
+        let provider = FileActivityStorageKeyProvider(
+            keyURL: keyURL,
+            legacyKeyLoader: { legacyKey }
+        )
+
+        #expect(try provider.loadOrCreateKey() == legacyKey)
+        #expect(try Data(contentsOf: keyURL) == legacyKey)
+        let permissions = try FileManager.default.attributesOfItem(atPath: keyURL.path)[.posixPermissions] as? NSNumber
+        #expect(permissions?.intValue == 0o600)
+
+        let reopened = FileActivityStorageKeyProvider(
+            keyURL: keyURL,
+            legacyKeyLoader: { throw ActivityStorageLineCodecError.keychainReadFailed(-1) }
+        )
+        #expect(try reopened.loadOrCreateKey() == legacyKey)
+    }
+
+    @Test("refuses to replace a malformed shared key")
+    func refusesToReplaceMalformedSharedKey() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightMalformedKey-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keyURL = directory.appending(path: "activity-events.key")
+        try Data(repeating: 1, count: 16).write(to: keyURL)
+        let provider = FileActivityStorageKeyProvider(keyURL: keyURL)
+
+        #expect(throws: ActivityStorageLineCodecError.self) {
+            try provider.loadOrCreateKey()
+        }
+        #expect(try Data(contentsOf: keyURL).count == 16)
+    }
 }
 
 private final class ScriptedActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {

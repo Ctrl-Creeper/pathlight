@@ -4,7 +4,7 @@
 //! (`ActivityStorageLineCodec`): the marker below, then base64 of the
 //! AES-256-GCM combined box — a 12-byte nonce, the ciphertext, the 16-byte
 //! tag. One journal format for both hosts, so a row's shape never depends on
-//! which Pathlight wrote it, even though neither can read the other's key.
+//! which Pathlight wrote it. Every host on one install reads the same key file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,15 +50,14 @@ pub(crate) fn open(key: &[u8; 32], line: &str) -> Option<Vec<u8>> {
 
 /// What an encrypted line starts with, for a host that must decide whether a
 /// row is encrypted before it fetches its key: reading a plaintext journal
-/// must not open the macOS Keychain, let alone prompt for it.
+/// must not create or read a key unnecessarily.
 #[uniffi::export]
 pub fn storage_line_marker() -> String {
     PREFIX.to_owned()
 }
 
-/// One journal line for a host that keeps its own key: the whole stored line,
-/// marker and framing included. macOS passes its Keychain key in rather than
-/// letting the core hold one, because only the app can open that Keychain.
+/// One journal line for a host that loads the shared key itself: the whole
+/// stored line, marker and framing included.
 #[uniffi::export]
 pub fn seal_storage_line(payload: Vec<u8>, key: Vec<u8>) -> Result<String, CoreError> {
     seal(&storage_key(&key)?, &payload)
@@ -211,7 +210,7 @@ fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>, CoreError> {
 // ponytail: 0600 beside the journal, which defends the journal leaving this
 // machine (a backup, a sync folder, a bug report) and not a reader who
 // already has the whole directory. Wrap it in the desktop secret service when
-// a dbus dependency is worth it; macOS rows are Keychain-wrapped by Swift.
+// a dbus dependency is worth it.
 #[cfg(not(windows))]
 fn wrap(key: &[u8; 32]) -> Result<Vec<u8>, CoreError> {
     Ok(key.to_vec())

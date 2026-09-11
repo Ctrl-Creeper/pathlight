@@ -42,13 +42,16 @@ nonisolated protocol ActivityEventStoring: Sendable {
     /// Returns only after the whole batch is durably committed. A thrown error
     /// is retryable unless it is `commitStateUnknown`.
     func append(_ events: [DiskActivityEvent]) async throws
+    /// The newest `limit` events for the root, newest first.
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent]
-    /// Newest `limit` events plus totals over *everything* retained for the
-    /// root, so a capped page can never understate the dashboard.
+    /// One page of the rows `query` matched, plus totals over *every* matching
+    /// row retained for the root, so a capped page can never understate the
+    /// dashboard and a search box can never overstate what it found.
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery
     ) async throws -> ActivityEventPage
     func enforceStoragePolicy(
         _ preferences: ActivityStoragePreferences,
@@ -63,9 +66,16 @@ extension ActivityEventStoring {
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
-        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
+        var builder = ActivityEventPageBuilder(
+            limit: limit,
+            bucketInterval: bucketInterval,
+            query: query
+        )
+        // Any order will do: the builder sorts the page it kept, so what it was
+        // handed first no longer decides what it lists.
         for event in try await loadEvents(rootPath: rootPath, limit: .max) {
             builder.add(event)
         }
@@ -116,6 +126,14 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     }
 
     func append(_ events: [DiskActivityEvent]) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try appendWhileLocked(events)
+        }
+    }
+
+    private func appendWhileLocked(_ events: [DiskActivityEvent]) throws {
         guard !events.isEmpty else {
             return
         }
@@ -231,7 +249,8 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     func loadEventPage(
         rootPath: URL,
         limit: Int,
-        bucketInterval: TimeInterval
+        bucketInterval: TimeInterval,
+        query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
         guard FileManager.default.fileExists(atPath: journalURL.path) else {
             return .empty
@@ -241,7 +260,11 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         let data = try Data(contentsOf: journalURL)
         let contents = String(decoding: data, as: UTF8.self)
 
-        var builder = ActivityEventPageBuilder(limit: limit, bucketInterval: bucketInterval)
+        var builder = ActivityEventPageBuilder(
+            limit: limit,
+            bucketInterval: bucketInterval,
+            query: query
+        )
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = try? lineCodec.decode(line),
                   let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),
@@ -258,6 +281,39 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         eventJournalLimitBytes: Int64,
         now: Date = Date()
     ) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try enforceStoragePolicyWhileLocked(
+                preferences,
+                eventJournalLimitBytes: eventJournalLimitBytes,
+                now: now
+            )
+        }
+    }
+
+    func reset(additionalStorageFiles: [URL] = []) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try ActivityStorageFileProtection.advanceRecordsGenerationWhileLocked(
+                in: journalURL.deletingLastPathComponent()
+            )
+            for url in [journalURL] + additionalStorageFiles
+            where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        hasScannedJournal = false
+        oldestKnownEventTimestamp = nil
+        requiresReopenAfterFailedRollback = false
+    }
+
+    private func enforceStoragePolicyWhileLocked(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) throws {
         guard FileManager.default.fileExists(atPath: journalURL.path) else {
             return
         }

@@ -24,6 +24,10 @@ struct AppDependencies {
     var activityBaselineService: ActivityBaselineService
     var activityStoragePreferences: any ActivityStoragePreferencesPersisting
     var activityStorageUsageService: ActivityStorageUsageService
+    /// Deletes the journal and its live attribution index as one coordinated
+    /// reset. The live dependency uses the same actor and index as recording,
+    /// so an append already in flight must finish before deletion wins.
+    var activityStorageReset: @Sendable () async throws -> Void
     var launchAtLoginService: any LaunchAtLoginControlling
     var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
     /// Short-window anomaly detection. The thresholds live in the Rust core,
@@ -33,6 +37,10 @@ struct AppDependencies {
     var processHints: (any ProcessHinting)?
     /// Loads the activity storage key up front; no-op when nothing is encrypted.
     var activityStorageKeyWarmUp: @Sendable () throws -> Void
+    /// Where watch starts, gaps, findings and failures are written down. No
+    /// default: a test that wrote to the real diary would be a test editing
+    /// the user's records.
+    var diary: ActivityDiary?
 
     init(
         systemActions: AppSystemActions,
@@ -49,11 +57,13 @@ struct AppDependencies {
         activityBaselineService: ActivityBaselineService = ActivityBaselineService(),
         activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
+        activityStorageReset: (@Sendable () async throws -> Void)? = nil,
         launchAtLoginService: any LaunchAtLoginControlling = SystemLaunchAtLoginService(),
         activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)? = nil,
         activityAnomalies: @escaping ActivityAnomalyDetecting = { _, _, _ in [] },
         processHints: (any ProcessHinting)? = nil,
-        activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {}
+        activityStorageKeyWarmUp: @escaping @Sendable () throws -> Void = {},
+        diary: ActivityDiary? = nil
     ) {
         self.systemActions = systemActions
         self.activityMonitor = activityMonitor
@@ -65,11 +75,15 @@ struct AppDependencies {
         self.activityBaselineService = activityBaselineService
         self.activityStoragePreferences = activityStoragePreferences
         self.activityStorageUsageService = activityStorageUsageService
+        self.activityStorageReset = activityStorageReset ?? {
+            try await activityStorageUsageService.resetStorage()
+        }
         self.launchAtLoginService = launchAtLoginService
         self.activityGrowthAlertPoster = activityGrowthAlertPoster
         self.activityAnomalies = activityAnomalies
         self.processHints = processHints
         self.activityStorageKeyWarmUp = activityStorageKeyWarmUp
+        self.diary = diary
     }
 
     /// Every platform-specific piece is a parameter: this package holds no
@@ -93,6 +107,7 @@ struct AppDependencies {
             cryptor: activityStorageCryptor
         )
         let activitySizeIndex = activitySizeIndex ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
+        let activityEventStore = JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec)
         return AppDependencies(
             systemActions: .live,
             activityMonitor: activityMonitor,
@@ -111,18 +126,25 @@ struct AppDependencies {
                     known: { url in activitySizeIndex.knownSize(for: url, scope: scope) }
                 )
             },
-            activityEventStore: JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec),
+            activityEventStore: activityEventStore,
             // A scan may observe a new size before its delayed change event.
             // Keep those measurements out of the live attribution index so they
             // cannot consume an increment or overwrite a newer event measurement.
             activityBaselineService: ActivityBaselineService(),
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
+            activityStorageReset: {
+                activitySizeIndex.reset()
+                try await activityEventStore.reset(
+                    additionalStorageFiles: [ActivitySizeIndex.defaultJournalURL()]
+                )
+            },
             launchAtLoginService: SystemLaunchAtLoginService(),
             activityGrowthAlertPoster: UserNotificationGrowthAlertPoster(),
             activityAnomalies: activityAnomalies,
             processHints: LsofProcessHintService(),
-            activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() }
+            activityStorageKeyWarmUp: { try activityStorageLineCodec.prepare() },
+            diary: .live
         )
     }
 }

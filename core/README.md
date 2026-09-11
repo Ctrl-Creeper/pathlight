@@ -8,19 +8,21 @@ Swift and Kotlin through [UniFFI](https://mozilla.github.io/uniffi-rs/).
 | Module | Purpose | Status |
 |--------|---------|--------|
 | `event` | `ActivityEvent` and a JSON encoding byte-compatible with the Swift `JSONLActivityEventStore` | done, fixture-tested against Swift output |
-| `journal` | Append-only JSONL journal (0700 dir, 0600 file), newest-first load, `load_history`, skips Swift-encrypted rows | done |
+| `journal` | Append-only JSONL journal (0700 dir, 0600 file), shared encryption, retention with daily rollups, newest-first load and `load_history` | done |
 | `monitor` + platform backends | `Watcher` emitting `StreamEvent`s. macOS uses resumable FSEvents; Linux/Android pair inotify renames; Windows uses ReadDirectoryChangesW through `notify` | default backends implemented; Windows/Android device qualification remains |
 | `measurement` | Logical length, filesystem-reported allocation, link count, kind and scoped native object identity from one metadata observation | implemented and real-filesystem tested on macOS/Linux; Windows compile-tested |
 | `snapshot` | Native-name interval traversal, identity-aware totals and continuity-gated endpoint reconciliation | implemented; explicitly not an atomic snapshot or historical replay |
 | `evidence` | Locked, versioned JSONL evidence with source epochs, native paths, explicit gaps and bounded durable batches | implemented (Rust API) |
 | `recording` | Bounded recording sessions with watcher-first startup, chunked native binding manifests and interval snapshots | implemented as `pathlight-monitor`; no restart resume yet |
-| `attribution` | Byte-delta attribution, threshold, window aggregation, in-memory `SizeIndex` | done (Rust API only, not yet on the FFI surface) |
+| `attribution` | Byte-delta attribution, threshold, window aggregation, `SizeIndex` (persisted beside the journal, sealed with it) | done; attribution is exposed over UniFFI and persistence is owned by each host |
 | `exclusion` | gitignore-style noise filter via the `ignore` crate | done (Rust API only) |
 | `history` | Buckets, totals, newest-first rows for the dashboard | done, exposed as `Journal.load_history` |
 
-Not yet ported from Swift: retention policy, encrypted rows, size-index
-persistence. The macOS app still runs attribution and exclusion in Swift on
-top of the Rust event source.
+The app, window, and terminal share the encrypted journal line format and the
+protected `activity-events.key`. Retention and daily rollups have matching
+semantics in the Rust and Swift stores. The macOS host keeps journal I/O and
+its size index in Swift, while attribution and exclusion rules come from the
+Rust core over UniFFI.
 
 ## Build and test
 

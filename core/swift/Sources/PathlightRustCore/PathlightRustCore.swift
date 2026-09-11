@@ -3163,8 +3163,7 @@ public func openStorageLine(line: String, key: Data)throws  -> Data?  {
 }
 /**
  * One journal line for a host that keeps its own key: the whole stored line,
- * marker and framing included. macOS passes its Keychain key in rather than
- * letting the core hold one, because only the app can open that Keychain.
+ * marker and framing included. Every host loads the shared key itself.
  */
 public func sealStorageLine(payload: Data, key: Data)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
@@ -3178,7 +3177,7 @@ public func sealStorageLine(payload: Data, key: Data)throws  -> String  {
 /**
  * What an encrypted line starts with, for a host that must decide whether a
  * row is encrypted before it fetches its key: reading a plaintext journal
- * must not open the macOS Keychain, let alone prompt for it.
+ * must not create or read a key unnecessarily.
  */
 public func storageLineMarker() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {

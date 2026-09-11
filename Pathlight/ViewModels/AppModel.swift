@@ -21,6 +21,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
+    /// What the selected folder's history is narrowed to. Kept here rather
+    /// than in the view so an event-driven refresh re-asks the same question
+    /// instead of quietly widening the page somebody is reading.
+    @Published private(set) var activityHistoryQuery: ActivityHistoryQuery = .everything
     @Published private(set) var activityDashboardHistories: [String: ActivityHistorySnapshot] = [:]
     @Published private(set) var activityStorageUsage = ActivityStorageUsageSnapshot.empty
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
@@ -29,7 +33,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLoginNudgeDismissed =
         UserDefaults.standard.bool(forKey: AppModel.launchAtLoginNudgeDismissedKey)
 
+    /// Every watch held off by one switch, for something noisy about to
+    /// happen. The other two hosts keep this in the settings file the core
+    /// owns; this host keeps its settings in defaults, and the meaning is the
+    /// same — the folders stay as they are, and resuming starts the same ones.
+    @Published private(set) var isMonitoringPaused =
+        UserDefaults.standard.bool(forKey: AppModel.monitoringPausedKey)
+
     private static let launchAtLoginNudgeDismissedKey = "launchAtLoginNudgeDismissed"
+    private static let monitoringPausedKey = "monitoringPaused"
     private static let preferencePersistenceDebounce: RunLoop.SchedulerTimeType.Stride = .milliseconds(50)
 
     private let dependencies: AppDependencies
@@ -68,6 +80,10 @@ final class AppModel: ObservableObject {
     private var journalFlushImmediatelyRequested = false
     private var journalStorageBlocked = false
     private var journalFlushFailureCount = 0
+    /// Invalidates continuations from an append that was already in flight
+    /// when the user deleted all history.
+    private var journalGeneration: UInt64 = 0
+    private var activityStorageResetID: UUID?
     /// Rows wait until the live-monitor coalescing window (1 s) has closed so a
     /// created+modified burst lands in the journal as one final row.
     private static let journalFlushDelay: TimeInterval = 1.2
@@ -96,6 +112,7 @@ final class AppModel: ObservableObject {
 
         warmActivityStorageKey()
         observeActivityStoragePreferences()
+        observeMonitoringTrouble()
         refreshFullDiskAccessStatus()
         startEnabledLongTermWatches()
         // Preload histories so the menu bar shows today's numbers before the
@@ -150,6 +167,19 @@ final class AppModel: ObservableObject {
         }
         startShortTermWatch(rootPath: url, options: options)
         return true
+    }
+
+    /// The tail of the watch diary, read when somebody asks rather than kept
+    /// in a published property: nothing on screen depends on it per frame, and
+    /// the same bound the other two hosts show.
+    static let diaryLinesShown = 200
+
+    func diaryTail() -> String {
+        dependencies.diary?.tail(lines: Self.diaryLinesShown) ?? ""
+    }
+
+    var diaryFileURL: URL? {
+        dependencies.diary?.fileURL
     }
 
     func revealURLInFinder(_ url: URL) {
@@ -263,14 +293,46 @@ final class AppModel: ObservableObject {
     }
 
     func resetActivityStorage() {
-        let service = dependencies.activityStorageUsageService
+        let resetID = UUID()
+        activityStorageResetID = resetID
+        journalGeneration &+= 1
+        journalFlushTask?.cancel()
+        journalFlushTask = nil
+        journalFlushImmediatelyRequested = false
+        pendingJournalEvents.removeAll()
+        pendingJournalOrder.removeAll()
+        pendingJournalRoots.removeAll()
+        pendingJournalCheckpoints.removeAll()
+        pendingJournalSince = nil
+        committedJournalEvents.removeAll()
+
+        liveWatchTask?.cancel()
+        liveWatchTask = nil
+        liveWatchTaskID = nil
+        liveWatchBaselineTask?.cancel()
+        liveWatchBaselineTask = nil
+        liveWatchSession = nil
+        stopAllLongTermWatches()
+
+        let reset = dependencies.activityStorageReset
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await service.resetStorage()
+                try await reset()
+                guard self.activityStorageResetID == resetID else { return }
+                self.activityStorageResetID = nil
+                self.journalStorageBlocked = false
+                self.journalFlushFailureCount = 0
+                self.monitoringStatusMessage = nil
                 self.activityStorageUsage = .empty
+                self.activityHistory = nil
+                self.activityDashboardHistories.removeAll()
+                self.startEnabledLongTermWatches()
             } catch {
+                guard self.activityStorageResetID == resetID else { return }
+                self.activityStorageResetID = nil
                 self.lastErrorMessage = "Pathlight could not reset activity storage."
+                self.startEnabledLongTermWatches()
             }
         }
     }
@@ -308,6 +370,10 @@ final class AppModel: ObservableObject {
         options: DiskActivityAggregationOptions = .shortTermDefault
     ) {
         stopShortTermWatch()
+        guard !isMonitoringPaused else {
+            monitoringStatusMessage = "Monitoring is paused. Resume it and this folder starts again."
+            return
+        }
 
         let taskID = UUID()
         liveWatchTaskID = taskID
@@ -431,6 +497,7 @@ final class AppModel: ObservableObject {
 
     private func flushJournal() async {
         guard let store = dependencies.activityEventStore, !journalFlushInProgress else { return }
+        let generation = journalGeneration
         let batch = takePendingJournalBatch()
         guard !batch.entries.isEmpty else {
             advanceUnblockedCheckpoints()
@@ -446,6 +513,10 @@ final class AppModel: ObservableObject {
                 )
             }
             try await store.append(journalEvents)
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushFailureCount = 0
             monitoringStatusMessage = nil
             journalFlushInProgress = false
@@ -458,6 +529,17 @@ final class AppModel: ObservableObject {
                 $0.value.timestamp >= retentionCutoff || pendingJournalEvents[$0.key] != nil
             }
             for (root, checkpoint) in batch.checkpoints {
+                var checkpoint = checkpoint
+                if checkpoint.hasHistoryGap,
+                   let current = pendingJournalCheckpoints[root],
+                   current.eventID >= checkpoint.eventID,
+                   !current.hasHistoryGap {
+                    checkpoint = LongTermWatchCheckpoint(
+                        eventID: checkpoint.eventID,
+                        recordedAt: checkpoint.recordedAt,
+                        hasHistoryGap: false
+                    )
+                }
                 persistCheckpoint(checkpoint, rootPath: root)
             }
             advanceUnblockedCheckpoints()
@@ -466,6 +548,10 @@ final class AppModel: ObservableObject {
                 scheduleEventDrivenHistoryRefresh(rootPath: URL(filePath: root, directoryHint: .isDirectory))
             }
         } catch ActivityEventStoreError.commitStateUnknown {
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             journalStorageBlocked = true
@@ -475,6 +561,10 @@ final class AppModel: ObservableObject {
             pendingJournalSince = nil
             monitoringStatusMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
         } catch {
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             restorePendingJournalBatch(batch)
@@ -491,6 +581,15 @@ final class AppModel: ObservableObject {
             scheduleJournalFlush(after: delay)
         } else {
             journalFlushImmediatelyRequested = false
+        }
+    }
+
+    private func discardInFlightJournalBatch(_ batch: PendingJournalBatch) {
+        journalFlushInProgress = false
+        journalFlushInFlightRoots.subtract(batch.roots)
+        advanceUnblockedCheckpoints()
+        if !pendingJournalEvents.isEmpty {
+            scheduleJournalFlush(after: 0)
         }
     }
 
@@ -557,7 +656,7 @@ final class AppModel: ObservableObject {
     /// If the model is deallocated first, its checkpoint remains behind and the
     /// native journal replays the uncommitted interval on the next launch.
     /// The journal key is otherwise first touched by a background write minutes
-    /// after launch, where a keychain prompt can sit unnoticed and hold up
+    /// after launch, where a legacy migration prompt can sit unnoticed and hold up
     /// recording. Ask for it now, while the user is still looking at the app.
     private func warmActivityStorageKey() {
         let warmUp = dependencies.activityStorageKeyWarmUp
@@ -577,10 +676,10 @@ final class AppModel: ObservableObject {
         }
     }
     /// Each attempt waits out one key-load timeout, so this is how long a slow
-    /// answer to the keychain prompt stays quiet.
+    /// answer to a legacy Keychain migration prompt stays quiet.
     nonisolated private static let activityStorageKeyWarmUpAttempts = 3
     private func reportActivityStorageKeyUnavailable() {
-        monitoringStatusMessage = "Pathlight needs keychain access to record activity history. Grant it and recording continues."
+        monitoringStatusMessage = "Pathlight could not access its activity encryption key. Recording continues when the key becomes available."
     }
     /// Doubles per consecutive failure so a stalled store is retried without
     /// spinning, and stays at one second while flushes are succeeding.
@@ -663,10 +762,17 @@ final class AppModel: ObservableObject {
         refreshActivityHistory(rootPath: rootPath)
     }
 
+    /// Narrow the selected folder's history, and read it again through the
+    /// narrowing.
+    func narrowActivityHistory(_ query: ActivityHistoryQuery, rootPath: URL) {
+        activityHistoryQuery = query
+        refreshActivityHistory(rootPath: rootPath)
+    }
+
     func refreshActivityHistory(
         rootPath: URL,
         bucketInterval: TimeInterval = 3_600,
-        eventLimit: Int = 500
+        eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityHistoryRefresh(clearHistory: false)
 
@@ -679,6 +785,7 @@ final class AppModel: ObservableObject {
         let taskID = UUID()
         activityHistoryTaskID = taskID
         let service = ActivityHistoryService(store: activityEventStore)
+        let query = activityHistoryQuery
 
         activityHistoryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -693,14 +800,20 @@ final class AppModel: ObservableObject {
                 let history = try await service.loadHistory(
                     rootPath: rootPath,
                     eventLimit: eventLimit,
-                    bucketInterval: bucketInterval
+                    bucketInterval: bucketInterval,
+                    query: query
                 )
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
                 }
                 self.activityHistory = history
                 self.activityDashboardHistories[history.rootPath.standardizedFileURL.path] = history
-                self.evaluateGrowthAlert(history: history)
+                // A narrowed read describes what somebody searched for, not
+                // how much the folder grew, so it is not something to warn
+                // about. The whole-folder pass below still does.
+                if query.isEverything {
+                    self.evaluateGrowthAlert(history: history)
+                }
             } catch {
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
@@ -714,7 +827,7 @@ final class AppModel: ObservableObject {
     func refreshActivityDashboardHistories(
         rootPaths: [URL],
         bucketInterval: TimeInterval = 3_600,
-        eventLimit: Int = 500
+        eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityDashboardHistoryRefresh(clearHistories: false)
 
@@ -770,6 +883,13 @@ final class AppModel: ObservableObject {
                     }
                     self.activityDashboardHistories.removeValue(forKey: root.path)
                 }
+            }
+
+            // Every card is read whole, so this pass just overwrote the
+            // narrowed page the timeline is showing. Ask that one root again
+            // through its narrowing.
+            if !self.activityHistoryQuery.isEverything, let narrowed = self.activityHistory?.rootPath {
+                self.refreshActivityHistory(rootPath: narrowed)
             }
         }
     }
@@ -933,6 +1053,7 @@ final class AppModel: ObservableObject {
         }
 
         growthAlertLastPostedAt[targetID] = Date()
+        note("\(targetID) grew by \(PathlightFormatters.size(growth)), past \(PathlightFormatters.size(threshold))")
         Task {
             await poster.postGrowthAlert(
                 rootPath: target.rootPath,
@@ -942,6 +1063,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The newest page is the input on purpose: `core/src/watch.rs` gives the
+    /// same rule the same bound (its live ring buffer holds 500 rows), and the
+    /// thresholds are floors — a floor crossed inside a longer burst is still
+    /// crossed. History refreshes are event-driven and throttled to one a
+    /// second, so this runs as often as the other hosts' per-flush check.
     private func evaluateAnomalies(
         history: ActivityHistorySnapshot,
         targetID: String,
@@ -958,6 +1084,7 @@ final class AppModel: ObservableObject {
                 continue
             }
             anomalyAlertLastPostedAt[key] = now
+            note("\(anomaly.title): \(anomaly.body)")
             Task {
                 await poster.postActivityAlert(
                     rootPath: anomaly.rootPath,
@@ -986,6 +1113,20 @@ final class AppModel: ObservableObject {
             forRootPath: target.rootPath,
             currentTargets: longTermWatchTargets
         )
+        if let pending = pendingJournalCheckpoints[targetID] {
+            pendingJournalCheckpoints[targetID] = LongTermWatchCheckpoint(
+                eventID: max(checkpoint.eventID, pending.eventID),
+                recordedAt: max(checkpoint.recordedAt, pending.recordedAt),
+                hasHistoryGap: false
+            )
+        } else {
+            pendingJournalCheckpoints[targetID] = LongTermWatchCheckpoint(
+                eventID: checkpoint.eventID,
+                recordedAt: checkpoint.recordedAt,
+                hasHistoryGap: false
+            )
+        }
+        advanceUnblockedCheckpoints()
         if let status = longTermWatchRuntimeStatuses[targetID], status.state == .historyGap {
             updateLongTermWatchRuntimeStatus(
                 targetID: targetID,
@@ -1001,13 +1142,34 @@ final class AppModel: ObservableObject {
         longTermWatchBaselineIDs.removeAll()
     }
 
+    func setMonitoringPaused(_ paused: Bool) {
+        guard paused != isMonitoringPaused else { return }
+        isMonitoringPaused = paused
+        UserDefaults.standard.set(paused, forKey: Self.monitoringPausedKey)
+        note(paused ? "monitoring paused" : "monitoring resumed")
+        guard paused else {
+            startEnabledLongTermWatches()
+            return
+        }
+        stopShortTermWatch()
+        stopAllLongTermWatches()
+    }
+
     private func startEnabledLongTermWatches() {
+        guard !isMonitoringPaused else { return }
         for target in longTermWatchTargets where target.isEnabled {
             startLongTermWatch(for: target)
         }
     }
 
     private func startLongTermWatch(for target: LongTermWatchTarget) {
+        // Checked here rather than at each caller, for the same reason
+        // `Session::start` checks it in the core: a path that forgot would
+        // record through a pause the user asked for.
+        guard !isMonitoringPaused else {
+            stopLongTermWatch(targetID: target.id)
+            return
+        }
         guard target.isEnabled else {
             stopLongTermWatch(targetID: target.id)
             return
@@ -1244,6 +1406,9 @@ final class AppModel: ObservableObject {
         retryCount: Int
     ) {
         let existingStatus = longTermWatchRuntimeStatuses[targetID]
+        if existingStatus?.state != state {
+            note("watch on \(targetID): \(ActivityDashboardPresentation.statusText(for: LongTermWatchRuntimeStatus(state: state, lastActivityAt: nil, retryCount: retryCount)).lowercased())")
+        }
         longTermWatchRuntimeStatuses[targetID] = LongTermWatchRuntimeStatus(
             state: state,
             lastActivityAt: lastActivityAt ?? existingStatus?.lastActivityAt,
@@ -1252,6 +1417,24 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Preferences persistence
+
+    /// One line in the diary, for whoever looks after the fact rather than
+    /// while it happens. `Storage::note` in `core/src/store.rs` writes the
+    /// same file for the other two hosts.
+    private func note(_ line: String) {
+        dependencies.diary?.note(line)
+    }
+
+    /// Every message the window shows about trouble is also written down, once
+    /// here rather than at each of the places that set it — the same reason
+    /// `core/src/watch.rs` funnels through `trouble`.
+    private func observeMonitoringTrouble() {
+        $monitoringStatusMessage
+            .compactMap { $0 }
+            .removeDuplicates()
+            .sink { [weak self] message in self?.note(message) }
+            .store(in: &cancellables)
+    }
 
     private func observeActivityStoragePreferences() {
         Publishers.CombineLatest4(

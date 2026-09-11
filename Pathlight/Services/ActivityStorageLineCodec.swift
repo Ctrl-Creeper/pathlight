@@ -38,9 +38,9 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
 
     static let plaintext = ActivityStorageLineCodec()
 
-    /// Loads the storage key without writing anything. Called at launch so a
-    /// keychain prompt appears while the user is in the app, instead of silently
-    /// stalling the first background journal write minutes later.
+    /// Loads the storage key without writing a journal row. Called at launch so
+    /// file errors or a legacy migration prompt appear while the user is in the
+    /// app instead of stalling the first background write minutes later.
     func prepare() throws {
         guard preferencesStore?.loadPreferences().encryptNewData == true else {
             return
@@ -93,8 +93,8 @@ nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyPro
         let load = inFlight ?? startLoad()
         lock.unlock()
 
-        // A keychain prompt or a wedged securityd never returns, and the journal
-        // writer calls this synchronously. Bound the wait so the caller gets an
+        // A migration prompt or a wedged securityd may never return, and the
+        // journal writer calls this synchronously. Bound the wait so the caller gets an
         // error it can report instead of stalling recording forever; the attempt
         // keeps running on its own queue and a later call picks up its result.
         guard load.gate.wait(timeout: .now() + timeout) == .success else {
@@ -165,6 +165,12 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
         return storedKey
     }
 
+    /// Migration-only read. Unlike `loadOrCreateKey`, this never creates a
+    /// second authority when the shared key file does not exist yet.
+    func loadExistingKey() throws -> Data? {
+        try loadKey()
+    }
+
     func deleteKey() throws {
         let status = SecItemDelete(baseQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -220,6 +226,108 @@ nonisolated final class KeychainActivityStorageKeyProvider: @unchecked Sendable,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+    }
+}
+
+/// The key file shared with the Rust CLI and egui host. An existing Keychain
+/// key seeds it once, preserving encrypted rows from older macOS builds; after
+/// that the file is the sole authority for every host.
+nonisolated final class FileActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {
+    static let live = FileActivityStorageKeyProvider(
+        keyURL: JSONLActivityEventStore.defaultJournalURL()
+            .deletingPathExtension()
+            .appendingPathExtension("key"),
+        legacyKeyLoader: { try KeychainActivityStorageKeyProvider.live.loadExistingKey() }
+    )
+
+    private let keyURL: URL
+    private let legacyKeyLoader: @Sendable () throws -> Data?
+
+    init(
+        keyURL: URL,
+        legacyKeyLoader: @escaping @Sendable () throws -> Data? = { nil }
+    ) {
+        self.keyURL = keyURL
+        self.legacyKeyLoader = legacyKeyLoader
+    }
+
+    func loadOrCreateKey() throws -> Data {
+        if let key = try loadFileKey() {
+            return key
+        }
+
+        // Do not hold the cross-process file lock across a possible Keychain
+        // prompt. The file is checked again under the lock, so a CLI writer
+        // that wins this race remains authoritative.
+        let candidate = try legacyKeyLoader() ?? generateKey()
+        return try ActivityStorageFileProtection.withStorageLock(
+            in: keyURL.deletingLastPathComponent()
+        ) {
+            if let key = try loadFileKey() {
+                return key
+            }
+            guard candidate.count == 32 else {
+                throw ActivityStorageLineCodecError.keyUnavailable
+            }
+            guard FileManager.default.createFile(
+                atPath: keyURL.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            ) else {
+                guard let key = try loadFileKey() else {
+                    throw ActivityStorageLineCodecError.keyUnavailable
+                }
+                return key
+            }
+            do {
+                let handle = try FileHandle(forWritingTo: keyURL)
+                defer { try? handle.close() }
+                try handle.write(contentsOf: candidate)
+                try handle.synchronize()
+                try ActivityStorageFileProtection.applyProtectedFilePermissions(to: keyURL)
+                return candidate
+            } catch {
+                try? FileManager.default.removeItem(at: keyURL)
+                throw error
+            }
+        }
+    }
+
+    private func loadFileKey() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: keyURL.path) else { return nil }
+        let key = try Data(contentsOf: keyURL)
+        guard key.count == 32 else {
+            throw ActivityStorageLineCodecError.keyUnavailable
+        }
+        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: keyURL)
+        return key
+    }
+
+    private func generateKey() throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw ActivityStorageLineCodecError.randomGenerationFailed(status)
+        }
+        return Data(bytes)
+    }
+}
+
+/// Read-only adapter for the pre-shared-key Keychain item. It exists only so
+/// old rows can be opened and rewritten under the shared file key; it never
+/// creates another Keychain key.
+nonisolated final class LegacyKeychainActivityStorageKeyProvider: ActivityStorageKeyProviding, @unchecked Sendable {
+    private let keychain: KeychainActivityStorageKeyProvider
+
+    init(keychain: KeychainActivityStorageKeyProvider = .live) {
+        self.keychain = keychain
+    }
+
+    func loadOrCreateKey() throws -> Data {
+        guard let key = try keychain.loadExistingKey() else {
+            throw ActivityStorageLineCodecError.keyUnavailable
+        }
+        return key
     }
 }
 

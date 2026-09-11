@@ -31,13 +31,15 @@ final class PathlightAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
             object: nil,
             queue: .main
         ) { notification in
-            guard let window = notification.object as? NSWindow,
-                  Self.isRegularWindow(window),
-                  NSApp.activationPolicy() != .regular else {
-                return
+            guard let window = notification.object as? NSWindow else { return }
+            DispatchQueue.main.async {
+                guard Self.isRegularWindow(window),
+                      NSApp.activationPolicy() != .regular else {
+                    return
+                }
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate()
             }
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate()
         }
     }
 

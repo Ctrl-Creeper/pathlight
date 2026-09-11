@@ -1,0 +1,29 @@
+{
+  "note": "The numbers both hosts must get from swift-journal.jsonl. core/src/history.rs and Pathlight/Services/ActivityHistoryService.swift fold rows into buckets separately, because the macOS journal is Swift's and does not cross the FFI. This file is the contract between them: whichever one is edited, the other's test says so.",
+  "bucketIntervalSecs": 3600,
+  "recentLimit": 2,
+  "totalNetByteDelta": 4096,
+  "eventCount": 3,
+  "unknownSizeEventCount": 1,
+  "isTruncated": true,
+  "recentPaths": [
+    "/Users/example/Downloads/b.dmg",
+    "/Users/example/Downloads/a.dmg"
+  ],
+  "search": {
+    "note": "Narrowed to paths containing text, biggest change first, with skip rows stepped over. Totals cover every matching row, not the page.",
+    "text": ".dmg",
+    "largestFirst": true,
+    "skip": 1,
+    "limit": 2,
+    "eventCount": 2,
+    "totalNetByteDelta": 4096,
+    "unknownSizeEventCount": 0,
+    "isTruncated": false,
+    "recentPaths": ["/Users/example/Downloads/b.dmg"]
+  },
+  "buckets": [
+    { "startSecs": 1757203200, "byteDelta": 0, "eventCount": 1, "unknownSizeEventCount": 1 },
+    { "startSecs": 1757224800, "byteDelta": 4096, "eventCount": 2, "unknownSizeEventCount": 0 }
+  ]
+}

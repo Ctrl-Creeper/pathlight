@@ -19,7 +19,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    const CASES: [(EventKind, &'static str); 5] = [
+    pub(crate) const CASES: [(EventKind, &'static str); 5] = [
         (EventKind::Created, "created"),
         (EventKind::Modified, "modified"),
         (EventKind::Deleted, "deleted"),
@@ -173,7 +173,7 @@ mod swift_case {
 }
 
 /// Whole-second RFC 3339 in UTC, matching `JSONEncoder.dateEncodingStrategy = .iso8601`.
-mod swift_date {
+pub(crate) mod swift_date {
     use std::time::SystemTime;
 
     use serde::de::Error as _;

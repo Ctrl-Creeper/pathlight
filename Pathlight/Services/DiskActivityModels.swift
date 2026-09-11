@@ -20,7 +20,7 @@ nonisolated enum DiskActivityStreamEvent: Equatable, Sendable {
     case requiresRescan(eventID: UInt64)
 }
 
-nonisolated enum DiskActivityEventKind: Equatable, Codable, Sendable {
+nonisolated enum DiskActivityEventKind: Equatable, Codable, Sendable, CaseIterable {
     case created
     case modified
     case deleted

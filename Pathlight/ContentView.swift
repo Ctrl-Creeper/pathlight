@@ -15,8 +15,10 @@ struct ContentView: View {
             targets: appModel.longTermWatchTargets,
             histories: Array(appModel.activityDashboardHistories.values),
             runtimeStatuses: appModel.longTermWatchRuntimeStatuses,
+            historyQuery: appModel.activityHistoryQuery,
             showsLaunchAtLoginNudge: appModel.shouldShowLaunchAtLoginNudge,
             monitoringStatusMessage: appModel.monitoringStatusMessage,
+            isMonitoringPaused: appModel.isMonitoringPaused,
             isLiveMonitorActive: appModel.liveWatchSession != nil,
             actions: dashboardActions
         )
@@ -47,6 +49,7 @@ struct ContentView: View {
         ActivityDashboardActions(
             refreshActivityHistory: { appModel.refreshActivityHistory(rootPath: $0) },
             refreshActivityDashboardHistories: { appModel.refreshActivityDashboardHistories(rootPaths: $0) },
+            narrowActivityHistory: { appModel.narrowActivityHistory($0, rootPath: $1) },
             setLongTermWatchEnabled: { appModel.setLongTermWatchEnabled($0, rootPath: $1) },
             removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0) },
             revealInFinder: { appModel.revealURLInFinder($0) },
@@ -70,7 +73,8 @@ struct ContentView: View {
                     openWindow(id: "live-monitor")
                 }
             },
-            stopLiveMonitor: { appModel.stopShortTermWatch() }
+            stopLiveMonitor: { appModel.stopShortTermWatch() },
+            setMonitoringPaused: { appModel.setMonitoringPaused($0) }
         )
     }
 }

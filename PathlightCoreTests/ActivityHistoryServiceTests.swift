@@ -114,6 +114,151 @@ struct ActivityHistoryServiceTests {
 
         #expect(history.recentEvents.map(\.path.lastPathComponent) == ["new.bin", "old.bin"])
     }
+
+    /// The one place the two aggregations meet.
+    ///
+    /// `core/src/history.rs` folds rows for the Windows and Linux hosts and
+    /// this file folds them for the app, because the journal is Swift's and
+    /// does not cross the FFI — the same rule, written twice. The fixture and
+    /// its expectations are shared with `core/tests/history.rs`: edit one
+    /// implementation's bucket boundary, ordering or unknown-size rule and the
+    /// other host's test fails, which is the only thing standing between two
+    /// dashboards and two different answers for one folder.
+    @Test("folds the shared fixture into the history the Rust core folds it into")
+    func foldsTheSharedFixtureLikeTheCore() async throws {
+        let (expected, rows) = try sharedFixture()
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: rows))
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: expected.recentLimit,
+            bucketInterval: TimeInterval(expected.bucketIntervalSecs),
+            generatedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        #expect(history.totalNetByteDelta == expected.totalNetByteDelta)
+        #expect(history.eventCount == expected.eventCount)
+        #expect(history.unknownSizeEventCount == expected.unknownSizeEventCount)
+        #expect(history.isTruncated == expected.isTruncated)
+        #expect(history.recentEvents.map(\.path.path) == expected.recentPaths)
+        #expect(history.buckets == expected.buckets.map { bucket in
+            ActivityHistoryBucket(
+                startDate: Date(timeIntervalSince1970: TimeInterval(bucket.startSecs)),
+                endDate: Date(
+                    timeIntervalSince1970: TimeInterval(bucket.startSecs + expected.bucketIntervalSecs)
+                ),
+                byteDelta: bucket.byteDelta,
+                eventCount: bucket.eventCount,
+                unknownSizeEventCount: bucket.unknownSizeEventCount
+            )
+        })
+    }
+
+    /// The other half of the same contract: a narrowed read, which both hosts
+    /// have to narrow, order and page identically. The totals are the part
+    /// worth pinning — a number under a search box that described only the
+    /// visible page would be a lie about the folder.
+    @Test("narrows the shared fixture into the rows the Rust core narrows it to")
+    func narrowsTheSharedFixtureLikeTheCore() async throws {
+        let (expected, rows) = try sharedFixture()
+        let search = expected.search
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: rows))
+
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: search.limit,
+            bucketInterval: TimeInterval(expected.bucketIntervalSecs),
+            query: ActivityHistoryQuery(
+                text: search.text,
+                largestFirst: search.largestFirst,
+                skip: search.skip
+            ),
+            generatedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        #expect(history.eventCount == search.eventCount)
+        #expect(history.totalNetByteDelta == search.totalNetByteDelta)
+        #expect(history.unknownSizeEventCount == search.unknownSizeEventCount)
+        #expect(history.isTruncated == search.isTruncated)
+        #expect(history.recentEvents.map(\.path.path) == search.recentPaths)
+    }
+
+    /// Asking for one kind of change is asking about that kind: the totals
+    /// must not keep counting the rows that were filtered out.
+    @Test("one kind of change can be asked for on its own")
+    func oneKindOfChangeCanBeAskedForOnItsOwn() async throws {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let events = [
+            event(.created, root: root, name: "a.dmg", timestamp: 3_600, byteDelta: 2_000),
+            event(.deleted, root: root, name: "old.zip", timestamp: 3_900, byteDelta: -500)
+        ]
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: events))
+
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: 100,
+            bucketInterval: 3_600,
+            query: ActivityHistoryQuery(kind: .deleted),
+            generatedAt: Date(timeIntervalSince1970: 10_000)
+        )
+
+        #expect(history.eventCount == 1)
+        #expect(history.totalNetByteDelta == -500)
+        #expect(history.recentEvents.map(\.path.lastPathComponent) == ["old.zip"])
+    }
+
+    private func sharedFixture() throws -> (SharedHistoryExpectations, [DiskActivityEvent]) {
+        let fixtures = URL(filePath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "core/fixtures", directoryHint: .isDirectory)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let expected = try decoder.decode(
+            SharedHistoryExpectations.self,
+            from: try Data(contentsOf: fixtures.appending(path: "history-expectations.json"))
+        )
+        let rows = try String(contentsOf: fixtures.appending(path: "swift-journal.jsonl"), encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try decoder.decode(DiskActivityEvent.self, from: Data(line.utf8))
+            }
+        return (expected, rows)
+    }
+}
+
+/// The numbers both hosts must reach, as `core/fixtures/history-expectations.json`
+/// spells them.
+private struct SharedHistoryExpectations: Decodable {
+    struct Bucket: Decodable {
+        let startSecs: Int
+        let byteDelta: Int64
+        let eventCount: Int
+        let unknownSizeEventCount: Int
+    }
+
+    struct Search: Decodable {
+        let text: String
+        let largestFirst: Bool
+        let skip: Int
+        let limit: Int
+        let eventCount: Int
+        let totalNetByteDelta: Int64
+        let unknownSizeEventCount: Int
+        let isTruncated: Bool
+        let recentPaths: [String]
+    }
+
+    let bucketIntervalSecs: Int
+    let recentLimit: Int
+    let search: Search
+    let totalNetByteDelta: Int64
+    let eventCount: Int
+    let unknownSizeEventCount: Int
+    let isTruncated: Bool
+    let recentPaths: [String]
+    let buckets: [Bucket]
 }
 
 private func event(

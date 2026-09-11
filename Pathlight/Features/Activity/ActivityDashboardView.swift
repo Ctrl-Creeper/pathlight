@@ -4,6 +4,7 @@ import SwiftUI
 struct ActivityDashboardActions {
     let refreshActivityHistory: (URL) -> Void
     let refreshActivityDashboardHistories: ([URL]) -> Void
+    let narrowActivityHistory: (ActivityHistoryQuery, URL) -> Void
     let setLongTermWatchEnabled: (Bool, URL) -> Void
     let removeLongTermWatchTarget: (URL) -> Void
     let revealInFinder: (URL) -> Void
@@ -17,14 +18,17 @@ struct ActivityDashboardActions {
     let exportHistory: (URL) -> Void
     let startLiveMonitor: (DiskActivityAggregationOptions) -> Void
     let stopLiveMonitor: () -> Void
+    let setMonitoringPaused: (Bool) -> Void
 }
 
 struct ActivityDashboardView: View {
     let targets: [LongTermWatchTarget]
     let histories: [ActivityHistorySnapshot]
     let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
+    var historyQuery: ActivityHistoryQuery = .everything
     let showsLaunchAtLoginNudge: Bool
     var monitoringStatusMessage: String? = nil
+    var isMonitoringPaused = false
     let isLiveMonitorActive: Bool
     let actions: ActivityDashboardActions
 
@@ -68,6 +72,21 @@ struct ActivityDashboardView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                // One switch for every watch, for something noisy about to
+                // happen. The folders stay as they are, so resuming starts
+                // the same ones again.
+                Button {
+                    actions.setMonitoringPaused(!isMonitoringPaused)
+                } label: {
+                    Label(
+                        isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
+                        systemImage: isMonitoringPaused ? "play.circle" : "pause.circle"
+                    )
+                }
+                .help(isMonitoringPaused
+                    ? "Start the folders that were being watched again"
+                    : "Hold every watch off without switching the folders off")
+
                 Menu {
                     Button("Choose Folder…") {
                         actions.addFolder()
@@ -154,6 +173,12 @@ struct ActivityDashboardView: View {
             Text(presentation.summaryText)
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
+
+            if isMonitoringPaused {
+                Label("Paused — nothing is being recorded", systemImage: "pause.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.orange)
+            }
 
             Spacer(minLength: 12)
         }
@@ -250,6 +275,12 @@ struct ActivityDashboardView: View {
 
             ActivityDashboardTimelineSection(
                 rows: presentation.timelineRows,
+                query: historyQuery,
+                matchedCount: selectedHistory?.eventCount ?? presentation.timelineRows.count,
+                onNarrow: { query in
+                    guard let selectedRootPath else { return }
+                    actions.narrowActivityHistory(query, selectedRootPath)
+                },
                 onLocate: { actions.revealInFinder(URL(filePath: $0)) },
                 onReveal: { actions.revealInFinder(URL(filePath: $0)) }
             )
@@ -272,6 +303,13 @@ struct ActivityDashboardView: View {
             return nil
         }
         return historyRootID
+    }
+
+    /// The read the timeline is showing: its totals cover every row that
+    /// matched, which is what the page footer counts against.
+    private var selectedHistory: ActivityHistorySnapshot? {
+        guard let selectedTargetID else { return nil }
+        return histories.first { $0.rootPath.standardizedFileURL.path == selectedTargetID }
     }
 
     private func refreshSelectedHistory() {
@@ -817,6 +855,9 @@ private struct ActivityDashboardTopChangeRow: View {
         .onTapGesture {
             onLocate(change.url)
         }
+        .contextMenu {
+            CopyPathButton(path: change.url.path)
+        }
         .help("Click to locate \(change.title) in Pathlight")
     }
 
@@ -867,6 +908,7 @@ private struct ActivityDashboardDeletionsSection: View {
                     Button("Reveal Folder in Finder") {
                         onReveal((deletion.path as NSString).deletingLastPathComponent)
                     }
+                    CopyPathButton(path: deletion.path)
                 }
             }
         }
@@ -877,16 +919,28 @@ private struct ActivityDashboardDeletionsSection: View {
 
 private struct ActivityDashboardTimelineSection: View {
     let rows: [ActivityHistoryPresentation.Row]
+    let query: ActivityHistoryQuery
+    /// How many rows matched, not how many are listed.
+    let matchedCount: Int
+    let onNarrow: (ActivityHistoryQuery) -> Void
     let onLocate: (String) -> Void
     let onReveal: (String) -> Void
 
+    /// What is typed but not asked for yet: a journal re-read on every
+    /// keystroke would read it a dozen times for one word.
+    @State private var find = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Timeline", systemImage: "list.bullet.rectangle")
-                .font(.headline)
+            HStack(spacing: 12) {
+                Label("Timeline", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+                Spacer()
+                narrowingControls
+            }
 
             if rows.isEmpty {
-                Text("No events recorded")
+                Text(query.isNarrowed ? "Nothing recorded here matches that" : "No events recorded")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -902,10 +956,86 @@ private struct ActivityDashboardTimelineSection: View {
                         }
                     }
                 }
+
+                pageFooter
             }
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .onChange(of: query) { _, query in
+            find = query.text
+        }
+    }
+
+    private var narrowingControls: some View {
+        HStack(spacing: 10) {
+            TextField("Find in paths", text: $find)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .onSubmit { ask { $0.text = find } }
+
+            Picker("Kind", selection: kind) {
+                Text("Any change").tag(DiskActivityEventKind?.none)
+                ForEach(DiskActivityEventKind.allCases, id: \.self) { kind in
+                    Text(kind.title).tag(DiskActivityEventKind?.some(kind))
+                }
+            }
+            .labelsHidden()
+            .frame(width: 130)
+
+            Toggle("Biggest first", isOn: largestFirst)
+                .toggleStyle(.checkbox)
+
+            if query != .everything {
+                Button("Clear") {
+                    find = ""
+                    onNarrow(.everything)
+                }
+            }
+        }
+        .font(.subheadline)
+    }
+
+    private var pageFooter: some View {
+        HStack(spacing: 10) {
+            Text(
+                "Rows \(query.skip + 1)–\(query.skip + rows.count) of \(matchedCount). "
+                    + "The totals above cover them all."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button("Previous") { page(by: -ActivityHistoryService.pageSize) }
+                .disabled(query.skip == 0)
+            Button("Next") { page(by: ActivityHistoryService.pageSize) }
+                .disabled(query.skip + rows.count >= matchedCount)
+        }
+    }
+
+    private var kind: Binding<DiskActivityEventKind?> {
+        Binding(get: { query.kind }, set: { kind in ask { $0.kind = kind } })
+    }
+
+    private var largestFirst: Binding<Bool> {
+        Binding(get: { query.largestFirst }, set: { isOn in ask { $0.largestFirst = isOn } })
+    }
+
+    /// A new question starts at the first page: the row somebody was on has
+    /// no meaning once the rows either side of it changed.
+    private func ask(_ change: (inout ActivityHistoryQuery) -> Void) {
+        var next = query
+        change(&next)
+        next.skip = 0
+        guard next != query else { return }
+        onNarrow(next)
+    }
+
+    private func page(by rows: Int) {
+        var next = query
+        next.skip = max(next.skip + rows, 0)
+        onNarrow(next)
     }
 }
 
@@ -953,6 +1083,7 @@ private struct ActivityDashboardTimelineRow: View {
             Button("Reveal in Finder") {
                 onReveal(row.path)
             }
+            CopyPathButton(path: row.path)
         }
     }
 

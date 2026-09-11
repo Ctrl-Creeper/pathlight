@@ -1,16 +1,16 @@
 //! Append-only JSONL journal sharing one file with Swift's `JSONLActivityEventStore`.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{ActivityEvent, CoreError, EventKind};
+use crate::{ActivityEvent, Confidence, CoreError, EventKind};
 
-/// Rows written with encryption on, by either host. The key is per machine —
-/// Swift's is in the macOS Keychain, this build's is beside the journal — so a
-/// line whose key is somewhere else stays unread rather than failing the load.
+/// Rows written with encryption on, by any host. The protected key file sits
+/// beside the journal so the app, CLI and egui shell can read the same rows.
 use crate::crypt::PREFIX as ENCRYPTED_PREFIX;
 
 #[derive(Debug, uniffi::Object)]
@@ -90,10 +90,9 @@ impl Journal {
     /// the cap drops from the front, which is oldest for an append-only file.
     /// Grouped rows are kept for `aggregate_days` instead, which is how the
     /// long tail of "this folder grew by 4 GB in March" outlives the file-level
-    /// rows it was made of without keeping the whole journal that long.
-    // ponytail: no daily rollup. Swift's `retainedEvents` summarizes older
-    // detailed rows into one row per day instead of dropping them; port that
-    // here when a host wants the long tail from rows it never grouped.
+    /// rows it was made of without keeping the whole journal that long. Older
+    /// detailed rows are rolled into one row per root and UTC day before their
+    /// detail expires, matching the macOS host.
     pub fn trim(
         &self,
         retention_days: u32,
@@ -107,9 +106,14 @@ impl Journal {
         // bounded by the cap. Stream it if a caller ever passes a cap larger
         // than it is willing to hold in memory.
         let contents = fs::read_to_string(&self.path)?;
-        let mut kept: Vec<&str> = contents.lines().filter(|line| !line.is_empty()).collect();
-        let total = kept.len();
+        let original: Vec<String> = contents
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let total = original.len();
         let key = self.key_for(&contents);
+        let mut kept: Vec<(usize, String)> = Vec::with_capacity(total);
 
         if retention_days > 0 || aggregate_days > 0 {
             let now = SystemTime::now();
@@ -118,28 +122,95 @@ impl Journal {
                     .then(|| now.checked_sub(Duration::from_secs(u64::from(days) * 86_400)))
                     .flatten()
             };
-            let (detailed, aggregate) = (cutoff(retention_days), cutoff(aggregate_days));
-            kept.retain(|line| match row(line, key.as_ref()) {
-                Some((timestamp, EventKind::Aggregate)) => {
-                    aggregate.is_none_or(|cutoff| timestamp >= cutoff)
+            let detailed = cutoff(retention_days);
+            let aggregate = cutoff(aggregate_days.max(retention_days));
+            let mut rollups: HashMap<(String, u64), (usize, ActivityEvent)> = HashMap::new();
+            for (position, line) in original.iter().enumerate() {
+                let Some(event) = readable(line, key.as_ref())
+                    .and_then(|json| ActivityEvent::from_json_line(&json).ok())
+                else {
+                    // A row this build cannot read is not aged out on a guess.
+                    kept.push((position, line.clone()));
+                    continue;
+                };
+                if event.kind == EventKind::Aggregate {
+                    if aggregate.is_none_or(|cutoff| event.timestamp >= cutoff) {
+                        kept.push((position, line.clone()));
+                    }
+                    continue;
                 }
-                Some((timestamp, _)) => detailed.is_none_or(|cutoff| timestamp >= cutoff),
-                // A row this build cannot read is not aged out on a guess.
-                None => true,
-            });
+                if detailed.is_none_or(|cutoff| event.timestamp >= cutoff) {
+                    kept.push((position, line.clone()));
+                    continue;
+                }
+                if !aggregate.is_none_or(|cutoff| event.timestamp >= cutoff) {
+                    continue;
+                }
+
+                let day_seconds = event
+                    .timestamp
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    / 86_400
+                    * 86_400;
+                let group = rollups
+                    .entry((event.root_path.clone(), day_seconds))
+                    .or_insert_with(|| {
+                        (
+                            position,
+                            ActivityEvent {
+                                kind: EventKind::Aggregate,
+                                path: event.root_path.clone(),
+                                root_path: event.root_path.clone(),
+                                timestamp: UNIX_EPOCH + Duration::from_secs(day_seconds),
+                                byte_delta: Some(0),
+                                confidence: Confidence::Confirmed,
+                                previous_path: None,
+                                affected_item_count: 0,
+                                process_name: None,
+                            },
+                        )
+                    });
+                group.0 = group.0.min(position);
+                group.1.affected_item_count = group
+                    .1
+                    .affected_item_count
+                    .saturating_add(event.affected_item_count);
+                group.1.byte_delta = match (group.1.byte_delta, event.byte_delta) {
+                    (Some(total), Some(delta)) => Some(total.saturating_add(delta)),
+                    _ => None,
+                };
+                group.1.confidence = if group.1.byte_delta.is_none() {
+                    Confidence::Unknown
+                } else if group.1.confidence == Confidence::Confirmed
+                    && event.confidence == Confidence::Confirmed
+                {
+                    Confidence::Confirmed
+                } else {
+                    Confidence::Estimated
+                };
+            }
+            for (_, (position, event)) in rollups {
+                kept.push((position, self.encoded_line(&event)?));
+            }
+            kept.sort_by_key(|(position, _)| *position);
+        } else {
+            kept = original.iter().cloned().enumerate().collect();
         }
 
         if limit_bytes > 0 {
-            let mut bytes: u64 = kept.iter().map(|line| line.len() as u64 + 1).sum();
+            let mut bytes: u64 = kept.iter().map(|(_, line)| line.len() as u64 + 1).sum();
             let mut oldest = 0;
             while bytes > limit_bytes && oldest < kept.len() {
-                bytes -= kept[oldest].len() as u64 + 1;
+                bytes -= kept[oldest].1.len() as u64 + 1;
                 oldest += 1;
             }
             kept.drain(..oldest);
         }
 
-        if kept.len() == total {
+        let kept_lines: Vec<String> = kept.into_iter().map(|(_, line)| line).collect();
+        if kept_lines == original {
             return Ok(0);
         }
 
@@ -148,14 +219,14 @@ impl Journal {
         let temporary = self.path.with_extension("jsonl.trimming");
         let mut file = fs::File::create(&temporary)?;
         set_permissions(&temporary, 0o600)?;
-        for line in &kept {
+        for line in &kept_lines {
             file.write_all(line.as_bytes())?;
             file.write_all(b"\n")?;
         }
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, &self.path)?;
-        Ok((total - kept.len()) as u64)
+        Ok(total.saturating_sub(kept_lines.len()) as u64)
     }
 
     /// Newest first, then path descending, limited — the same order Swift returns.
@@ -184,12 +255,14 @@ impl Journal {
         Ok(events)
     }
 
-    /// Dashboard history for one root: buckets, totals, and the newest rows.
+    /// Dashboard history for one root: buckets, totals, and the page of rows
+    /// `query` asked for.
     pub fn load_history(
         &self,
         root_path: String,
         limit: u32,
         bucket_interval_secs: u64,
+        query: crate::history::Query,
     ) -> Result<crate::HistorySnapshot, CoreError> {
         // Every retained row, not just the page: `limit` cuts the listed rows
         // inside `build_history`, after the totals are known.
@@ -199,6 +272,7 @@ impl Journal {
             events,
             bucket_interval_secs,
             limit,
+            &query,
             std::time::SystemTime::now(),
         ))
     }
@@ -214,23 +288,24 @@ impl Journal {
             .then(|| crate::crypt::key(&self.path))
             .flatten()
     }
+
+    fn encoded_line(&self, event: &ActivityEvent) -> Result<String, CoreError> {
+        let line = event.to_json_line()?;
+        if !self.encrypt {
+            return Ok(line);
+        }
+        let key = crate::crypt::key_or_create(&self.path)?;
+        crate::crypt::seal(&key, line.as_bytes())
+    }
 }
 
 /// The json behind a line, decrypting when the line is encrypted and this
 /// machine has the key. `None` for a row this build cannot read.
-fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
+pub(crate) fn readable(line: &str, key: Option<&[u8; 32]>) -> Option<String> {
     if !line.starts_with(ENCRYPTED_PREFIX) {
         return Some(line.to_owned());
     }
     String::from_utf8(crate::crypt::open(key?, line)?).ok()
-}
-
-/// When a row this build can read was written and what kind it is, or `None`
-/// when it cannot read it.
-fn row(line: &str, key: Option<&[u8; 32]>) -> Option<(SystemTime, EventKind)> {
-    ActivityEvent::from_json_line(&readable(line, key)?)
-        .ok()
-        .map(|event| (event.timestamp, event.kind))
 }
 
 #[cfg(unix)]

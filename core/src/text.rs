@@ -22,6 +22,28 @@ pub fn kind_label(kind: EventKind) -> &'static str {
     }
 }
 
+/// Every kind of change, in the order a chooser lists them.
+pub fn kinds() -> impl Iterator<Item = EventKind> {
+    EventKind::CASES.iter().map(|(kind, _)| *kind)
+}
+
+/// The reverse of [`kind_label`], for a search box or a command line.
+///
+/// Both the printed word and the journal's own name are accepted: one is what
+/// people see in a list, the other is what they see in the file.
+pub fn kind_named(name: &str) -> Option<EventKind> {
+    let wanted = name.trim().to_lowercase();
+    EventKind::CASES
+        .iter()
+        .find(|(kind, name)| *name == wanted || kind_label(*kind) == wanted)
+        .map(|(kind, _)| *kind)
+}
+
+/// The kinds a person may type, for the message that says they mistyped one.
+pub fn kind_names() -> String {
+    kinds().map(kind_label).collect::<Vec<_>>().join(", ")
+}
+
 /// The last component of a path: what the user calls the folder.
 pub fn leaf(path: &str) -> String {
     path.rsplit('/')
@@ -67,12 +89,51 @@ pub fn elapsed(since: SystemTime) -> String {
     }
 }
 
+/// What this platform's watcher promises, as a sentence — the honest answer
+/// to "how much can I trust these rows", since backends are deliberately not
+/// equal.
+pub fn guarantees(capabilities: &crate::monitor::Capabilities) -> String {
+    let promises = [
+        (capabilities.resumable_cursor, "resumes after a restart"),
+        (capabilities.pairs_renames, "pairs renames"),
+        (capabilities.reports_process, "names processes"),
+        (!capabilities.may_drop_events, "never drops events"),
+    ];
+    let kept: Vec<&str> = promises
+        .iter()
+        .filter(|(held, _)| *held)
+        .map(|(_, what)| *what)
+        .collect();
+    match kept.is_empty() {
+        true => "live changes only".to_owned(),
+        false => kept.join(", "),
+    }
+}
+
+/// Which build somebody is running, in the one form a bug report needs: the
+/// host's own version and the core it linked. The two can differ — `gui/` and
+/// the app ship separately from the library — and a report that names only one
+/// of them cannot be reproduced.
+pub fn version(host: &str, host_version: &str) -> String {
+    format!(
+        "{host} {host_version} · core {} · this watcher {}",
+        crate::core_version(),
+        guarantees(&crate::monitor::watcher_capabilities())
+    )
+}
+
 /// A finding's headline, naming the folder it is about.
+/// Why a watch would not open, in the one case that is a choice rather than a
+/// failure. Every host says the same thing, because the fix is the same one
+/// switch wherever they saw it.
+pub const PAUSED: &str = "monitoring is paused";
+
 pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     let name = leaf(root);
     match alert.kind {
         AnomalyKind::Removal => format!("Many files deleted in {name}"),
         AnomalyKind::Burst => format!("{name} is filling up fast"),
+        AnomalyKind::Growth => format!("{name} is growing quickly"),
     }
 }
 
@@ -89,6 +150,9 @@ pub fn alert_body(alert: &Anomaly) -> String {
             alert.items
         ),
         AnomalyKind::Burst => format!("{size} written in the last {minutes} minutes."),
+        // No window in the sentence: this one is the threshold the user set
+        // for a day, and "today" is the word they set it in.
+        AnomalyKind::Growth => format!("Up {size} today, past the size you asked about."),
     }
 }
 

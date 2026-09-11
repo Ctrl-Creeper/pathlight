@@ -463,12 +463,12 @@
         }
       }
     },
-    "New activity journals are sealed with AES-GCM before they are written. The key is stored in macOS Keychain.": {
+    "New activity journals are sealed with AES-GCM before they are written. The protected key is shared by the app and command-line monitor on this Mac.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "新的活动日志在写入前用 AES-GCM 加密，密钥保存在 macOS 钥匙串中。"
+            "value": "新的活动日志在写入前使用 AES-GCM 加密。受保护的密钥由这台 Mac 上的应用和命令行监控器共享。"
           }
         }
       }

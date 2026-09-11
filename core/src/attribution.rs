@@ -2,12 +2,14 @@
 //! Port of Swift's `StorageAttributionService` + `FileAllocatedSizeProvider`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use crate::monitor::{Change, ChangeKind};
-use crate::{ActivityEvent, Confidence, EventKind};
+use crate::{ActivityEvent, Confidence, CoreError, EventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct AggregationOptions {
@@ -90,26 +92,91 @@ pub fn allocated_size(path: &Path) -> Option<i64> {
 /// are independent observers and each needs its own baseline. Sharing one entry
 /// lets whichever watch handles an event first record the new size, so the
 /// others measure a delta of zero and their threshold drops the change.
-// ponytail: in-memory only; Swift persists this as a journal so deletions after a
-// relaunch still get a size. Add persistence when a non-mac shell needs it.
+///
+/// [`SizeIndex::at`] keeps the baselines between runs. Without that a watch
+/// restarted overnight reports the first change to every file as the whole
+/// file, and a deletion as no bytes at all — the answer this app exists for.
 #[derive(Debug, Default)]
 pub struct SizeIndex {
     sizes: Mutex<HashMap<String, i64>>,
+    /// Where the baselines outlive the run that measured them, when a host
+    /// asked for that. `None` is the memory-only index a test or a one-shot
+    /// recording wants.
+    file: Option<Persisted>,
+}
+
+/// How many lines the file may hold before it is rewritten from what is in
+/// memory. An append-only list of baselines is mostly superseded rows; the
+/// macOS index compacts at the same count, so one number is one behaviour.
+const COMPACT_AT: usize = 10_000;
+
+#[derive(Debug)]
+struct Persisted {
+    path: PathBuf,
+    lock_dir: PathBuf,
+    /// The journal whose key seals these lines, when the user asked for
+    /// encrypted records: one key for everything Pathlight keeps, so turning
+    /// encryption on does not leave every path readable over here.
+    key_source: Option<PathBuf>,
+    state: Mutex<Pending>,
+}
+
+#[derive(Debug, Default)]
+struct Pending {
+    /// Changes not written yet. Held rather than written per file: attribution
+    /// runs once per changed path, and a disk write each time is exactly the
+    /// cost a monitor that promises to be cheap must not have.
+    lines: Vec<String>,
+    /// Lines already in the file, for deciding when to rewrite it.
+    written: usize,
 }
 
 impl SizeIndex {
+    /// An index whose baselines are kept in `path`, loaded from it now.
+    ///
+    /// `key_source` is the journal whose key the lines are sealed under, or
+    /// `None` to keep them as plain json — the same choice the journal itself
+    /// offers, because these lines name the same files.
+    pub fn at(path: PathBuf, key_source: Option<PathBuf>) -> Self {
+        let (sizes, written) = load(&path, key_source.as_deref());
+        let lock_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            sizes: Mutex::new(sizes),
+            file: Some(Persisted {
+                path,
+                lock_dir,
+                key_source,
+                state: Mutex::new(Pending {
+                    lines: Vec::new(),
+                    written,
+                }),
+            }),
+        }
+    }
+
     /// Records `size` for `path` in `scope` (or forgets it when `None`).
     pub fn record(&self, scope: &str, path: &str, size: Option<i64>) -> Option<i64> {
+        let key = key(scope, path);
         let mut sizes = self.sizes.lock().unwrap();
         match size {
-            Some(size) => sizes.insert(key(scope, path), size),
-            None => sizes.remove(&key(scope, path)),
+            Some(size) => sizes.insert(key.clone(), size),
+            None => sizes.remove(&key),
         };
+        drop(sizes);
+        self.note(key, size);
         size
     }
 
     pub fn take(&self, scope: &str, path: &str) -> Option<i64> {
-        self.sizes.lock().unwrap().remove(&key(scope, path))
+        let key = key(scope, path);
+        let taken = self.sizes.lock().unwrap().remove(&key);
+        if taken.is_some() {
+            self.note(key, None);
+        }
+        taken
     }
 
     /// The last size recorded for `path` in `scope`, left in place. `take` is
@@ -119,11 +186,227 @@ impl SizeIndex {
     pub fn peek(&self, scope: &str, path: &str) -> Option<i64> {
         self.sizes.lock().unwrap().get(&key(scope, path)).copied()
     }
+
+    pub(crate) fn reset(&self) {
+        self.sizes.lock().unwrap().clear();
+        if let Some(file) = &self.file {
+            let mut state = file.state.lock().unwrap();
+            state.lines.clear();
+            state.written = 0;
+        }
+    }
+
+    /// Puts what changed since the last call on disk, rewriting the file once
+    /// it is mostly superseded rows. A memory-only index does nothing.
+    ///
+    /// Called where the journal is written rather than per file, so one flush
+    /// is one append. A line that fails to reach the disk costs one baseline
+    /// after the next restart, which is why this is not fatal to a watch: the
+    /// file is a cache of measurements, not a record of what happened.
+    pub fn persist(&self) -> Result<(), CoreError> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        let _storage_lock = crate::store::lock_directory(&file.lock_dir)?;
+        self.persist_while_locked()
+    }
+
+    /// Persists while the caller holds the storage directory transaction.
+    /// Used by `Storage` to make a records-generation check and this write
+    /// indivisible across processes.
+    pub(crate) fn persist_while_locked(&self) -> Result<(), CoreError> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        // The storage transaction is always outermost; attribution releases
+        // its in-memory locks before asking Storage to persist.
+        let (lines, compacting) = {
+            let mut state = file.state.lock().unwrap();
+            if state.lines.is_empty() {
+                return Ok(());
+            }
+            let compacting = state.written + state.lines.len() >= COMPACT_AT;
+            (std::mem::take(&mut state.lines), compacting)
+        };
+        let key = match &file.key_source {
+            Some(journal) => Some(crate::crypt::key_or_create(journal)?),
+            None => None,
+        };
+        let lines = match compacting {
+            true => {
+                // Another host may have appended since this instance loaded.
+                // Rebase local pending operations onto the locked on-disk
+                // state instead of publishing a stale in-memory snapshot.
+                let (mut merged, _) = load(&file.path, file.key_source.as_deref());
+                apply(&mut merged, &lines);
+                let mut lines: Vec<String> = merged
+                    .into_iter()
+                    .filter_map(|(path, size)| line(path, Some(size)))
+                    .collect();
+                lines.sort();
+                lines
+            }
+            false => lines,
+        };
+        write(&file.path, &lines, key.as_ref(), !compacting)?;
+        let mut state = file.state.lock().unwrap();
+        state.written = match compacting {
+            true => lines.len(),
+            false => state.written + lines.len(),
+        };
+        Ok(())
+    }
+
+    fn note(&self, key: String, size: Option<i64>) {
+        let Some(file) = &self.file else {
+            return;
+        };
+        if let Some(line) = line(key, size) {
+            file.state.lock().unwrap().lines.push(line);
+        }
+    }
 }
 
 /// A newline cannot appear in a scope, so no scope can spell another one's key.
 fn key(scope: &str, path: &str) -> String {
     format!("{scope}\n{path}")
+}
+
+/// One line of the file: the shape the macOS app writes
+/// (`ActivitySizeIndex.JournalEntry`), so a mac running both hosts keeps one
+/// index rather than two that disagree.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    kind: Kind,
+    /// The namespaced key, which is what the app stores here too.
+    path: String,
+    size: Option<i64>,
+    /// Written because the app's decoder requires it. Nothing here reads it
+    /// back: for one path the last line wins either way.
+    recorded_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Kind {
+    Record,
+    Remove,
+}
+
+/// The json for one baseline, or `None` when it cannot be spelled — a line
+/// that would not parse back is worse than a line that was never written.
+fn line(path: String, size: Option<i64>) -> Option<String> {
+    serde_json::to_string(&Entry {
+        kind: match size {
+            Some(_) => Kind::Record,
+            None => Kind::Remove,
+        },
+        path,
+        size,
+        recorded_at: crate::event::swift_date::text(SystemTime::now()),
+    })
+    .ok()
+}
+
+/// The baselines in `path`, and how many lines they took, or nothing when
+/// there is no file yet.
+fn load(path: &Path, key_source: Option<&Path>) -> (HashMap<String, i64>, usize) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (HashMap::new(), 0);
+    };
+    // Only fetched when a line is actually encrypted: reading a plaintext
+    // file must not create a key, let alone open a keychain.
+    let key = key_source
+        .filter(|_| {
+            text.lines()
+                .any(|line| line.starts_with(crate::crypt::PREFIX))
+        })
+        .and_then(crate::crypt::key);
+    let mut sizes = HashMap::new();
+    let mut written = 0;
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let Some(entry) = crate::journal::readable(line, key.as_ref())
+            .and_then(|json| serde_json::from_str::<Entry>(&json).ok())
+        else {
+            continue;
+        };
+        written += 1;
+        match entry.size.filter(|_| entry.kind == Kind::Record) {
+            Some(size) => sizes.insert(entry.path, size),
+            None => sizes.remove(&entry.path),
+        };
+    }
+    (sizes, written)
+}
+
+fn apply(sizes: &mut HashMap<String, i64>, lines: &[String]) {
+    for line in lines {
+        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
+            continue;
+        };
+        match entry.size.filter(|_| entry.kind == Kind::Record) {
+            Some(size) => {
+                sizes.insert(entry.path, size);
+            }
+            None => {
+                sizes.remove(&entry.path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_rebases_onto_entries_written_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity-size-index.jsonl");
+        let first = SizeIndex::at(path.clone(), None);
+        let second = SizeIndex::at(path.clone(), None);
+
+        first.record("first", "/first.bin", Some(1));
+        first.persist().unwrap();
+        second.record("second", "/second.bin", Some(2));
+        second.file.as_ref().unwrap().state.lock().unwrap().written = COMPACT_AT;
+        second.persist().unwrap();
+
+        let reopened = SizeIndex::at(path, None);
+        assert_eq!(reopened.peek("first", "/first.bin"), Some(1));
+        assert_eq!(reopened.peek("second", "/second.bin"), Some(2));
+    }
+}
+
+fn write(
+    path: &Path,
+    lines: &[String],
+    key: Option<&[u8; 32]>,
+    append: bool,
+) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        crate::journal::set_permissions(parent, 0o700)?;
+    }
+    let mut payload = String::new();
+    for line in lines {
+        match key {
+            Some(key) => payload.push_str(&crate::crypt::seal(key, line.as_bytes())?),
+            None => payload.push_str(line),
+        }
+        payload.push('\n');
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true);
+    match append {
+        true => options.append(true),
+        false => options.write(true).truncate(true),
+    };
+    let mut file = options.open(path)?;
+    crate::journal::set_permissions(path, 0o600)?;
+    std::io::Write::write_all(&mut file, payload.as_bytes())?;
+    Ok(())
 }
 
 /// The three size lookups attribution needs, implemented by the host.

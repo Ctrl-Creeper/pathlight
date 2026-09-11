@@ -112,12 +112,29 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
 
     func compactNow() {
         ioQueue.sync {
-            compact()
+            withStorageLock {
+                compact()
+            }
         }
     }
 
     func flushPendingJournalWrites() {
         ioQueue.sync {}
+    }
+
+    func reset() {
+        ioQueue.sync {
+            withStorageLock {
+                lock.lock()
+                sizesByPath.removeAll()
+                lock.unlock()
+                journalEntryCount = 0
+                if let journalURL,
+                   FileManager.default.fileExists(atPath: journalURL.path) {
+                    try? FileManager.default.removeItem(at: journalURL)
+                }
+            }
+        }
     }
 
     // A newline cannot appear in a scope, so no scope can spell another one's key.
@@ -138,6 +155,12 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
 
     // Runs on ioQueue only; `journalEntryCount` and compaction are ioQueue-confined.
     private func writeJournalEntry(_ entry: JournalEntry) {
+        withStorageLock {
+            writeJournalEntryWhileLocked(entry)
+        }
+    }
+
+    private func writeJournalEntryWhileLocked(_ entry: JournalEntry) {
         guard let journalURL else {
             return
         }
@@ -176,14 +199,19 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
             return
         }
 
-        lock.lock()
-        let snapshot = sizesByPath
-        lock.unlock()
-
         do {
             try ActivityStorageFileProtection.createProtectedDirectory(
                 at: journalURL.deletingLastPathComponent()
             )
+
+            // A CLI or second window may have appended since this instance
+            // loaded. ioQueue has already drained this instance's writes, so
+            // the locked file is the complete, freshest compaction source.
+            let snapshot = Self.loadState(
+                from: journalURL,
+                lineCodec: lineCodec,
+                decoder: decoder
+            ).sizes
 
             let entries = snapshot
                 .sorted { lhs, rhs in lhs.key < rhs.key }
@@ -212,6 +240,17 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         } catch {
             // Keep appending to the journal; a later compaction can try again.
         }
+    }
+
+    private func withStorageLock(_ operation: () -> Void) {
+        guard let journalURL else {
+            operation()
+            return
+        }
+        try? ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent(),
+            operation
+        )
     }
 
     private nonisolated static func loadState(

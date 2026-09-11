@@ -2,11 +2,40 @@ use std::env;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use pathlight_core::store::{Storage, WatchTarget, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS};
+use pathlight_core::history::Query;
+use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
 use pathlight_core::{paths, ActivityEvent};
+
+/// Whether the reading commands answer a program instead of a person.
+///
+/// One process, one output stream, one switch read off the command line before
+/// anything prints.
+// ponytail: a global, because threading a flag through every command
+// signature would be a bigger diff than the feature. Only the commands that
+// read honour it; the ones that change something print a sentence either way.
+static AS_JSON: AtomicBool = AtomicBool::new(false);
+
+struct WatchedSession {
+    root: String,
+    session: pathlight_core::watch::Session,
+    printed: u64,
+    reported_dropped: u64,
+    reported_gaps: u64,
+}
+
+fn as_json() -> bool {
+    AS_JSON.load(Ordering::Relaxed)
+}
+
+/// One line, because a script pipes this into `jq` and a shell reads it a line
+/// at a time.
+fn print_json(value: serde_json::Value) {
+    println!("{value}");
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -184,11 +213,90 @@ fn take_bytes(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<i64>> {
     Ok(Some(value))
 }
 
+/// A flag that takes a word, removed from `args` so the folder is what is left.
+fn take_value(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<String>> {
+    let Some(at) = args.iter().position(|arg| arg == name) else {
+        return Ok(None);
+    };
+    let value = args
+        .get(at + 1)
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} needs a value after it"),
+            )
+        })?;
+    args.drain(at..=at + 1);
+    Ok(Some(value))
+}
+
+fn take_count(args: &mut Vec<OsString>, name: &str) -> io::Result<Option<u32>> {
+    match take_value(args, name)? {
+        None => Ok(None),
+        Some(value) => value.parse().map(Some).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} needs a count that is zero or more"),
+            )
+        }),
+    }
+}
+
+fn take_switch(args: &mut Vec<OsString>, name: &str) -> bool {
+    match args.iter().position(|arg| arg == name) {
+        Some(at) => {
+            args.remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The narrowing every host offers, read off a command line.
+fn take_query(args: &mut Vec<OsString>) -> io::Result<Query> {
+    Ok(Query {
+        text: take_value(args, "--find")?.unwrap_or_default(),
+        kind: match take_value(args, "--kind")? {
+            None => None,
+            Some(name) => Some(pathlight_core::text::kind_named(&name).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--kind takes one of {}, not {name}",
+                        pathlight_core::text::kind_names()
+                    ),
+                )
+            })?),
+        },
+        largest_first: take_switch(args, "--largest"),
+        skip: take_count(args, "--skip")?.unwrap_or(0),
+    })
+}
+
+/// What was narrowed to, for the line that says how many rows matched. A count
+/// with no such line reads as the whole record.
+fn narrowing(query: &Query) -> String {
+    let mut said = Vec::new();
+    if !query.text.is_empty() {
+        said.push(format!("matching \"{}\"", query.text));
+    }
+    if let Some(kind) = query.kind {
+        said.push(pathlight_core::text::kind_label(kind).to_owned());
+    }
+    match said.is_empty() {
+        true => String::new(),
+        false => format!(" {}", said.join(" and ")),
+    }
+}
+
 const SETTING_VALUES: &str = "
 Change one with `settings KEY VALUE`: latency takes immediate, power-saving or a number
 of milliseconds; the file bounds take a byte count or `any`; encrypt takes on or off;
-records takes file-names or `grouped [SECONDS]`; patterns takes a list, `default` for the
-shipped one, or `none` to record everything.";
+records takes file-names or `grouped [SECONDS]`; growth-alert-mb takes megabytes a folder
+may gain in a day before you are told, or 0 for never; patterns takes a list, `default` for
+the shipped one, or `none` to record everything.";
 
 const HELP: &str = "\
 Usage: pathlight-monitor <command> [arguments]
@@ -201,18 +309,40 @@ Usage: pathlight-monitor <command> [arguments]
   watches enable FOLDER   Switch a folder on, so `watch` picks it up.
   watches disable FOLDER  Switch it off again.
   watches remove FOLDER   Forget it. Nothing already recorded is deleted.
-  history FOLDER          What the journal holds for a folder.
+  history FOLDER          What the journal holds for a folder. Narrow it with
+                          --find TEXT (part of a path), --kind KIND (one of
+                          new, changed, deleted, moved, group), --largest
+                          (biggest change first), --skip N and --limit N. The
+                          totals always cover every row that matched.
   export FOLDER [FILE]    Write that as CSV, to FILE or to standard output.
+  report FOLDER [FILE]    Write it as a report to read: totals, where inside
+                          the folder the bytes went, and what was running.
   settings                Show every setting, and where records are kept.
   settings KEY VALUE…     Change one. Run `settings` to see the keys.
+  settings defaults       Put every setting back, keeping folders and records.
+  compact                 Drop what is past the retention now, not at the next
+                          watch, and say how many rows went.
+  forget-records [--yes]  Delete everything recorded, keeping the settings.
   autostart [on|off]      Whether the watches start when you sign in.
+  pause / resume          Hold every watch off, or let them open again. One
+                          switch for all of them, so nothing has to be
+                          switched back on one at a time afterwards.
   record FOLDER JOURNAL [SECONDS=10] [--min-bytes N] [--max-bytes N]
                           One explicit recording into a journal you name, with
                           two interval snapshots. JOURNAL must be outside
                           FOLDER, and registration and scans add to the
                           duration.
+  log [LINES=50]          The watch's own diary: opened, caught up, warned,
+                          failed. Says where the file is, so a report can
+                          attach it.
+  version                 Which build this is, and what its watcher promises.
   install-cli             Put this command in your own home, on your PATH.
   uninstall [--yes]       List Pathlight's own storage, and with --yes remove it.
+
+Add --json to `watches`, `presets`, `history`, `settings`, `log` or `version`
+and the answer comes back as JSON on one line, for a script rather than a
+person. The rows are the journal's own fields, so what a pipeline reads here is
+what the windows read.
 
 Every command but `record` shares one settings file and one journal with the
 Pathlight windows, so a folder added here shows up there. No watch ever records
@@ -243,6 +373,51 @@ fn one_folder(rest: &[OsString], usage: &'static str) -> io::Result<String> {
     }
 }
 
+/// The watch's own diary: when it opened, what it caught up on after a gap,
+/// what it warned about, and what failed.
+///
+/// The windows show the same file. It is the only answer to "it missed
+/// something last night" that does not require somebody to have been watching
+/// the window at the time.
+fn log_lines(rest: &[OsString]) -> io::Result<()> {
+    let lines = match rest {
+        [] => 50,
+        [count] => count
+            .to_str()
+            .and_then(|count| count.parse().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: pathlight-monitor log [LINES]",
+                )
+            })?,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: pathlight-monitor log [LINES]",
+            ))
+        }
+    };
+    let storage = storage()?;
+    let tail = storage.log_tail(lines);
+    if as_json() {
+        print_json(serde_json::json!({
+            "file": storage.log_file().display().to_string(),
+            "lines": tail.lines().collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+    println!("{}", storage.log_file().display());
+    match tail {
+        tail if tail.is_empty() => println!(
+            "Nothing written yet. A watch writes here when it opens, when it catches up after \
+             a gap, when it warns about something, and when it fails."
+        ),
+        tail => println!("{tail}"),
+    }
+    Ok(())
+}
+
 /// Watches folders until the terminal is closed, printing rows as they are
 /// recorded.
 ///
@@ -268,47 +443,86 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             "nothing to watch: name a folder, or switch one on with `watches enable FOLDER`",
         ));
     }
+    let mut sessions = open_watch_sessions(&roots, &storage)?;
+    println!(
+        "Recording to {}. Press Ctrl-C to stop.",
+        storage.journal().display()
+    );
+    let mut was_paused = false;
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let paused = storage.paused();
+        if paused != was_paused {
+            if paused {
+                sessions.clear();
+                println!("Monitoring paused.");
+            } else {
+                sessions = open_watch_sessions(&roots, &storage)?;
+                println!("Monitoring resumed.");
+            }
+            was_paused = paused;
+        }
+        for watched in &mut sessions {
+            let live = watched.session.live();
+            // Newest first in `rows`, so the new ones are the front slice;
+            // printed oldest first, which is how a log reads.
+            let fresh = (live.event_count - watched.printed).min(live.rows.len() as u64) as usize;
+            for event in live.rows.iter().take(fresh).rev() {
+                print_row(event);
+            }
+            watched.printed = live.event_count;
+            if live.dropped > watched.reported_dropped {
+                eprintln!(
+                    "! {}: {} watcher observation(s) were dropped; Pathlight is reconciling the folder.",
+                    watched.root,
+                    live.dropped - watched.reported_dropped
+                );
+                watched.reported_dropped = live.dropped;
+            }
+            if live.gaps > watched.reported_gaps {
+                eprintln!(
+                    "! {}: the watcher reported {} history gap(s); recovered changes are estimates.",
+                    watched.root,
+                    live.gaps - watched.reported_gaps
+                );
+                watched.reported_gaps = live.gaps;
+            }
+            if let Some(error) = &live.error {
+                eprintln!("! {}: {error}", watched.root);
+            }
+        }
+    }
+}
+
+fn open_watch_sessions(roots: &[String], storage: &Storage) -> io::Result<Vec<WatchedSession>> {
     let mut sessions = Vec::new();
     for root in roots {
         // Watching the journal's own folder is a feedback loop; the store
         // refuses to record it either way, and saying so beats a watch that
         // silently reports nothing.
-        if storage.is_own(&root) {
+        if storage.is_own(root) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
             ));
         }
         let session =
-            pathlight_core::watch::Session::start(&root, storage.clone(), |alert, scope| {
+            pathlight_core::watch::Session::start(root, storage.clone(), |alert, scope| {
                 // On stderr, so `watch | grep` still reads as rows while a finding
                 // is still seen by somebody watching the terminal.
                 eprintln!("! {} — {}", alert_title(alert, scope), alert_body(alert));
             })
             .map_err(io::Error::other)?;
         println!("Watching {root}");
-        sessions.push((root, session, 0u64));
+        sessions.push(WatchedSession {
+            root: root.clone(),
+            session,
+            printed: 0,
+            reported_dropped: 0,
+            reported_gaps: 0,
+        });
     }
-    println!(
-        "Recording to {}. Press Ctrl-C to stop.",
-        storage.journal().display()
-    );
-    loop {
-        std::thread::sleep(Duration::from_millis(500));
-        for (root, session, printed) in &mut sessions {
-            let live = session.live();
-            // Newest first in `rows`, so the new ones are the front slice;
-            // printed oldest first, which is how a log reads.
-            let fresh = (live.event_count - *printed).min(live.rows.len() as u64) as usize;
-            for event in live.rows.iter().take(fresh).rev() {
-                print_row(event);
-            }
-            *printed = live.event_count;
-            if let Some(error) = &live.error {
-                eprintln!("! {root}: {error}");
-            }
-        }
-    }
+    Ok(sessions)
 }
 
 fn print_row(event: &ActivityEvent) {
@@ -341,7 +555,17 @@ fn presets(rest: &[OsString]) -> io::Result<()> {
             "usage: pathlight-monitor presets",
         ));
     }
-    for preset in pathlight_core::presets::available() {
+    let available = pathlight_core::presets::available();
+    if as_json() {
+        print_json(
+            available
+                .iter()
+                .map(|preset| serde_json::json!({"title": preset.title, "path": preset.path}))
+                .collect(),
+        );
+        return Ok(());
+    }
+    for preset in available {
         println!("{:<20}{}", preset.title, preset.path);
     }
     println!("\nAdd one with `watches add FOLDER`.");
@@ -355,6 +579,17 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
     match verb {
         "list" if rest.len() <= 1 => {
             let watches = storage.watches();
+            if as_json() {
+                print_json(
+                    watches
+                        .iter()
+                        .map(|watch| {
+                            serde_json::json!({"path": watch.path, "enabled": watch.enabled})
+                        })
+                        .collect(),
+                );
+                return Ok(());
+            }
             if watches.is_empty() {
                 println!("No folders yet. Add one with `watches add FOLDER`.");
             }
@@ -375,33 +610,23 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
                     format!("{root} is where Pathlight keeps its own records"),
                 ));
             }
-            let mut watches = storage.watches();
-            if watches.iter().any(|watch| watch.path == root) {
+            if !storage.add_watch(&root)? {
                 println!("{root} is already remembered.");
                 return Ok(());
             }
             // Switched off, like the windows add it: nothing starts recording
             // because a folder was named.
-            watches.push(WatchTarget {
-                path: root.clone(),
-                enabled: false,
-            });
-            storage.set_watches(&watches)?;
             println!("Added {root}, switched off. `watches enable {root}` switches it on.");
             Ok(())
         }
         "remove" => {
             let root = one_folder(&rest[1..], "usage: pathlight-monitor watches remove FOLDER")?;
-            let mut watches = storage.watches();
-            let before = watches.len();
-            watches.retain(|watch| watch.path != root);
-            if watches.len() == before {
+            if !storage.remove_watch(&root)? {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("{root} is not one of the remembered folders"),
                 ));
             }
-            storage.set_watches(&watches)?;
             println!("Forgot {root}. What was recorded for it is still in the journal.");
             Ok(())
         }
@@ -423,22 +648,61 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
 }
 
 fn history(rest: &[OsString]) -> io::Result<()> {
-    let root = one_folder(rest, "usage: pathlight-monitor history FOLDER")?;
+    let mut args: Vec<OsString> = rest.to_vec();
+    let query = take_query(&mut args)?;
+    let limit = take_count(&mut args, "--limit")?.unwrap_or(HISTORY_ROWS);
+    let root = one_folder(
+        &args,
+        "usage: pathlight-monitor history FOLDER [--find TEXT] [--kind KIND] \
+         [--largest] [--skip N] [--limit N]",
+    )?;
     let snapshot = storage()?
-        .history(&root)
+        .search(&root, limit, &query)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    if as_json() {
+        print_json(serde_json::json!({
+            "rootPath": snapshot.root_path,
+            "eventCount": snapshot.event_count,
+            "totalNetByteDelta": snapshot.total_net_byte_delta,
+            "unknownSizeEventCount": snapshot.unknown_size_event_count,
+            "isTruncated": snapshot.is_truncated,
+            "skip": query.skip,
+            // The rows as the journal writes them, not a second spelling of
+            // the same fields: one contract for the file and the pipeline.
+            "recentEvents": snapshot
+                .recent_events
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(io::Error::other)?,
+        }));
+        return Ok(());
+    }
     println!("{}", snapshot.root_path);
     println!(
-        "{} change(s), net {}{}",
+        "{} change(s){}, net {}{}",
         snapshot.event_count,
+        narrowing(&query),
         human_bytes(snapshot.total_net_byte_delta),
         match snapshot.unknown_size_event_count {
             0 => String::new(),
             unknown => format!(" ({unknown} of unknown size)"),
         }
     );
-    if snapshot.is_truncated {
-        println!("The rows below are the newest; the totals above cover every row.");
+    let shown = snapshot.recent_events.len() as u32;
+    if shown == 0 && snapshot.event_count > 0 {
+        println!("Nothing left past --skip {}.", query.skip);
+    } else if snapshot.is_truncated || query.skip > 0 {
+        println!(
+            "Rows {}–{} of {}{}. The totals above cover every row that matched.",
+            query.skip + 1,
+            query.skip + shown,
+            snapshot.event_count,
+            match query.largest_first {
+                true => ", biggest first",
+                false => ", newest first",
+            }
+        );
     }
     for event in &snapshot.recent_events {
         print_row(event);
@@ -446,14 +710,21 @@ fn history(rest: &[OsString]) -> io::Result<()> {
     Ok(())
 }
 
-fn export(rest: &[OsString]) -> io::Result<()> {
+/// What was recorded, as a file: a spreadsheet's CSV, or the report a person
+/// reads. One command for both, because everything but the last line — which
+/// folder, is there anything, where does it go — is the same question.
+fn export(rest: &[OsString], as_report: bool) -> io::Result<()> {
+    let command = match as_report {
+        true => "report",
+        false => "export",
+    };
     let (root, target) = match rest {
         [folder] => (root_of(folder), None),
         [folder, file] => (root_of(folder), Some(PathBuf::from(file))),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: pathlight-monitor export FOLDER [FILE]",
+                format!("usage: pathlight-monitor {command} FOLDER [FILE]"),
             ))
         }
     };
@@ -466,19 +737,62 @@ fn export(rest: &[OsString]) -> io::Result<()> {
             format!("nothing has been recorded for {root} yet"),
         ));
     }
-    let csv = pathlight_core::export::csv(&events);
+    let text = match as_report {
+        true => pathlight_core::export::markdown(&events, &root),
+        false => pathlight_core::export::csv(&events),
+    };
     match target {
         Some(path) => {
-            std::fs::write(&path, csv)?;
+            std::fs::write(&path, text)?;
             println!("Exported {} change(s) to {}.", events.len(), path.display());
         }
         // Standard output, so this composes with the rest of a shell. The
         // count goes to stderr rather than into the CSV.
         None => {
-            print!("{csv}");
+            print!("{text}");
             eprintln!("{} change(s).", events.len());
         }
     }
+    Ok(())
+}
+
+/// Trims now rather than at the next watch, which is what somebody who just
+/// lowered the retention is asking for.
+fn compact(rest: &[OsString]) -> io::Result<()> {
+    if !rest.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: pathlight-monitor compact",
+        ));
+    }
+    let storage = storage()?;
+    let dropped = storage
+        .trim_journal()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let (bytes, rows) = storage.recorded();
+    println!(
+        "Dropped {dropped} row(s). {rows} row(s) left, {}.",
+        human_bytes(bytes as i64).trim_start_matches('+')
+    );
+    Ok(())
+}
+
+/// Deletes the records, and only on being asked twice: this is the one thing
+/// here nobody can get back.
+fn forget_records(rest: &[OsString]) -> io::Result<()> {
+    let storage = storage()?;
+    let (bytes, rows) = storage.recorded();
+    let size = human_bytes(bytes as i64).trim_start_matches('+').to_owned();
+    if !rest.iter().any(|argument| argument == "--yes") {
+        println!(
+            "{rows} recorded row(s), {size}, in {}",
+            storage.dir().display()
+        );
+        println!("Run `pathlight-monitor forget-records --yes` to delete them. Settings stay.");
+        return Ok(());
+    }
+    storage.forget_records()?;
+    println!("Deleted {rows} recorded row(s) ({size}). Settings and folders are unchanged.");
     Ok(())
 }
 
@@ -514,6 +828,16 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
         }
         "aggregate-retention-days" => storage.set_aggregate_retention_days(number(first, key)?)?,
         "min-delta-bytes" => storage.set_minimum_byte_delta(number(first, key)?)?,
+        "growth-alert-mb" => {
+            let megabytes: i64 = number(first, key)?;
+            let bytes = megabytes.checked_mul(1_000_000).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "that size is larger than any disk",
+                )
+            })?;
+            storage.set_growth_alert_bytes(bytes)?;
+        }
         "records" => match first {
             // Named rows and grouped rows are the two answers; the window only
             // means anything for the second.
@@ -571,6 +895,9 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
             };
             storage.set_patterns(&patterns)?;
         }
+        // Not a key with a value: the way out of an edit whose effect the
+        // user cannot find.
+        "defaults" => storage.restore_default_settings()?,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -587,15 +914,43 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     let (min, max) = storage.size_bounds();
     let bound =
         |value: Option<i64>| value.map_or_else(|| "any".to_owned(), |value| value.to_string());
+    let mut report: Vec<(String, serde_json::Value)> = Vec::new();
     // Padded so the keys read as a column; the first two are what this install
-    // is, not settings, and are named as such.
-    let say = |key: &str, value: String| println!("{key:<26}{value}");
+    // is, not settings, and are named as such. `--json` wants the same pairs
+    // as one object, so they are collected here rather than described twice.
+    // ponytail: every value stays the string the column shows, minus the hint
+    // in brackets after the two spaces — a typed schema would be a second
+    // definition of every setting to keep in step with this one.
+    let mut say = |key: &str, value: String| match as_json() {
+        true => {
+            let value = value.split("  ").next().unwrap_or(&value).to_owned();
+            report.push((key.to_owned(), serde_json::Value::String(value)));
+        }
+        false => println!("{key:<26}{value}"),
+    };
     say("folder", storage.dir().to_string_lossy().into_owned());
+    let (bytes, rows) = storage.recorded();
     say(
         "recorded",
-        match std::fs::metadata(storage.journal()).map(|meta| meta.len()) {
-            Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
-            Err(_) => "nothing recorded yet".to_owned(),
+        match rows {
+            0 => "nothing recorded yet".to_owned(),
+            rows => format!(
+                "{rows} row(s), {}",
+                human_bytes(bytes as i64).trim_start_matches('+')
+            ),
+        },
+    );
+    // Not a setting either: what this platform's watcher promises, which is
+    // what says how much the rows can be trusted.
+    say(
+        "watcher",
+        pathlight_core::text::guarantees(&pathlight_core::monitor::watcher_capabilities()),
+    );
+    say(
+        "paused",
+        match storage.paused() {
+            true => "yes  (`resume` to watch again)".to_owned(),
+            false => "no".to_owned(),
         },
     );
     say("retention-days", days.to_string());
@@ -607,6 +962,13 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     say(
         "min-delta-bytes",
         options.minimum_recorded_byte_delta.to_string(),
+    );
+    say(
+        "growth-alert-mb",
+        match storage.growth_alert_bytes() {
+            0 => "never".to_owned(),
+            bytes => (bytes / 1_000_000).to_string(),
+        },
     );
     say("min-file-bytes", bound(min));
     say("max-file-bytes", bound(max));
@@ -630,6 +992,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     );
     say("encrypt", storage.encrypting().to_string());
     say("patterns", storage.patterns().join(" "));
+    if as_json() {
+        print_json(serde_json::Value::Object(report.into_iter().collect()));
+        return Ok(());
+    }
     println!("{SETTING_VALUES}");
     Ok(())
 }
@@ -676,8 +1042,31 @@ fn autostart(rest: &[OsString]) -> io::Result<()> {
     Ok(())
 }
 
+/// The one switch that holds every watch off, in the same shape as
+/// `autostart`: no argument says where it stands.
+fn pause(rest: &[OsString], paused: bool) -> io::Result<()> {
+    let storage = storage()?;
+    match rest.first().and_then(|arg| arg.to_str()) {
+        None => storage.set_paused(paused)?,
+        Some(value) => storage.set_paused(switch(value, "pause")?)?,
+    }
+    println!(
+        "{}",
+        match storage.paused() {
+            true => "Monitoring is paused. No watch will open until `pathlight-monitor resume`.",
+            false => "Monitoring is on. Watches open as usual.",
+        }
+    );
+    Ok(())
+}
+
 fn run() -> io::Result<()> {
     let mut args: Vec<OsString> = env::args_os().skip(1).collect();
+    // Taken out before the command is read, so it can be typed anywhere on the
+    // line and the positional arguments keep their meaning.
+    if take_switch(&mut args, "--json") {
+        AS_JSON.store(true, Ordering::Relaxed);
+    }
     // `first`, not `args[0]`: no arguments at all is the most likely way this
     // binary is ever run, and it used to panic.
     match args
@@ -689,15 +1078,38 @@ fn run() -> io::Result<()> {
             print!("{HELP}");
             return Ok(());
         }
+        "-V" | "--version" | "version" => {
+            match as_json() {
+                true => print_json(serde_json::json!({
+                    "host": "pathlight-monitor",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "core": pathlight_core::core_version(),
+                    "watcher": pathlight_core::text::guarantees(
+                        &pathlight_core::monitor::watcher_capabilities(),
+                    ),
+                })),
+                false => println!(
+                    "{}",
+                    pathlight_core::text::version("pathlight-monitor", env!("CARGO_PKG_VERSION"))
+                ),
+            }
+            return Ok(());
+        }
         "uninstall" => return uninstall(&args[1..]),
         "install-cli" => return install_cli(&args[1..]),
         "watch" => return watch(&args[1..]),
         "watches" => return watches(&args[1..]),
         "presets" => return presets(&args[1..]),
         "history" => return history(&args[1..]),
-        "export" => return export(&args[1..]),
+        "log" => return log_lines(&args[1..]),
+        "compact" => return compact(&args[1..]),
+        "forget-records" => return forget_records(&args[1..]),
+        "export" => return export(&args[1..], false),
+        "report" => return export(&args[1..], true),
         "settings" => return settings(&args[1..]),
         "autostart" => return autostart(&args[1..]),
+        "pause" => return pause(&args[1..], true),
+        "resume" => return pause(&args[1..], false),
         // Named or not: the recording form is what this binary was before the
         // other commands existed, and scripts pass the two paths bare.
         "record" => {

@@ -1,18 +1,21 @@
 import Foundation
 import PathlightRustCore
 
-/// The journal line format, from the core that owns it. macOS keeps its key in
-/// the Keychain, which no other process can open, so the key is handed to the
-/// core per call rather than stored there.
+/// The journal line format, from the core that owns it. Every host reads the
+/// same protected key file, and Swift hands those bytes to the core per call.
 nonisolated struct RustActivityStorageCryptor: ActivityStorageLineCrypting {
     /// Cached: the marker is a constant, and this is asked once per journal row.
     private static let marker = storageLineMarker()
 
     let keyProvider: any ActivityStorageKeyProviding
+    let legacyKeyProvider: (any ActivityStorageKeyProviding)?
 
     static let live = RustActivityStorageCryptor(
         keyProvider: CachingActivityStorageKeyProvider(
-            wrapping: KeychainActivityStorageKeyProvider.live
+            wrapping: FileActivityStorageKeyProvider.live
+        ),
+        legacyKeyProvider: CachingActivityStorageKeyProvider(
+            wrapping: LegacyKeychainActivityStorageKeyProvider()
         )
     )
 
@@ -22,10 +25,23 @@ nonisolated struct RustActivityStorageCryptor: ActivityStorageLineCrypting {
 
     func open(_ line: String) throws -> Data? {
         // The marker first, then the key: a journal written before encryption
-        // was turned on is read without ever touching the Keychain.
+        // was turned on is read without ever touching the key file.
         guard line.hasPrefix(Self.marker) else {
             return nil
         }
-        return try openStorageLine(line: line, key: keyProvider.loadOrCreateKey())
+        let sharedKey = try keyProvider.loadOrCreateKey()
+        do {
+            return try openStorageLine(line: line, key: sharedKey)
+        } catch {
+            // A machine that used both old hosts may already have two key
+            // families. Reading through the old Keychain key lets the normal
+            // journal/index compaction rewrite those rows under the shared key.
+            guard let legacyKeyProvider,
+                  let legacyKey = try? legacyKeyProvider.loadOrCreateKey(),
+                  legacyKey != sharedKey else {
+                throw error
+            }
+            return try openStorageLine(line: line, key: legacyKey)
+        }
     }
 }

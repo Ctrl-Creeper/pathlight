@@ -19,24 +19,40 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use eframe::egui;
+use pathlight_core::history::Query;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::store::{Storage, WatchTarget};
+use pathlight_core::store::{Storage, WatchTarget, HISTORY_ROWS};
 use pathlight_core::text::{elapsed, human_bytes, kind_label, leaf};
 use pathlight_core::watch::Session;
 use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapshot};
 
 use tray::{Tray, Wish};
 
+/// The search box, named so a keyboard shortcut can hand it the focus.
+fn find_box() -> egui::Id {
+    egui::Id::new("find")
+}
+
 fn main() -> eframe::Result<()> {
     // How the login item starts us: watching, with no window in the way of
     // whatever the person actually signed in to do.
     let hidden = std::env::args().any(|argument| argument == settings::HIDDEN);
+    // Where it was last put away, if it was. Read before the window exists,
+    // because a window that opens somewhere and then jumps is worse than one
+    // that opens where it was left.
+    let geometry = Storage::current()
+        .as_ref()
+        .and_then(settings::Geometry::read);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(geometry.map_or([980.0, 660.0], |geometry| geometry.size()))
+        .with_min_inner_size([680.0, 420.0])
+        .with_visible(!hidden)
+        .with_title("Pathlight");
+    if let Some(geometry) = geometry {
+        viewport = viewport.with_position(geometry.position());
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([680.0, 420.0])
-            .with_visible(!hidden)
-            .with_title("Pathlight"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -46,6 +62,7 @@ fn main() -> eframe::Result<()> {
             theme::install(&cc.egui_ctx, &theme::system_fonts());
             let mut app = App::resumed();
             app.hidden = hidden;
+            app.observe_shared_pause(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
@@ -57,6 +74,13 @@ struct App {
     watches: Vec<WatchTarget>,
     sessions: HashMap<String, Session>,
     selected: Option<String>,
+    /// What the history pane was narrowed to, kept while the selection moves
+    /// so a search survives clicking between folders.
+    query: Query,
+    /// What is typed in the search box but not asked for yet. A journal read
+    /// per keystroke is a read of the whole file per keystroke, so the box
+    /// waits for Enter or for the focus to leave.
+    find: String,
     /// What the journal already holds for [`Self::selected`], so a folder that
     /// was recorded last month is not a blank pane this month. Read on its own
     /// thread: the journal is as large as the retention cap allows, and
@@ -77,6 +101,11 @@ struct App {
     /// Whether new rows are written encrypted, mirrored from storage so the
     /// checkbox does not read a file every frame.
     encrypt: bool,
+    /// Whether every watch is held off, mirrored from storage for the same
+    /// reason.
+    paused: bool,
+    shared_pause_changes: Option<Receiver<bool>>,
+    shared_pause_stop: Option<mpsc::Sender<()>>,
     /// What the two size boxes hold while they are being typed, in MB. Text
     /// rather than numbers, because an empty box is "no bound" and a
     /// half-typed one must not be read as a bound the user did not finish.
@@ -91,6 +120,10 @@ struct App {
     /// The window is closed but the app is not: the watches are running and
     /// the tray is how the user gets back.
     hidden: bool,
+    /// Whether the window stays above other windows. Not saved: it is what
+    /// somebody wants while they are watching something happen, which is the
+    /// same reason the macOS Live Monitor pins per session.
+    on_top: bool,
     /// The user asked to quit, so the next close request is a real one.
     quitting: bool,
     /// The settings pane, while it is open, holding what has been typed but
@@ -107,18 +140,24 @@ impl App {
         });
         let watches = storage.as_ref().map(Storage::watches).unwrap_or_default();
         let encrypt = storage.as_ref().is_ok_and(Storage::encrypting);
+        let paused = storage.as_ref().is_ok_and(Storage::paused);
         let (min_bytes, max_bytes) = storage
             .as_ref()
             .map(Storage::size_bounds)
             .unwrap_or_default();
         Self {
             encrypt,
+            paused,
+            shared_pause_changes: None,
+            shared_pause_stop: None,
             min_mb: mb_text(min_bytes),
             max_mb: mb_text(max_bytes),
             selected: watches.first().map(|watch| watch.path.clone()),
             storage,
             watches,
             sessions: HashMap::new(),
+            query: Query::default(),
+            find: String::new(),
             history: None,
             history_root: None,
             history_pending: None,
@@ -129,6 +168,7 @@ impl App {
             tray: None,
             tray_tried: false,
             hidden: false,
+            on_top: false,
             quitting: false,
             settings: None,
         }
@@ -154,7 +194,7 @@ impl App {
             .map(|watch| watch.path.clone())
             .collect();
         for root in enabled {
-            self.start(&root);
+            self.open(&root);
         }
     }
 
@@ -165,7 +205,7 @@ impl App {
     /// Starts reading the journal for `root`. The previous answer is cleared
     /// first: showing last folder's totals under this folder's name is worse
     /// than showing none.
-    fn load_history(&mut self, root: &str) {
+    fn load_history(&mut self, root: &str, ctx: &egui::Context) {
         self.history = None;
         self.history_root = Some(root.to_owned());
         self.history_pending = None;
@@ -174,13 +214,20 @@ impl App {
         };
         let (sender, receiver) = mpsc::channel();
         let root = root.to_owned();
+        let query = self.query.clone();
+        let ctx = ctx.clone();
         // A failed spawn leaves `history` empty, which the pane reads as still
         // loading — wrong, but a thread that will not start is a machine with
         // worse problems than a missing panel.
         if std::thread::Builder::new()
             .name("pathlight-history".into())
             .spawn(move || {
-                let _ = sender.send(storage.history(&root).map_err(|error| error.to_string()));
+                let _ = sender.send(
+                    storage
+                        .search(&root, HISTORY_ROWS, &query)
+                        .map_err(|error| error.to_string()),
+                );
+                ctx.request_repaint();
             })
             .is_ok()
         {
@@ -189,7 +236,7 @@ impl App {
     }
 
     /// Picks up a finished read, and starts one when the selection moved.
-    fn poll_history(&mut self) {
+    fn poll_history(&mut self, ctx: &egui::Context) {
         if let Some(pending) = &self.history_pending {
             if let Ok(result) = pending.try_recv() {
                 self.history = Some(result);
@@ -198,7 +245,7 @@ impl App {
         }
         if self.history_root.as_deref() != self.selected.as_deref() {
             match self.selected.clone() {
-                Some(root) => self.load_history(&root),
+                Some(root) => self.load_history(&root, ctx),
                 None => {
                     self.history = None;
                     self.history_root = None;
@@ -233,12 +280,11 @@ impl App {
                 return;
             }
         }
-        if !self.watches.iter().any(|watch| watch.path == root) {
-            self.watches.push(WatchTarget {
-                path: root.clone(),
-                enabled: false,
-            });
-            self.persist();
+        if let Some(storage) = self.storage().cloned() {
+            match storage.add_watch(&root) {
+                Ok(_) => self.watches = storage.watches(),
+                Err(error) => self.notice = Some(format!("Could not save that folder: {error}")),
+            }
         }
         self.selected = Some(root);
     }
@@ -248,7 +294,7 @@ impl App {
     /// Reading the journal rather than the pane's snapshot: the pane lists the
     /// newest rows, and an export missing the older ones is the one thing a
     /// person exports records for.
-    fn export(&mut self) {
+    fn export(&mut self, as_report: bool) {
         let Some(root) = self.selected.clone() else {
             return;
         };
@@ -270,32 +316,42 @@ impl App {
         // ponytail: on the ui thread, like the folder picker already is. The
         // read is a file the retention cap bounds, and the dialog blocks
         // anyway.
+        let (title, suffix, text) = match as_report {
+            true => (
+                "Save a report of the recorded changes",
+                "report.md",
+                pathlight_core::export::markdown(&events, &root),
+            ),
+            false => (
+                "Export recorded changes",
+                "changes.csv",
+                pathlight_core::export::csv(&events),
+            ),
+        };
         let Some(target) = rfd::FileDialog::new()
-            .set_title("Export recorded changes")
-            .set_file_name(format!("{}-changes.csv", leaf(&root)))
+            .set_title(title)
+            .set_file_name(format!("{}-{suffix}", leaf(&root)))
             .save_file()
         else {
             return;
         };
-        self.notice = Some(
-            match std::fs::write(&target, pathlight_core::export::csv(&events)) {
-                Ok(()) => format!(
-                    "Exported {} change(s) to {}.",
-                    events.len(),
-                    target.display()
-                ),
-                Err(error) => format!("Could not write {}: {error}", target.display()),
-            },
-        );
+        self.notice = Some(match std::fs::write(&target, text) {
+            Ok(()) => format!("Wrote {} change(s) to {}.", events.len(), target.display()),
+            Err(error) => format!("Could not write {}: {error}", target.display()),
+        });
     }
 
     fn forget(&mut self, root: &str) {
         self.sessions.remove(root);
-        self.watches.retain(|watch| watch.path != root);
+        if let Some(storage) = self.storage().cloned() {
+            match storage.remove_watch(root) {
+                Ok(_) => self.watches = storage.watches(),
+                Err(error) => self.notice = Some(format!("Could not forget that folder: {error}")),
+            }
+        }
         if self.selected.as_deref() == Some(root) {
             self.selected = self.watches.first().map(|watch| watch.path.clone());
         }
-        self.persist();
     }
 
     fn toggle(&mut self, root: &str) {
@@ -309,27 +365,36 @@ impl App {
     /// the same. A watch that could not be opened is not remembered as one:
     /// the next launch would fail the same way and say nothing new.
     fn start(&mut self, root: &str) {
+        if self.open(root) {
+            self.remember(root, true);
+        }
+    }
+
+    fn open(&mut self, root: &str) -> bool {
         let Some(storage) = self.storage().cloned() else {
-            return;
+            return false;
         };
         match Session::start(root, storage, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
-                self.remember(root, true);
+                true
             }
-            Err(error) => self.notice = Some(format!("Could not watch {root}: {error}")),
+            Err(error) => {
+                self.notice = Some(format!("Could not watch {root}: {error}"));
+                false
+            }
         }
     }
 
     fn remember(&mut self, root: &str, enabled: bool) {
-        match self.watches.iter_mut().find(|watch| watch.path == root) {
-            Some(watch) => watch.enabled = enabled,
-            None => self.watches.push(WatchTarget {
-                path: root.to_owned(),
-                enabled,
-            }),
+        let Some(storage) = self.storage().cloned() else {
+            return;
+        };
+        if let Err(error) = storage.set_watch_enabled(root, enabled) {
+            self.notice = Some(format!("Could not save that folder: {error}"));
+            return;
         }
-        self.persist();
+        self.watches = storage.watches();
     }
 
     /// Stops every watch and starts the same ones again, which is how a
@@ -340,7 +405,91 @@ impl App {
     fn restart_watches(&mut self) {
         for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
             self.sessions.remove(&root);
-            self.start(&root);
+            self.open(&root);
+        }
+    }
+
+    fn apply_shared_pause(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            self.sessions.clear();
+        } else {
+            if let Some(storage) = self.storage() {
+                self.watches = storage.watches();
+            }
+            self.resume();
+        }
+    }
+
+    fn poll_shared_pause(&mut self) {
+        let changed = self
+            .shared_pause_changes
+            .as_ref()
+            .and_then(|changes| changes.try_iter().last());
+        if let Some(paused) = changed {
+            self.apply_shared_pause(paused);
+        }
+    }
+
+    /// Watches the one shared setting off the paint path. It wakes egui only
+    /// when the value changes, so a hidden or idle window remains idle while
+    /// still observing another host's pause within a second.
+    fn observe_shared_pause(&mut self, ctx: &egui::Context) {
+        let Some(storage) = self.storage().cloned() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let (stop_sender, stop_receiver) = mpsc::channel::<()>();
+        let ctx = ctx.clone();
+        let mut paused = self.paused;
+        if std::thread::Builder::new()
+            .name("pathlight-settings".into())
+            .spawn(move || loop {
+                match stop_receiver.recv_timeout(Duration::from_secs(1)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let current = storage.paused();
+                if current == paused {
+                    continue;
+                }
+                paused = current;
+                if sender.send(current).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            })
+            .is_ok()
+        {
+            self.shared_pause_changes = Some(receiver);
+            self.shared_pause_stop = Some(stop_sender);
+        }
+    }
+
+    fn stop_shared_pause_observer(&mut self) {
+        if let Some(stop) = self.shared_pause_stop.take() {
+            let _ = stop.send(());
+        }
+        self.shared_pause_changes = None;
+    }
+
+    /// Holds every watch off, or lets them open again.
+    ///
+    /// Pausing does not switch the folders off: what was being watched is what
+    /// starts again on resume, here or at the next launch, which is the whole
+    /// point of one switch rather than a row of them.
+    fn set_paused(&mut self, paused: bool) {
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if let Err(error) = storage.set_paused(paused) {
+            self.notice = Some(format!("Could not save that: {error}"));
+            return;
+        }
+        self.paused = paused;
+        match paused {
+            true => self.sessions.clear(),
+            false => self.resume(),
         }
     }
 
@@ -392,22 +541,12 @@ impl App {
         self.restart_watches();
     }
 
-    fn persist(&mut self) {
-        if self.uninstalled {
-            return;
-        }
-        if let Some(storage) = self.storage() {
-            if let Err(error) = storage.set_watches(&self.watches) {
-                self.notice = Some(format!("Could not save the folder list: {error}"));
-            }
-        }
-    }
-
     fn uninstall(&mut self, targets: &[PathBuf]) {
         // Every watch stops first. A running session appends to the journal,
         // and a journal written after it was deleted is a half-removed
         // install that reports itself as removed.
         self.sessions.clear();
+        self.stop_shared_pause_observer();
         let failures = uninstall::remove_all(targets);
         self.uninstalled = true;
         self.watches.clear();
@@ -433,7 +572,15 @@ impl App {
 /// `&self`, and both of these change the app.
 enum Ask {
     Reload,
-    Export,
+    /// The history pane, narrowed to something else. Read again rather than
+    /// filtered in place: the totals have to cover every row that matched,
+    /// which only the journal knows.
+    Requery(Query),
+    /// Every recorded row as a file: a spreadsheet's CSV, or the report a
+    /// person reads.
+    Export {
+        as_report: bool,
+    },
 }
 
 impl eframe::App for App {
@@ -449,16 +596,13 @@ impl App {
         // is a window to draw it in: an idle window should cost nothing, and a
         // hidden one has nothing to show four times a second.
         let ctx = ui.ctx().clone();
+        self.poll_shared_pause();
         if !self.sessions.is_empty() && !self.hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        self.shortcuts(&ctx);
         self.watch_the_tray(&ctx);
-        self.poll_history();
-        if self.history_pending.is_some() {
-            // Otherwise the finished read sits in the channel until something
-            // else asks for a frame, and the pane says "reading" forever.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+        self.poll_history(&ctx);
 
         egui::Panel::top(egui::Id::new("header")).show(ui, |ui| {
             ui.add_space(8.0);
@@ -470,6 +614,25 @@ impl App {
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
+                if self.paused {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("Paused — nothing is being recorded.")
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut paused = self.paused;
+                    ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
+                        "Holds every watch off, for something noisy about to happen — a build, \
+                         a restore, a large copy. The folders stay as they are, and resuming \
+                         starts the same ones again.",
+                    );
+                    if paused != self.paused {
+                        self.set_paused(paused);
+                    }
+                });
             });
             ui.add_space(8.0);
         });
@@ -512,6 +675,20 @@ impl App {
                         self.settings = self.storage().map(settings::Draft::read);
                     }
                     ui.add_space(12.0);
+                    let mut on_top = self.on_top;
+                    ui.checkbox(&mut on_top, "Keep in front").on_hover_text(
+                        "The window stays above other windows, so a copy or an installer can \
+                         be watched while it runs.",
+                    );
+                    if on_top != self.on_top {
+                        self.on_top = on_top;
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::WindowLevel(match on_top {
+                                true => egui::WindowLevel::AlwaysOnTop,
+                                false => egui::WindowLevel::Normal,
+                            }));
+                    }
+                    ui.add_space(12.0);
                     let mut encrypt = self.encrypt;
                     ui.checkbox(&mut encrypt, "Encrypt new records")
                         .on_hover_text(
@@ -538,12 +715,18 @@ impl App {
             .show(ui, |ui| self.detail(ui))
             .inner;
         match ask {
-            Some(Ask::Reload) => {
+            Some(Ask::Requery(query)) => {
+                self.query = query;
                 if let Some(root) = self.selected.clone() {
-                    self.load_history(&root);
+                    self.load_history(&root, &ctx);
                 }
             }
-            Some(Ask::Export) => self.export(),
+            Some(Ask::Reload) => {
+                if let Some(root) = self.selected.clone() {
+                    self.load_history(&root, &ctx);
+                }
+            }
+            Some(Ask::Export { as_report }) => self.export(as_report),
             None => {}
         }
 
@@ -577,8 +760,52 @@ impl App {
             self.grant(wish, ctx);
         }
 
-        if ctx.input(|input| input.viewport().close_requested()) && self.closing_keeps_watching() {
-            self.hide(ctx);
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.remember_geometry(ctx);
+            if self.closing_keeps_watching() {
+                self.hide(ctx);
+            }
+        }
+    }
+
+    /// The keys the macOS app answers to, in this platform's modifier:
+    /// `COMMAND` is Ctrl on Windows and Linux and Cmd on a mac, which is the
+    /// whole difference between the two hosts here.
+    ///
+    /// Not while a dialog is open: a shortcut that acted behind a modal would
+    /// change something the user cannot see.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.settings.is_some() || self.notice.is_some() || self.uninstall_prompt.is_some() {
+            return;
+        }
+        // `consume_key`, so a shortcut that did something does not also reach
+        // the widget that has focus.
+        let pressed = |key| ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key));
+        if pressed(egui::Key::O) {
+            self.add_folder();
+        }
+        if pressed(egui::Key::Comma) {
+            self.settings = self.storage().map(settings::Draft::read);
+        }
+        // Where macOS stops the live monitor, this stops every watch: the
+        // same key for the same "that is enough for now".
+        if pressed(egui::Key::Period) {
+            self.set_paused(!self.paused);
+        }
+        if pressed(egui::Key::F) {
+            ctx.memory_mut(|memory| memory.request_focus(find_box()));
+        }
+    }
+
+    /// Writes down where the window is, at the one moment it is worth a disk
+    /// write: it is being put away. Saving as it is dragged would be a write
+    /// per frame of the drag.
+    fn remember_geometry(&self, ctx: &egui::Context) {
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
+            settings::Geometry::save(storage, rect);
         }
     }
 
@@ -598,6 +825,7 @@ impl App {
             }
             Wish::Quit => {
                 self.quitting = true;
+                self.stop_shared_pause_observer();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -695,6 +923,9 @@ impl App {
 
         let mut toggle: Option<String> = None;
         let mut forget: Option<String> = None;
+        // A paused install cannot open a watch, so the button says so by
+        // being unavailable rather than by failing when it is pressed.
+        let paused = self.paused;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -721,9 +952,17 @@ impl App {
                                     if ui.button("Forget").clicked() {
                                         forget = Some(root.clone());
                                     }
-                                    if ui.button(if watching { "Stop" } else { "Watch" }).clicked()
-                                    {
+                                    let button =
+                                        egui::Button::new(if watching { "Stop" } else { "Watch" });
+                                    let press = ui.add_enabled(!paused, button);
+                                    if press.clicked() {
                                         toggle = Some(root.clone());
+                                    }
+                                    if paused {
+                                        press.on_disabled_hover_text(
+                                            "Monitoring is paused. Resume at the top of the \
+                                             window and this folder starts again.",
+                                        );
                                     }
                                 },
                             );
@@ -758,7 +997,7 @@ impl App {
         }
     }
 
-    fn detail(&self, ui: &mut egui::Ui) -> Option<Ask> {
+    fn detail(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
         let Some(root) = self.selected.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -775,7 +1014,17 @@ impl App {
             ui.label(egui::RichText::new(leaf(&root)).size(20.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Export…").clicked() {
-                    ask = Some(Ask::Export);
+                    ask = Some(Ask::Export { as_report: false });
+                }
+                if ui
+                    .button("Report…")
+                    .on_hover_text(
+                        "A report to read: the totals, where inside the folder the bytes \
+                         went, and what was running.",
+                    )
+                    .clicked()
+                {
+                    ask = Some(Ask::Export { as_report: true });
                 }
                 if ui
                     .button("Show…")
@@ -856,14 +1105,62 @@ impl App {
     }
 
     /// What the journal holds for a folder nothing is watching right now.
-    fn recorded_history(&self, ui: &mut egui::Ui, root: &str) -> Option<Ask> {
+    fn recorded_history(&mut self, ui: &mut egui::Ui, root: &str) -> Option<Ask> {
         let mut reload = false;
+        let mut query = self.query.clone();
+        let narrowed = query != Query::default();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Recorded history").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 reload = ui.button("Reload").clicked();
             });
         });
+        ui.add_space(6.0);
+
+        let find = &mut self.find;
+        let mut asked = None;
+        ui.horizontal_wrapped(|ui| {
+            let name = ui.label(
+                egui::RichText::new("Find")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            let box_ = ui
+                .add(
+                    egui::TextEdit::singleline(find)
+                        .id(find_box())
+                        .hint_text("Part of a path")
+                        .desired_width(170.0),
+                )
+                .labelled_by(name.id);
+            if box_.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                asked = Some(find.clone());
+            }
+            egui::ComboBox::from_id_salt("history-kind")
+                .selected_text(query.kind.map(kind_label).unwrap_or("Any change"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut query.kind, None, "Any change");
+                    for kind in pathlight_core::text::kinds() {
+                        ui.selectable_value(&mut query.kind, Some(kind), kind_label(kind));
+                    }
+                });
+            ui.checkbox(&mut query.largest_first, "Biggest first");
+            if narrowed && ui.button("Clear").clicked() {
+                query = Query::default();
+                find.clear();
+                asked = Some(String::new());
+            }
+        });
+        if let Some(text) = asked {
+            query.text = text;
+        }
+        // A different question starts at its own first page, not at the page
+        // the last one happened to be on.
+        if (&query.text, query.kind, query.largest_first)
+            != (&self.query.text, self.query.kind, self.query.largest_first)
+        {
+            query.skip = 0;
+        }
         ui.add_space(6.0);
 
         match &self.history {
@@ -876,8 +1173,11 @@ impl App {
             Some(Err(error)) => warn(ui, &format!("Could not read the journal: {error}")),
             Some(Ok(history)) if history.event_count == 0 => {
                 ui.label(
-                    egui::RichText::new("Nothing has been recorded here yet.")
-                        .color(ui.visuals().weak_text_color()),
+                    egui::RichText::new(match narrowed {
+                        true => "Nothing recorded here matches that.",
+                        false => "Nothing has been recorded here yet.",
+                    })
+                    .color(ui.visuals().weak_text_color()),
                 );
             }
             Some(Ok(history)) => {
@@ -923,18 +1223,42 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                     );
                 }
-                if history.is_truncated {
-                    ui.label(
-                        egui::RichText::new(
-                            "Newest changes only. The totals above cover every retained row.",
-                        )
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                    );
+                // The totals above cover every matching row; these buttons
+                // move the list, which is why they say which rows it holds.
+                let shown = history.recent_events.len() as u32;
+                if history.is_truncated || query.skip > 0 {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Rows {}–{} of {}. The totals above cover them all.",
+                                query.skip + 1,
+                                query.skip + shown,
+                                history.event_count
+                            ))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                        if ui
+                            .add_enabled(query.skip > 0, egui::Button::new("Previous page"))
+                            .clicked()
+                        {
+                            query.skip = query.skip.saturating_sub(HISTORY_ROWS);
+                        }
+                        if ui
+                            .add_enabled(history.is_truncated, egui::Button::new("Next page"))
+                            .clicked()
+                        {
+                            query.skip += HISTORY_ROWS;
+                        }
+                    });
                 }
                 ui.add_space(8.0);
                 rows(ui, "history-events", history.recent_events.iter(), root);
             }
+        }
+        if query != self.query {
+            return Some(Ask::Requery(query));
         }
         reload.then_some(Ask::Reload)
     }
@@ -1041,14 +1365,22 @@ fn rows<'a>(
                         // Clickable, because the question after "this file
                         // changed" is "where is it", and a deleted file's
                         // folder is still worth opening.
-                        if ui
+                        let clicked = ui
                             .add(
                                 egui::Label::new(relative_path(&event.path, root))
                                     .sense(egui::Sense::click()),
                             )
-                            .on_hover_text("Click to show this in your file manager.")
-                            .clicked()
-                        {
+                            .on_hover_text("Click to show this in your file manager.");
+                        // The row shows a path relative to the watched
+                        // folder; what somebody pastes elsewhere has to be
+                        // the whole one.
+                        clicked.context_menu(|ui| {
+                            if ui.button("Copy path").clicked() {
+                                ui.ctx().copy_text(event.path.clone());
+                                ui.close();
+                            }
+                        });
+                        if clicked.clicked() {
                             let path = Path::new(&event.path);
                             show_in_file_manager(match path.is_dir() {
                                 true => path,
@@ -1198,6 +1530,8 @@ mod tests {
                 })
                 .collect(),
             sessions: HashMap::new(),
+            query: Query::default(),
+            find: String::new(),
             history: None,
             history_root: None,
             history_pending: None,
@@ -1206,6 +1540,9 @@ mod tests {
             uninstall_prompt: None,
             uninstalled: false,
             encrypt: false,
+            paused: false,
+            shared_pause_changes: None,
+            shared_pause_stop: None,
             min_mb: String::new(),
             max_mb: String::new(),
             tray: None,
@@ -1213,6 +1550,7 @@ mod tests {
             // and a test that made one would leave it in the tester's tray.
             tray_tried: true,
             hidden: false,
+            on_top: false,
             quitting: false,
             settings: None,
         }
@@ -1254,6 +1592,111 @@ mod tests {
             harness.state().sessions.is_empty(),
             "pressing Stop did not end the watch"
         );
+    }
+
+    /// The keyboard is the other way to reach what the buttons do, and the
+    /// one a person who watches folders all day uses. Ctrl-. is the macOS
+    /// app's Cmd-. — stop what is running now.
+    #[test]
+    fn the_keyboard_pauses_and_resumes_without_a_button() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            harness.state().paused && harness.state().sessions.is_empty(),
+            "the pause shortcut did not stop the watch"
+        );
+
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            !harness.state().paused && harness.state().sessions.contains_key(&root),
+            "the shortcut did not resume"
+        );
+
+        // The settings shortcut opens the pane the button opens, and while it
+        // is open the other shortcuts stay out of the way.
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+        harness.step();
+        assert!(harness.state().settings.is_some(), "Ctrl-, opened nothing");
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            !harness.state().paused,
+            "a shortcut acted behind an open dialog"
+        );
+    }
+
+    /// One switch, every watch: pausing ends what is running without
+    /// forgetting it, and resuming brings the same folder back — including
+    /// after a restart, which is why the answer lives in the settings file.
+    #[test]
+    fn pausing_ends_every_watch_and_resuming_brings_them_back() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+        harness.get_by_label("Watch").click();
+        harness.step();
+        assert!(harness.state().sessions.contains_key(&root));
+
+        harness.get_by_label("Pause all watches").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "a pause left a watch running"
+        );
+        assert!(Storage::at(storage_dir.path()).paused());
+        // A watch cannot be started while paused, whichever button asks.
+        harness.step();
+        harness.get_by_label("Watch").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "a paused install opened a watch"
+        );
+
+        harness.get_by_label("Pause all watches").click();
+        harness.step();
+        assert!(
+            harness.state().sessions.contains_key(&root),
+            "resuming did not bring the watch back"
+        );
+        assert!(!Storage::at(storage_dir.path()).paused());
+    }
+
+    #[test]
+    fn a_pause_saved_by_another_process_reconciles_the_running_window() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut app = app(storage_dir.path(), vec![root.clone()]);
+        app.start(&root);
+        assert!(app.sessions.contains_key(&root));
+        app.observe_shared_pause(&egui::Context::default());
+
+        Storage::at(storage_dir.path()).set_paused(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !app.paused && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(app.paused && app.sessions.is_empty());
+
+        Storage::at(storage_dir.path()).set_paused(false).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while app.paused && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(!app.paused && app.sessions.contains_key(&root));
+        app.stop_shared_pause_observer();
     }
 
     /// The promise a restart has to keep: a folder that was being watched when
@@ -1358,6 +1801,40 @@ mod tests {
         assert!(harness.state().uninstalled);
     }
 
+    /// Deleting the records is the one thing in the pane nobody can get back,
+    /// so the first press only asks. The settings and the folder list are
+    /// deliberately still there afterwards — that is what makes this a
+    /// different answer from Uninstall.
+    #[test]
+    fn deleting_every_record_takes_two_presses_and_keeps_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        std::fs::write(storage.journal(), b"a row\n").unwrap();
+        storage.set_retention(30, 2_000_000).unwrap();
+        let mut harness = harness(app(dir.path(), vec!["/watched/folder".to_owned()]));
+
+        harness.get_by_label("Settings…").click();
+        harness.run();
+        // Through accesskit rather than a pointer: the pane scrolls in a
+        // window this size, and a real user scrolls to what a test cannot.
+        harness
+            .get_by_label("Delete every record")
+            .click_accesskit();
+        harness.run();
+        assert!(
+            storage.journal().exists(),
+            "the first press deleted the records instead of asking"
+        );
+
+        harness
+            .get_by_label_contains("Really delete")
+            .click_accesskit();
+        harness.run();
+        assert!(!storage.journal().exists(), "the records are still there");
+        assert_eq!(storage.retention(), (30, 2_000_000), "settings went too");
+        assert_eq!(harness.state().watches.len(), 1, "the folder list went too");
+    }
+
     /// Nowhere to record to is a thing to say out loud. A window that merely
     /// records nothing looks like a working window.
     #[test]
@@ -1379,6 +1856,58 @@ mod tests {
         let harness = harness(app(storage.path(), vec!["/watched/folder".to_owned()]));
 
         harness.get_by_label("Export…");
+    }
+
+    /// The search controls, driven through the real widgets. What they narrow
+    /// to has to become the question the journal is read with — the reading
+    /// itself, and what counts as a match, is pinned in `core/tests/history.rs`.
+    #[test]
+    fn narrowing_the_history_asks_the_journal_the_narrower_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = "/watched/folder".to_owned();
+        let recorded = pathlight_core::history::build_history(
+            &root,
+            vec![pathlight_core::ActivityEvent {
+                kind: EventKind::Modified,
+                path: "/watched/folder/big.psd".to_owned(),
+                root_path: root.clone(),
+                timestamp: SystemTime::now(),
+                byte_delta: Some(8_192),
+                confidence: Confidence::Confirmed,
+                previous_path: None,
+                affected_item_count: 1,
+                process_name: None,
+            }],
+            3_600,
+            HISTORY_ROWS,
+            &Query::default(),
+            SystemTime::now(),
+        );
+        let mut app = app(dir.path(), vec![root.clone()]);
+        // Already read, so the pane draws its rows rather than waiting on the
+        // thread that would read them.
+        app.history_root = Some(root);
+        app.history = Some(Ok(recorded));
+        let mut harness = harness(app);
+
+        harness.get_by_label("Find").focus();
+        harness.step();
+        harness.get_by_label("Find").type_text("psd");
+        harness.step();
+        // Enter is what commits it: a journal read per keystroke is a read of
+        // the whole file per keystroke.
+        harness.key_press(egui::Key::Enter);
+        harness.step();
+        assert_eq!(harness.state().query.text, "psd");
+
+        harness.get_by_label("Biggest first").click();
+        harness.step();
+        assert!(harness.state().query.largest_first);
+        // And clearing puts back the whole record, box included.
+        harness.get_by_label("Clear").click();
+        harness.step();
+        assert_eq!(harness.state().query, Query::default());
+        assert!(harness.state().find.is_empty());
     }
 
     /// Nothing selected is nothing to export, and a button that acts on the

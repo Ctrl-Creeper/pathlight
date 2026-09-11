@@ -78,9 +78,8 @@ fn a_cap_drops_the_oldest_until_the_file_fits() {
     assert!(!kept.iter().any(|row| row.path.ends_with("f0.bin")));
 }
 
-/// A row this build cannot date must not be aged out on a guess — the key for
-/// an encrypted line lives in the macOS Keychain, and a Linux host reading the
-/// same file cannot read the timestamp inside it.
+/// A row this build cannot date must not be aged out on a guess — for example,
+/// when a copied journal does not include its key file.
 #[test]
 fn a_row_this_build_cannot_read_is_not_aged_out() {
     let dir = tempfile::tempdir().unwrap();
@@ -197,14 +196,54 @@ fn a_grouped_row_outlives_the_file_rows_it_was_made_of() {
         .append(vec![event("old.bin", 400), grouped, event("recent.bin", 3)])
         .unwrap();
 
-    assert_eq!(journal.trim(180, 730, 0).unwrap(), 1);
+    assert_eq!(journal.trim(180, 730, 0).unwrap(), 0);
     let kept = journal.load(ROOT.to_owned(), 100).unwrap();
-    assert_eq!(kept.len(), 2, "kept: {kept:#?}");
-    assert!(kept.iter().any(|row| row.kind == EventKind::Aggregate));
+    assert_eq!(kept.len(), 3, "kept: {kept:#?}");
+    assert_eq!(
+        kept.iter()
+            .filter(|row| row.kind == EventKind::Aggregate)
+            .count(),
+        2,
+        "the existing grouped row and the daily rollup both survive"
+    );
     assert!(kept.iter().any(|row| row.path.ends_with("recent.bin")));
 
     // And a grouped row past its own retention goes like anything else: this
     // is a longer window, not an exemption.
-    assert_eq!(journal.trim(180, 365, 0).unwrap(), 1);
+    assert_eq!(journal.trim(180, 365, 0).unwrap(), 2);
     assert_eq!(journal.load(ROOT.to_owned(), 100).unwrap().len(), 1);
+}
+
+#[test]
+fn old_file_rows_roll_up_by_root_and_utc_day_before_detail_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    let day = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_006_400);
+    let mut first = event("first.bin", 0);
+    first.timestamp = day + Duration::from_secs(60);
+    first.byte_delta = Some(4_096);
+    first.affected_item_count = 2;
+    let mut second = event("second.bin", 0);
+    second.timestamp = day + Duration::from_secs(3_600);
+    second.byte_delta = None;
+    second.confidence = Confidence::Estimated;
+    second.affected_item_count = 3;
+    journal.append(vec![first, second]).unwrap();
+
+    // Both rows are older than the detailed cutoff relative to this process's
+    // current date, but young enough for a deliberately broad aggregate tail.
+    journal.trim(1, 100_000, 0).unwrap();
+
+    let kept = journal.load(ROOT.to_owned(), 100).unwrap();
+    assert_eq!(kept.len(), 1, "kept: {kept:#?}");
+    let rollup = &kept[0];
+    assert_eq!(rollup.kind, EventKind::Aggregate);
+    assert_eq!(rollup.path, ROOT);
+    assert_eq!(rollup.timestamp, day);
+    assert_eq!(
+        rollup.byte_delta, None,
+        "an unknown input cannot become zero"
+    );
+    assert_eq!(rollup.confidence, Confidence::Unknown);
+    assert_eq!(rollup.affected_item_count, 5);
 }

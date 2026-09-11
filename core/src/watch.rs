@@ -22,7 +22,7 @@ use crate::monitor::{ActivityListener, Change, StreamEvent, Watcher};
 use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
 use crate::{paths, ActivityEvent, Confidence, EventKind};
 
-use crate::anomaly::{anomalies, Anomaly, AnomalyKind, WINDOW};
+use crate::anomaly::{anomalies, growth, Anomaly, AnomalyKind, GROWTH_WINDOW, WINDOW};
 use crate::store::Storage;
 
 /// How long a batch waits before it is attributed and written.
@@ -82,9 +82,8 @@ impl Default for Live {
 
 pub struct Session {
     live: Arc<Mutex<Live>>,
-    /// Held only to keep the watch open; dropping this ends the watch, which
-    /// closes the queue, which ends the worker.
-    _watcher: Arc<Watcher>,
+    watcher: Option<Arc<Watcher>>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Session {
@@ -93,6 +92,12 @@ impl Session {
         storage: Storage,
         announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        // The pause is checked here rather than in each host: a host that
+        // forgot would record through a pause the user asked for, and there is
+        // no message for that afterwards.
+        if storage.paused() {
+            return Err(crate::text::PAUSED.to_owned());
+        }
         // Built before the watch opens: a filter that failed to compile after
         // events started arriving would record the noise it exists to drop.
         let exclusions =
@@ -102,6 +107,18 @@ impl Session {
         // host restarts what is running when the user changes any of them.
         let options = storage.options();
         let latency_ms = storage.latency_ms();
+        let storage_threshold = storage.growth_alert_bytes();
+        let now = SystemTime::now();
+        let day_start = utc_day_start(now);
+        let initial_growth = storage
+            .positive_growth_since(root, day_start)
+            .unwrap_or_else(|error| {
+                storage.note(&format!(
+                    "Could not restore today's growth total for {root}: {error}"
+                ));
+                0
+            });
+        let records_epoch = storage.records_epoch();
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
@@ -116,6 +133,10 @@ impl Session {
         )
         .map_err(|error| error.to_string())?;
 
+        storage.note(&format!(
+            "watch opened on {root} · flushing every {latency_ms} ms · this watcher {}",
+            crate::text::guarantees(&crate::monitor::watcher_capabilities())
+        ));
         let worker = Worker {
             scope: root.to_owned(),
             storage,
@@ -123,23 +144,40 @@ impl Session {
             exclusions,
             live: live.clone(),
             dropped,
-            alerts: Mutex::new(Alerts::default()),
+            records_epoch,
+            alerts: Mutex::new(Alerts::watching(storage_threshold, initial_growth, now)),
             announce: Box::new(announce),
         };
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("pathlight-session".into())
             .spawn(move || worker.run(receiver))
             .map_err(|error| error.to_string())?;
 
         Ok(Self {
             live,
-            _watcher: watcher,
+            watcher: Some(watcher),
+            worker: Some(worker),
         })
     }
 
     /// Reads the live state. Held for as long as one frame's drawing takes.
     pub fn live(&self) -> std::sync::MutexGuard<'_, Live> {
         self.live.lock().expect("session state mutex poisoned")
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.stop();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -165,17 +203,32 @@ type Baseline = Arc<Mutex<Option<ScanSnapshot>>>;
 /// What the folder holds now. A folder that cannot be read has no baseline,
 /// which is said out loud: silently having none would turn every later gap
 /// into a gap nobody can reconcile.
-fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>) -> Option<ScanSnapshot> {
+fn baseline_of(scope: &str, live: &Arc<Mutex<Live>>, storage: &Storage) -> Option<ScanSnapshot> {
     match snapshot::scan(Path::new(scope)) {
         Ok(snapshot) => Some(snapshot),
         Err(error) => {
-            live.lock().unwrap_or_else(PoisonError::into_inner).error = Some(format!(
-                "Could not read {scope} to know what it holds, so a dropped event cannot \
-                 be recovered here: {error}"
-            ));
+            trouble(
+                live,
+                storage,
+                format!(
+                    "Could not read {scope} to know what it holds, so a dropped event cannot \
+                     be recovered here: {error}"
+                ),
+            );
             None
         }
     }
+}
+
+/// One thing that went wrong, said to whoever is looking now and written down
+/// for whoever looks later.
+///
+/// Both, because a watch runs for months with the window closed: an error that
+/// only ever reached a screen nobody was in front of is an error nobody can be
+/// told about afterwards.
+fn trouble(live: &Arc<Mutex<Live>>, storage: &Storage, message: String) {
+    storage.note(&message);
+    live.lock().unwrap_or_else(PoisonError::into_inner).error = Some(message);
 }
 
 struct Worker {
@@ -193,6 +246,7 @@ struct Worker {
     exclusions: Option<ExclusionFilter>,
     live: Arc<Mutex<Live>>,
     dropped: Arc<AtomicU64>,
+    records_epoch: u64,
     /// What the user has already been told, so a background watch can speak
     /// up without becoming noise.
     alerts: Mutex<Alerts>,
@@ -200,18 +254,23 @@ struct Worker {
 }
 
 impl Worker {
-    fn run(self, receiver: mpsc::Receiver<StreamEvent>) {
-        let index = SizeIndex::default();
-        let scope = self.scope.as_str();
+    fn run(mut self, receiver: mpsc::Receiver<StreamEvent>) {
+        // Loaded from disk, so a watch reopened tomorrow measures deltas
+        // against yesterday's sizes instead of calling every first change a
+        // whole file and every deletion nothing at all.
+        let index = self.storage.size_index();
+        let size_scope = self.scope.clone();
+        let prior_scope = self.scope.clone();
+        let known_scope = self.scope.clone();
         // The size provider records what it measured, so a later deletion of
         // the same path still has a size to report.
         let size = |path: &str| {
             let size = allocated_size(Path::new(path));
-            index.record(scope, path, size);
+            index.record(&size_scope, path, size);
             size
         };
-        let prior_size = |path: &str| index.take(scope, path);
-        let known_size = |path: &str| index.peek(scope, path);
+        let prior_size = |path: &str| index.take(&prior_scope, path);
+        let known_size = |path: &str| index.peek(&known_scope, path);
         let attributor = Attributor::new(self.options, &size, &prior_size, &known_size);
         let mut pending: Vec<Change> = Vec::new();
         // What the folder looked like when the watch opened. Without it a gap
@@ -227,14 +286,15 @@ impl Worker {
             let slot = baseline.clone();
             let scope = self.scope.clone();
             let live = self.live.clone();
+            let storage = self.storage.clone();
             let spawned = std::thread::Builder::new()
                 .name("pathlight-baseline".into())
                 .spawn(move || {
-                    let taken = baseline_of(&scope, &live);
+                    let taken = baseline_of(&scope, &live, &storage);
                     *slot.lock().unwrap_or_else(PoisonError::into_inner) = taken;
                 });
             if let Err(error) = spawned {
-                self.live().error = Some(format!("Could not take a baseline: {error}"));
+                self.trouble(format!("Could not take a baseline: {error}"));
             }
         }
         let mut due = Instant::now() + FLUSH;
@@ -248,13 +308,15 @@ impl Worker {
                 Ok(event) => self.accept(event, &mut pending, &baseline),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.flush(&attributor, &mut pending);
+                    self.flush(&attributor, &mut pending, &index, &baseline);
+                    self.storage
+                        .note(&format!("watch closed on {}", self.scope));
                     return;
                 }
             }
             let now = Instant::now();
             if now >= due {
-                self.flush(&attributor, &mut pending);
+                self.flush(&attributor, &mut pending, &index, &baseline);
                 due = now + FLUSH;
             }
             if now >= trim_due {
@@ -289,7 +351,7 @@ impl Worker {
         let Some(previous) = slot.take() else {
             return;
         };
-        let Some(current) = baseline_of(&self.scope, &self.live) else {
+        let Some(current) = baseline_of(&self.scope, &self.live, &self.storage) else {
             // Keep the old baseline: it is still the last thing known, and a
             // watch with no baseline can never reconcile again.
             *slot = Some(previous);
@@ -307,10 +369,13 @@ impl Worker {
 
         let recovered = events.len() as u64;
         self.publish(events, 0);
-        let mut live = self.live();
-        live.recovered += recovered;
+        self.storage.note(&format!(
+            "caught up on {}: {recovered} row(s) recovered from a gap",
+            self.scope
+        ));
+        self.live().recovered += recovered;
         if incomplete {
-            live.error = Some(
+            self.trouble(
                 "Parts of this folder could not be read while catching up, so the recovered \
                  list may be short."
                     .to_owned(),
@@ -386,41 +451,100 @@ impl Worker {
     /// user was promised, and only they can free the disk it sits on.
     fn trim(&self) {
         if let Err(error) = self.storage.trim_journal() {
-            self.live().error = Some(format!("Could not trim the journal: {error}"));
+            self.trouble(format!("Could not trim the journal: {error}"));
         }
     }
 
-    fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>) {
-        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+    /// See [`trouble`]: a Worker always has both halves to hand.
+    fn trouble(&self, message: String) {
+        trouble(&self.live, &self.storage, message);
+    }
+
+    fn flush(
+        &mut self,
+        attributor: &Attributor<'_>,
+        pending: &mut Vec<Change>,
+        index: &SizeIndex,
+        baseline: &Baseline,
+    ) {
+        let mut dropped = self.dropped.swap(0, Ordering::Relaxed);
         if pending.is_empty() && dropped == 0 {
             return;
         }
+        let (records_epoch, reset_at) = self.storage.records_generation();
+        if records_epoch != self.records_epoch {
+            pending.retain(|change| change.timestamp >= reset_at);
+            dropped = 0;
+            index.reset();
+            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                baseline_of(&self.scope, &self.live, &self.storage);
+            self.records_epoch = records_epoch;
+        }
         let events = attributor.process(pending);
         pending.clear();
-        self.publish(events, dropped);
+        if !self.publish(events, dropped) {
+            index.reset();
+            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                baseline_of(&self.scope, &self.live, &self.storage);
+            self.records_epoch = self.storage.records_epoch();
+            return;
+        }
+        if dropped > 0 {
+            self.storage.note(&format!(
+                "watch queue overflow on {}: {dropped} observation(s) dropped; reconciling",
+                self.scope
+            ));
+            self.reconcile(baseline);
+        }
+        // After the rows, because a baseline nobody can compare against is
+        // worth less than a row nobody has a baseline for.
+        match self
+            .storage
+            .persist_index_if_generation(index, self.records_epoch)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                index.reset();
+                *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                    baseline_of(&self.scope, &self.live, &self.storage);
+                self.records_epoch = self.storage.records_epoch();
+            }
+            Err(error) => self.trouble(format!("Sizes could not be remembered: {error}")),
+        }
     }
 
     /// Journal first, then the screen. A row on screen that was never written
     /// is the difference between a record and a display nobody can get back.
-    fn publish(&self, events: Vec<ActivityEvent>, dropped: u64) {
+    fn publish(&self, events: Vec<ActivityEvent>, dropped: u64) -> bool {
         let failure = if events.is_empty() {
             None
         } else {
-            self.storage.record(events.clone()).err()
+            match self
+                .storage
+                .record_if_generation(events.clone(), self.records_epoch)
+            {
+                Ok(true) => None,
+                Ok(false) => return false,
+                Err(error) => Some(error),
+            }
         };
 
         let mut live = self.live();
         live.dropped += dropped;
+        let mut arrived = 0i64;
         for event in events {
             live.total_byte_delta += event.byte_delta.unwrap_or(0);
+            arrived = arrived.saturating_add(event.byte_delta.unwrap_or(0).max(0));
             live.event_count += 1;
             live.rows.push_front(event);
             if live.rows.len() > MAX_ROWS {
                 live.rows.pop_back();
             }
         }
-        if let Some(failure) = failure {
-            live.error = Some(format!("Could not write to the journal: {failure}"));
+        let journal_failure =
+            failure.map(|failure| format!("Could not write to the journal: {failure}"));
+        if let Some(message) = &journal_failure {
+            live.error = Some(message.clone());
         }
 
         // While the window is closed nothing repaints, so this has to happen
@@ -431,11 +555,19 @@ impl Worker {
             .alerts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .news(&live.rows, SystemTime::now());
+            .news(&live.rows, arrived, SystemTime::now());
         drop(live);
+        // After the lock, because writing to the diary is a disk write and
+        // the lock is held on the path that also draws.
+        if let Some(message) = &journal_failure {
+            self.storage.note(message);
+        }
         for alert in news {
+            self.storage
+                .note(&crate::text::alert_title(&alert, &self.scope));
             (self.announce)(&alert, &self.scope);
         }
+        true
     }
 
     fn live(&self) -> std::sync::MutexGuard<'_, Live> {
@@ -449,20 +581,59 @@ struct Alerts {
     /// When each kind was last raised. A folder being emptied stays a folder
     /// being emptied for as long as it takes; saying so every flush would
     /// teach the user to ignore it.
-    said: [Option<SystemTime>; 2],
+    said: [Option<SystemTime>; 3],
+    /// How much this folder may gain in a day before the user is told, or
+    /// zero for never.
+    threshold: i64,
+    /// The day being added up, and what has arrived inside it.
+    day: Option<(SystemTime, i64)>,
 }
 
 impl Alerts {
-    /// What is worth saying about these rows right now.
+    /// Alerts that also watch for a folder gaining `threshold` bytes in a day.
+    fn watching(threshold: i64, initial_growth: i64, now: SystemTime) -> Self {
+        Self {
+            threshold,
+            day: Some((utc_day_start(now), initial_growth.max(0))),
+            ..Self::default()
+        }
+    }
+
+    /// What is worth saying about these rows right now, given that `arrived`
+    /// bytes of them are new.
     ///
     /// `rows` is newest first and bounded, so a long enough burst is measured
     /// from what was kept: the thresholds are floors, and a floor that is
     /// crossed is still crossed.
-    fn news(&mut self, rows: &VecDeque<ActivityEvent>, now: SystemTime) -> Vec<Anomaly> {
-        anomalies(rows, now)
+    fn news(
+        &mut self,
+        rows: &VecDeque<ActivityEvent>,
+        arrived: i64,
+        now: SystemTime,
+    ) -> Vec<Anomaly> {
+        let mut found = anomalies(rows, now);
+        found.extend(self.grown(arrived, now));
+        found
             .into_iter()
             .filter(|alert| self.once(alert, now))
             .collect()
+    }
+
+    /// Adds `arrived` to the day and says whether the day is now past the
+    /// threshold. The total resets at the UTC day boundary, matching history
+    /// aggregation and the macOS host.
+    fn grown(&mut self, arrived: i64, now: SystemTime) -> Option<Anomaly> {
+        if self.threshold <= 0 {
+            return None;
+        }
+        let today = utc_day_start(now);
+        let (start, gained) = self.day.get_or_insert((today, 0));
+        if *start != today {
+            *start = today;
+            *gained = 0;
+        }
+        *gained = gained.saturating_add(arrived);
+        growth(*gained, self.threshold)
     }
 
     /// Whether this finding has gone unsaid for a window.
@@ -470,16 +641,27 @@ impl Alerts {
         // Matched rather than indexed by discriminant, so a finding added to
         // the core's policy fails to compile here instead of silently
         // borrowing another kind's cooldown.
-        let slot = &mut self.said[match alert.kind {
-            AnomalyKind::Removal => 0,
-            AnomalyKind::Burst => 1,
-        }];
-        if slot.is_some_and(|said| now.duration_since(said).unwrap_or_default() < WINDOW) {
+        let (index, cooldown) = match alert.kind {
+            AnomalyKind::Removal => (0, WINDOW),
+            AnomalyKind::Burst => (1, WINDOW),
+            // Once a day, because that is the span the threshold is about.
+            AnomalyKind::Growth => (2, GROWTH_WINDOW),
+        };
+        let slot = &mut self.said[index];
+        if slot.is_some_and(|said| now.duration_since(said).unwrap_or_default() < cooldown) {
             return false;
         }
         *slot = Some(now);
         true
     }
+}
+
+fn utc_day_start(time: SystemTime) -> SystemTime {
+    let seconds = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds / 86_400 * 86_400)
 }
 
 #[cfg(test)]
@@ -514,6 +696,42 @@ mod tests {
             |_, _| {},
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dropping_a_session_waits_for_its_worker_to_close() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let session = watch(root.path(), storage_dir.path());
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(storage_dir.path().join(crate::store::LOCK_FILE))
+            .unwrap();
+        lock.lock().unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            drop(session);
+            let _ = finished.send(());
+        });
+
+        assert!(
+            result.recv_timeout(Duration::from_millis(100)).is_err(),
+            "Session::drop returned while its worker was still closing"
+        );
+        fs::File::unlock(&lock).unwrap();
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Session::drop did not finish after storage unlocked");
+        assert!(
+            Storage::at(storage_dir.path())
+                .log_tail(10)
+                .contains("watch closed"),
+            "the worker did not finish its close record"
+        );
     }
 
     /// The whole pipeline on a real filesystem: kernel event, measurement,
@@ -681,11 +899,16 @@ mod tests {
             options: AggregationOptions::SHORT_TERM,
             live: Arc::new(Mutex::new(Live::default())),
             dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: Storage::at(storage_dir.path()).records_epoch(),
             alerts: Mutex::new(Alerts::default()),
             announce: Box::new(|_, _| {}),
         };
 
-        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&worker.scope, &worker.live)));
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
+            &worker.scope,
+            &worker.live,
+            &worker.storage,
+        )));
         assert!(
             baseline.lock().unwrap().is_some(),
             "no baseline: {:?}",
@@ -739,6 +962,89 @@ mod tests {
         assert!(journal.contains("later.bin"), "journal was {journal:?}");
     }
 
+    #[test]
+    fn a_reset_discards_a_batch_accepted_before_the_reset() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        let mut worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions::SHORT_TERM,
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+        };
+        let file = root.join("before-reset.txt");
+        fs::write(&file, b"queued").unwrap();
+        let mut pending = vec![Change {
+            kind: crate::monitor::ChangeKind::Created,
+            path: paths::normalize(&file.to_string_lossy()),
+            root_path: scope.clone(),
+            timestamp: SystemTime::now(),
+            process_name: None,
+        }];
+        let index = SizeIndex::default();
+        let size = |path: &str| allocated_size(Path::new(path));
+        let prior = |_: &str| None;
+        let known = |_: &str| None;
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        storage.forget_records().unwrap();
+        let baseline: Baseline = Arc::new(Mutex::new(None));
+        worker.flush(&attributor, &mut pending, &index, &baseline);
+
+        let journal = fs::read_to_string(storage.journal()).unwrap_or_default();
+        assert!(
+            !journal.contains("before-reset.txt"),
+            "a pre-reset batch recreated deleted history: {journal}"
+        );
+    }
+
+    #[test]
+    fn an_internal_queue_overflow_is_reconciled_and_written_to_the_diary() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        let mut worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions::SHORT_TERM,
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(1)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+        };
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&scope, &worker.live, &storage)));
+        fs::write(root.join("missed.txt"), b"reconcile me").unwrap();
+        let index = SizeIndex::default();
+        let size = |path: &str| allocated_size(Path::new(path));
+        let prior = |_: &str| None;
+        let known = |_: &str| None;
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        worker.flush(&attributor, &mut Vec::new(), &index, &baseline);
+
+        let live = worker.live();
+        assert_eq!(live.dropped, 1);
+        assert_eq!(
+            live.gaps, 1,
+            "overflow was counted but not treated as a gap"
+        );
+        assert!(live.rows.iter().any(|row| row.path.ends_with("missed.txt")));
+        drop(live);
+        assert!(storage.log_tail(20).contains("queue overflow"));
+    }
+
     fn row(kind: EventKind, delta: i64, items: u32, at: SystemTime) -> ActivityEvent {
         ActivityEvent {
             kind,
@@ -765,15 +1071,17 @@ mod tests {
             .collect();
         let mut alerts = Alerts::default();
 
-        let news = alerts.news(&rows, now);
+        let news = alerts.news(&rows, 0, now);
         assert_eq!(news.len(), 1, "120 deleted items went unmentioned");
         assert_eq!(news[0].kind, AnomalyKind::Removal);
         assert!(
-            alerts.news(&rows, now + Duration::from_secs(60)).is_empty(),
+            alerts
+                .news(&rows, 0, now + Duration::from_secs(60))
+                .is_empty(),
             "the same finding was raised twice"
         );
         assert_eq!(
-            alerts.news(&rows, now + WINDOW).len(),
+            alerts.news(&rows, 0, now + WINDOW).len(),
             1,
             "still happening a window later, and still worth saying"
         );
@@ -784,6 +1092,51 @@ mod tests {
     fn a_quiet_folder_is_never_interrupted() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ordinary = VecDeque::from([row(EventKind::Modified, 4096, 1, now)]);
-        assert!(Alerts::default().news(&ordinary, now).is_empty());
+        assert!(Alerts::default().news(&ordinary, 0, now).is_empty());
+        // And a threshold nobody set is not a threshold anything crosses.
+        assert!(Alerts::watching(0, 0, now)
+            .news(&ordinary, 100 * 1_000_000_000, now)
+            .is_empty());
+    }
+
+    /// The threshold the user set, measured over a day of watching: enough
+    /// arriving is said once, and the day it was said in has to pass before
+    /// it is said again.
+    #[test]
+    fn a_folder_past_the_size_the_user_asked_about_says_so_once_a_day() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let quiet = VecDeque::new();
+        let mut alerts = Alerts::watching(1_000_000_000, 0, now);
+
+        assert!(alerts.news(&quiet, 600_000_000, now).is_empty());
+        let news = alerts.news(&quiet, 600_000_000, now + Duration::from_secs(60));
+        assert_eq!(news.len(), 1, "1.2 GB in a day went unmentioned");
+        assert_eq!(news[0].kind, AnomalyKind::Growth);
+        assert_eq!(news[0].bytes, 1_200_000_000);
+        assert!(
+            alerts
+                .news(&quiet, 600_000_000, now + Duration::from_secs(120))
+                .is_empty(),
+            "the same day was reported twice"
+        );
+
+        // A new day starts the total over: yesterday's gigabytes are not
+        // today's growth.
+        assert!(alerts
+            .news(&quiet, 600_000_000, now + GROWTH_WINDOW)
+            .is_empty());
+    }
+
+    #[test]
+    fn growth_recorded_before_a_restart_counts_toward_todays_alert() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let quiet = VecDeque::new();
+        let mut alerts = Alerts::watching(1_000_000_000, 700_000_000, now);
+
+        let news = alerts.news(&quiet, 400_000_000, now + Duration::from_secs(60));
+
+        assert_eq!(news.len(), 1, "the pre-restart growth was forgotten");
+        assert_eq!(news[0].kind, AnomalyKind::Growth);
+        assert_eq!(news[0].bytes, 1_100_000_000);
     }
 }

@@ -88,6 +88,24 @@ struct ActivitySizeIndexTests {
         #expect(reloadedIndex.takeKnownSize(for: oldFile) == nil)
     }
 
+    @Test("compaction preserves entries appended by another host")
+    func compactionPreservesEntriesFromAnotherHost() throws {
+        let journalURL = makeTemporaryJournalURL()
+        let firstFile = URL(filePath: "/Users/example/Downloads/first.iso")
+        let secondFile = URL(filePath: "/Users/example/Downloads/second.iso")
+        let first = ActivitySizeIndex(journalURL: journalURL)
+        let second = ActivitySizeIndex(journalURL: journalURL, compactionEntryThreshold: 1)
+
+        first.recordKnownSize(1_024, for: firstFile)
+        first.flushPendingJournalWrites()
+        second.recordKnownSize(2_048, for: secondFile)
+        second.flushPendingJournalWrites()
+
+        let reopened = ActivitySizeIndex(journalURL: journalURL)
+        #expect(reopened.knownSize(for: firstFile) == 1_024)
+        #expect(reopened.knownSize(for: secondFile) == 2_048)
+    }
+
     @Test("encrypted journal hides paths and uses owner-only permissions")
     func encryptedJournalHidesPathsAndUsesOwnerOnlyPermissions() throws {
         let journalURL = makeTemporaryJournalURL()

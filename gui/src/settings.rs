@@ -5,8 +5,6 @@
 //! restart once. The macOS app spends a whole Settings scene on the same
 //! values.
 
-use std::path::Path;
-
 use eframe::egui;
 use pathlight_core::exclusion::DEFAULT_PATTERNS;
 use pathlight_core::store::{
@@ -15,6 +13,59 @@ use pathlight_core::store::{
 use pathlight_core::text::human_bytes;
 
 use crate::{show_in_file_manager, BYTES_PER_MB};
+
+/// How much of the diary the pane shows. Enough to cover the last few watch
+/// sessions; the whole file is one button away.
+const LOG_LINES_SHOWN: usize = 200;
+
+/// Where the window was, and how big, when it was last put away.
+///
+/// The macOS app gets this from AppKit without asking; on these two platforms
+/// it is ours to remember, and a monitor that opens 980x660 in the middle of
+/// the screen every morning is one somebody moves every morning. Kept beside
+/// the journal, so an uninstall takes it too.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+pub struct Geometry {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+const GEOMETRY_FILE: &str = "window.json";
+
+impl Geometry {
+    /// A saved size and position, or `None` for the first launch — and for a
+    /// file written by a version that spelled this differently, which is the
+    /// same answer: open where the code says.
+    pub fn read(storage: &Storage) -> Option<Self> {
+        let text = std::fs::read_to_string(storage.dir().join(GEOMETRY_FILE)).ok()?;
+        let geometry: Self = serde_json::from_str(&text).ok()?;
+        // A window that would open off every screen, or with no area, is one
+        // nobody could get back — a monitor's geometry is not worth that.
+        (geometry.width >= 320.0 && geometry.height >= 240.0).then_some(geometry)
+    }
+
+    pub fn save(storage: &Storage, rect: eframe::egui::Rect) {
+        let geometry = Self {
+            x: rect.min.x,
+            y: rect.min.y,
+            width: rect.width(),
+            height: rect.height(),
+        };
+        if let Ok(text) = serde_json::to_string(&geometry) {
+            let _ = std::fs::write(storage.dir().join(GEOMETRY_FILE), text);
+        }
+    }
+
+    pub fn position(&self) -> [f32; 2] {
+        [self.x, self.y]
+    }
+
+    pub fn size(&self) -> [f32; 2] {
+        [self.width, self.height]
+    }
+}
 
 /// What the boxes hold while they are being edited. Text, because a
 /// half-typed number is not a setting and must not be saved as one.
@@ -26,6 +77,10 @@ pub struct Draft {
     /// actually chosen in, where MB would mean "0" for every useful value.
     least_kb: String,
     power_saving: bool,
+    /// How much a folder may gain in a day before a notification, in MB, or
+    /// empty for never — the shipped answer, because an alert nobody asked
+    /// for is how notifications get switched off wholesale.
+    growth_alert_mb: String,
     /// Whether a row names the file that changed or says how much changed in
     /// the folder, and how wide a group is when it does the latter.
     records_file_names: bool,
@@ -36,6 +91,16 @@ pub struct Draft {
     /// in a way the user has to be told about rather than a silent tick.
     at_login: Option<bool>,
     login_error: Option<String>,
+    /// What the last thing done to the records said. Compacting, deleting and
+    /// installing the command all answer with a sentence rather than a change
+    /// on screen, so there has to be somewhere to put it.
+    message: Option<String>,
+    /// Whether deleting every record has already been asked for once.
+    confirm_forget: bool,
+    /// The diary's last lines, read when the section is opened rather than
+    /// per frame: a file read on the paint path is a disk read sixty times a
+    /// second for a file that changes when a watch does something.
+    log: Option<String>,
 }
 
 /// What the user did with the modal.
@@ -61,6 +126,10 @@ impl Draft {
             cap_mb: (cap / BYTES_PER_MB as u64).to_string(),
             least_kb: (options.minimum_recorded_byte_delta / 1000).to_string(),
             power_saving: storage.latency_ms() >= BACKGROUND_LATENCY_MS,
+            growth_alert_mb: match storage.growth_alert_bytes() {
+                0 => String::new(),
+                bytes => (bytes / BYTES_PER_MB).to_string(),
+            },
             records_file_names: options.records_file_names,
             window_minutes: (match options.aggregation_window_secs {
                 0 => DEFAULT_AGGREGATION_WINDOW_SECS,
@@ -71,6 +140,9 @@ impl Draft {
             patterns: storage.patterns().join("\n"),
             at_login: item.as_ref().ok().map(|item| item.is_enabled()),
             login_error: item.err().map(|error| error.to_string()),
+            message: None,
+            confirm_forget: false,
+            log: None,
         }
     }
 
@@ -151,6 +223,22 @@ impl Draft {
         );
 
         ui.add_space(12.0);
+        ui.label(egui::RichText::new("Tell me when a folder grows").strong());
+        number(
+            ui,
+            "Grew today by more than (MB)",
+            &mut self.growth_alert_mb,
+        );
+        ui.label(
+            egui::RichText::new(
+                "Left empty, nothing is said. Pathlight always speaks up when a folder \
+                 loses a lot at once or fills up unusually fast.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+
+        ui.add_space(12.0);
         ui.label(egui::RichText::new("Never record these").strong());
         ui.label(
             egui::RichText::new("One gitignore-style pattern per line.")
@@ -168,24 +256,140 @@ impl Draft {
         }
 
         ui.add_space(12.0);
+        ui.label(egui::RichText::new("Records").strong());
+        let (bytes, rows) = storage.recorded();
         ui.label(
             egui::RichText::new(format!(
-                "Records: {} · {}",
-                storage.dir().display(),
-                recorded_size(&storage.journal())
+                "{rows} row(s), {} · {}",
+                human_bytes(bytes as i64).trim_start_matches('+'),
+                storage.dir().display()
             ))
             .small()
             .color(ui.visuals().weak_text_color()),
         );
+        // Which build this is and what its watcher promises: not settings,
+        // and between them the two things a bug report cannot be read without.
+        ui.label(
+            egui::RichText::new(pathlight_core::text::version(
+                "Pathlight",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+        // What the watches wrote while nobody was looking. Folded away
+        // because it is the answer to a question most days do not raise.
+        let diary = egui::CollapsingHeader::new("What the watches wrote")
+            .id_salt("diary")
+            .show(ui, |ui| {
+                let tail = self
+                    .log
+                    .get_or_insert_with(|| storage.log_tail(LOG_LINES_SHOWN));
+                if tail.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Nothing yet. A watch writes here when it opens, when it catches \
+                             up after a gap, when it warns about something, and when it fails.",
+                        )
+                        .small(),
+                    );
+                    return None;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(tail.as_str()).small().monospace());
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(tail.clone());
+                    }
+                    if ui.button("Refresh").clicked() {
+                        return Some(());
+                    }
+                    if ui.button("Show the file").clicked() {
+                        show_in_file_manager(&storage.log_file());
+                    }
+                    None
+                })
+                .inner
+            });
+        // Outside the closure: the tail it borrows is the thing being dropped.
+        if diary.body_returned.flatten().is_some() {
+            self.log = None;
+        }
+
+        ui.horizontal(|ui| {
+            if ui.button("Show records folder").clicked() {
+                show_in_file_manager(storage.dir());
+            }
+            if ui
+                .button("Compact now")
+                .on_hover_text(
+                    "Drops what is past the retention now, rather than at the next watch.",
+                )
+                .clicked()
+            {
+                self.message = Some(match storage.trim_journal() {
+                    Ok(dropped) => format!("Dropped {dropped} row(s)."),
+                    Err(error) => format!("Could not compact the records: {error}"),
+                });
+            }
+            // Two presses, because this is the one thing here nobody can get
+            // back. The whole-install case is the Uninstall dialog; this is
+            // the same records without the settings and the folder list.
+            let forget = match self.confirm_forget {
+                true => format!("Really delete {rows} row(s)"),
+                false => "Delete every record".to_owned(),
+            };
+            if ui.button(forget).clicked() {
+                match self.confirm_forget {
+                    false => self.confirm_forget = true,
+                    true => {
+                        self.confirm_forget = false;
+                        self.message = Some(match storage.forget_records() {
+                            Ok(()) => format!("Deleted {rows} recorded row(s)."),
+                            Err(error) => format!("Could not delete the records: {error}"),
+                        });
+                    }
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Restore default settings")
+                .on_hover_text("Every setting back to what shipped. Folders and records stay.")
+                .clicked()
+            {
+                match storage.restore_default_settings() {
+                    Ok(()) => {
+                        let message = "Settings are back to the shipped ones.".to_owned();
+                        *self = Self::read(storage);
+                        self.message = Some(message);
+                    }
+                    Err(error) => {
+                        self.message = Some(format!("Could not restore the settings: {error}"))
+                    }
+                }
+            }
+            if ui
+                .button("Install command line tool")
+                .on_hover_text("Puts `pathlight-monitor` in your own home, on your PATH.")
+                .clicked()
+            {
+                self.message = Some(install_cli());
+            }
+        });
+        if let Some(message) = &self.message {
+            ui.label(egui::RichText::new(message).small());
+        }
 
         ui.add_space(12.0);
         let mut verdict = None;
         ui.horizontal(|ui| {
             if ui.button("Cancel").clicked() {
                 verdict = Some(Verdict::Close);
-            }
-            if ui.button("Show records folder").clicked() {
-                show_in_file_manager(storage.dir());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Apply").clicked() {
@@ -220,12 +424,20 @@ impl Draft {
         let window_minutes: u64 = digits(&self.window_minutes, "Group changes within")?;
         let cap_mb: u64 = digits(&self.cap_mb, "Stop recording past")?;
         let least_kb: i64 = digits(&self.least_kb, "Smallest change to record")?;
+        // Empty is "never", which is the answer a box nobody typed in has.
+        let growth_mb: i64 = match self.growth_alert_mb.trim().is_empty() {
+            true => 0,
+            false => digits(&self.growth_alert_mb, "Grew today by more than")?,
+        };
         let cap = cap_mb
             .checked_mul(BYTES_PER_MB as u64)
             .ok_or_else(|| "That records cap is larger than any disk.".to_owned())?;
         let least = least_kb
             .checked_mul(1000)
             .ok_or_else(|| "That smallest change is larger than any file.".to_owned())?;
+        let growth = growth_mb
+            .checked_mul(BYTES_PER_MB)
+            .ok_or_else(|| "That growth is larger than any disk.".to_owned())?;
         let patterns: Vec<String> = self
             .patterns
             .lines()
@@ -252,6 +464,9 @@ impl Draft {
             })
             .map_err(|error| format!("Could not save how soon changes are reported: {error}"))?;
         storage
+            .set_growth_alert_bytes(growth)
+            .map_err(|error| format!("Could not save when to tell you about growth: {error}"))?;
+        storage
             .set_patterns(&patterns)
             .map_err(|error| format!("Could not save the patterns: {error}"))
     }
@@ -276,10 +491,32 @@ fn digits<T: std::str::FromStr>(text: &str, title: &str) -> Result<T, String> {
     Ok(parsed)
 }
 
-fn recorded_size(journal: &Path) -> String {
-    match std::fs::metadata(journal).map(|meta| meta.len()) {
-        Ok(bytes) => human_bytes(bytes as i64).trim_start_matches('+').to_owned(),
-        Err(_) => "nothing recorded yet".to_owned(),
+/// Asks the command that ships beside this one to install itself, which is
+/// how the macOS app does it too: where a command belongs is decided in one
+/// place — by the command — and two answers to that question eventually
+/// disagree about somebody's PATH.
+fn install_cli() -> String {
+    let tool = std::env::current_exe().ok().and_then(|exe| {
+        let tool = exe.with_file_name(match cfg!(windows) {
+            true => "pathlight-monitor.exe",
+            false => "pathlight-monitor",
+        });
+        tool.is_file().then_some(tool)
+    });
+    let Some(tool) = tool else {
+        return "The command line tool is not next to this program, so there is nothing to \
+                install."
+            .to_owned();
+    };
+    match std::process::Command::new(tool).arg("install-cli").output() {
+        Ok(done) if done.status.success() => {
+            String::from_utf8_lossy(&done.stdout).trim().to_owned()
+        }
+        Ok(done) => format!(
+            "Could not install it: {}",
+            String::from_utf8_lossy(&done.stderr).trim()
+        ),
+        Err(error) => format!("Could not run the command line tool: {error}"),
     }
 }
 
@@ -287,6 +524,32 @@ fn recorded_size(journal: &Path) -> String {
 mod tests {
     use super::*;
     use pathlight_core::store::{DEFAULT_JOURNAL_LIMIT_BYTES, DEFAULT_RETENTION_DAYS};
+
+    /// The window opens where it was left, and never somewhere nobody can
+    /// reach: a saved size too small to hold the interface is no answer.
+    #[test]
+    fn the_window_opens_where_it_was_left_unless_that_was_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        assert!(Geometry::read(&storage).is_none(), "nothing saved yet");
+
+        Geometry::save(
+            &storage,
+            egui::Rect::from_min_size(egui::pos2(120.0, 60.0), egui::vec2(1000.0, 700.0)),
+        );
+        let saved = Geometry::read(&storage).expect("a saved window is read back");
+        assert_eq!(saved.position(), [120.0, 60.0]);
+        assert_eq!(saved.size(), [1000.0, 700.0]);
+
+        Geometry::save(
+            &storage,
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+        );
+        assert!(
+            Geometry::read(&storage).is_none(),
+            "a window nobody could use was offered anyway"
+        );
+    }
 
     /// The whole point of the pane: what was typed is what the next watch
     /// reads. Checked through `save`, so the parsing and the units are the
@@ -309,6 +572,7 @@ mod tests {
         draft.cap_mb = "500".to_owned();
         draft.least_kb = "4".to_owned();
         draft.power_saving = true;
+        draft.growth_alert_mb = "5000".to_owned();
         draft.patterns = "*.tmp\n\n  node_modules/  \n".to_owned();
         draft.save(&storage).unwrap();
 
@@ -319,6 +583,7 @@ mod tests {
         assert_eq!(storage.options().minimum_recorded_byte_delta, 4000);
         assert_eq!(storage.latency_ms(), BACKGROUND_LATENCY_MS);
         assert_eq!(storage.patterns(), ["*.tmp", "node_modules/"]);
+        assert_eq!(storage.growth_alert_bytes(), 5_000 * BYTES_PER_MB);
         // And a fresh draft shows it back, which is the half that silently
         // reverts if the units disagree.
         let reread = Draft::read(&storage);
@@ -327,6 +592,13 @@ mod tests {
         assert_eq!(reread.aggregate_days, "365");
         assert_eq!(reread.window_minutes, "2");
         assert!(reread.power_saving);
+        assert_eq!(reread.growth_alert_mb, "5000");
+
+        // And an emptied box is "never", not a number that failed to parse.
+        draft.growth_alert_mb = "  ".to_owned();
+        draft.save(&storage).unwrap();
+        assert_eq!(storage.growth_alert_bytes(), 0);
+        assert_eq!(Draft::read(&storage).growth_alert_mb, "");
     }
 
     /// Nothing is saved when a box cannot be read, and the message names the
