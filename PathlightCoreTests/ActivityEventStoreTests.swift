@@ -50,6 +50,34 @@ struct ActivityEventStoreTests {
         #expect(loaded == [second, first])
     }
 
+    @Test("reset removes companion storage inside the same transaction")
+    func resetRemovesCompanionStorageInOneTransaction() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let sizeIndexURL = tempDirectory.appending(path: "activity-size-index.jsonl")
+        try Data("event\n".utf8).write(to: journalURL)
+        try Data("index\n".utf8).write(to: sizeIndexURL)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        let lockURL = tempDirectory.appending(path: "pathlight.lock")
+        let descriptor = open(lockURL.path, O_RDWR | O_CREAT, 0o600)
+        #expect(descriptor >= 0)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        #expect(flock(descriptor, LOCK_EX) == 0)
+
+        let reset = Task {
+            try await store.reset(additionalStorageFiles: [sizeIndexURL])
+        }
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(FileManager.default.fileExists(atPath: journalURL.path))
+        #expect(FileManager.default.fileExists(atPath: sizeIndexURL.path))
+        flock(descriptor, LOCK_UN)
+        try await reset.value
+        #expect(!FileManager.default.fileExists(atPath: journalURL.path))
+        #expect(!FileManager.default.fileExists(atPath: sizeIndexURL.path))
+    }
+
     @Test("recovers an unterminated crash tail before the next durable append")
     func recoversUnterminatedCrashTail() async throws {
         let tempDirectory = try makeTemporaryDirectory()

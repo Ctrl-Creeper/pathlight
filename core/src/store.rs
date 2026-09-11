@@ -10,7 +10,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::attribution::AggregationOptions;
 use crate::exclusion::DEFAULT_PATTERNS;
@@ -26,6 +26,7 @@ const LOG_FILE: &str = "pathlight.log";
 const LOG_MAX_BYTES: u64 = 256 * 1024;
 const WATCHES_FILE: &str = "watches.json";
 const SIZE_INDEX_FILE: &str = "activity-size-index.jsonl";
+pub(crate) const LOCK_FILE: &str = "pathlight.lock";
 /// How long a row is kept, and how large the journal may get, until the user
 /// says otherwise. The same numbers the macOS app ships
 /// (`ActivityStoragePreferences.defaults`), so one journal read on either host
@@ -63,6 +64,29 @@ fn journal_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+pub(crate) struct StorageLock {
+    _process: MutexGuard<'static, ()>,
+    _file: fs::File,
+}
+
+pub(crate) fn lock_directory(dir: &Path) -> io::Result<StorageLock> {
+    let process = journal_lock()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    fs::create_dir_all(dir)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(LOCK_FILE))?;
+    file.lock()?;
+    Ok(StorageLock {
+        _process: process,
+        _file: file,
+    })
+}
+
 /// Pathlight's own storage directory, plus the spelling used to keep every
 /// watch out of it.
 #[derive(Clone, Debug)]
@@ -92,6 +116,10 @@ impl Storage {
 
     pub fn dir(&self) -> &Path {
         Path::new(&self.path)
+    }
+
+    fn lock(&self) -> io::Result<StorageLock> {
+        lock_directory(self.dir())
     }
 
     pub fn journal(&self) -> PathBuf {
@@ -125,20 +153,56 @@ impl Storage {
 
     /// Appends rows to the shared journal.
     pub fn record(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
-        let _guard = journal_lock()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.journal_handle().append(events)
+        let journal = self.journal_handle();
+        let _guard = self.lock()?;
+        journal.append(events)
+    }
+
+    /// Appends only while the caller still belongs to the current records
+    /// generation. The check and append share one storage transaction so a
+    /// concurrent reset cannot delete the journal between them and then have
+    /// an older worker recreate it.
+    pub(crate) fn record_if_generation(
+        &self,
+        events: Vec<ActivityEvent>,
+        expected_epoch: u64,
+    ) -> Result<bool, CoreError> {
+        let _guard = self.lock()?;
+        let settings = self.settings_unlocked();
+        if settings.records_epoch != expected_epoch {
+            return Ok(false);
+        }
+        let path = self.journal().to_string_lossy().into_owned();
+        let journal = match settings.encrypt {
+            true => Journal::encrypting(path),
+            false => Journal::new(path),
+        };
+        journal.append(events)?;
+        Ok(true)
+    }
+
+    /// Publishes attribution baselines only if no records reset happened
+    /// after the worker accepted its batch.
+    pub(crate) fn persist_index_if_generation(
+        &self,
+        index: &crate::attribution::SizeIndex,
+        expected_epoch: u64,
+    ) -> Result<bool, CoreError> {
+        let _guard = self.lock()?;
+        if self.settings_unlocked().records_epoch != expected_epoch {
+            return Ok(false);
+        }
+        index.persist_while_locked()?;
+        Ok(true)
     }
 
     /// Drops what is too old or over the cap. Returns how many rows went.
     pub fn trim_journal(&self) -> Result<u64, CoreError> {
-        let _guard = journal_lock()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let (days, limit) = self.retention();
-        self.journal_handle()
-            .trim(days, self.aggregate_retention_days(), limit)
+        let aggregate_days = self.aggregate_retention_days();
+        let journal = self.journal_handle();
+        let _guard = self.lock()?;
+        journal.trim(days, aggregate_days, limit)
     }
 
     /// How much has been recorded, for a pane or a terminal that shows it:
@@ -173,8 +237,8 @@ impl Storage {
     pub fn note(&self, line: &str) {
         use std::io::Write as _;
 
+        let Ok(_guard) = self.lock() else { return };
         let path = self.log_file();
-        let _ = fs::create_dir_all(self.dir());
         if fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_MAX_BYTES) {
             // Cut on a line boundary so the oldest surviving line is whole,
             // and cut in the middle so this happens once per doubling rather
@@ -201,6 +265,9 @@ impl Storage {
     /// The last `lines` lines of that diary, newest last, as a person reads
     /// it. Empty when nothing has been written yet, which is itself an answer.
     pub fn log_tail(&self, lines: usize) -> String {
+        let Ok(_guard) = self.lock() else {
+            return String::new();
+        };
         let text = fs::read_to_string(self.log_file()).unwrap_or_default();
         let kept: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
         kept[kept.len().saturating_sub(lines)..].join("\n")
@@ -213,9 +280,16 @@ impl Storage {
     /// person who wants to start the history over should not have to
     /// uninstall to do it.
     pub fn forget_records(&self) -> io::Result<()> {
-        let _guard = journal_lock()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock()?;
+        let mut settings = self.settings_unlocked();
+        settings.records_epoch = settings.records_epoch.wrapping_add(1);
+        settings.records_reset_at_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.save_unlocked(&settings)?;
         // The baselines name the same files the rows do, and the diary names
         // the folders that were watched, so "delete every record" that left
         // either behind would be a lie about what is kept.
@@ -232,10 +306,11 @@ impl Storage {
     /// records alone: this is the way out of an edit whose effect the user
     /// cannot find.
     pub fn restore_default_settings(&self) -> io::Result<()> {
-        let watches = self.settings().roots;
-        self.save(&Settings {
-            roots: watches,
-            ..Settings::default()
+        self.update_settings(|settings| {
+            *settings = Settings {
+                roots: std::mem::take(&mut settings.roots),
+                ..Settings::default()
+            };
         })
     }
 
@@ -276,6 +351,23 @@ impl Storage {
         self.journal_handle().load(root.to_owned(), u32::MAX)
     }
 
+    /// Positive bytes already recorded since `since`. A watch reads this once
+    /// when it opens so a process restart cannot reset a daily growth alert;
+    /// live flushes continue to update the in-memory total incrementally.
+    pub(crate) fn positive_growth_since(
+        &self,
+        root: &str,
+        since: std::time::SystemTime,
+    ) -> Result<i64, CoreError> {
+        Ok(self
+            .rows(root)?
+            .into_iter()
+            .filter(|event| event.timestamp >= since)
+            .filter_map(|event| event.byte_delta)
+            .map(|bytes| bytes.max(0))
+            .fold(0i64, i64::saturating_add))
+    }
+
     /// Whether new rows are written encrypted.
     ///
     /// Read from the file each time rather than cached: the setting is a
@@ -288,9 +380,7 @@ impl Storage {
     }
 
     pub fn set_encrypting(&self, encrypt: bool) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.encrypt = encrypt;
-        self.save(&settings)
+        self.update_settings(|settings| settings.encrypt = encrypt)
     }
 
     fn journal_handle(&self) -> std::sync::Arc<Journal> {
@@ -320,10 +410,10 @@ impl Storage {
         min_bytes: Option<i64>,
         max_bytes: Option<i64>,
     ) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.min_file_bytes = min_bytes;
-        settings.max_file_bytes = max_bytes;
-        self.save(&settings)
+        self.update_settings(|settings| {
+            settings.min_file_bytes = min_bytes;
+            settings.max_file_bytes = max_bytes;
+        })
     }
 
     /// The folders the user chose, and whether each one is being watched.
@@ -336,24 +426,56 @@ impl Storage {
     }
 
     pub fn set_watches(&self, watches: &[WatchTarget]) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.roots = watches.iter().cloned().map(StoredWatch::from).collect();
-        self.save(&settings)
+        self.update_settings(|settings| {
+            settings.roots = watches.iter().cloned().map(StoredWatch::from).collect();
+        })
+    }
+
+    pub fn add_watch(&self, path: &str) -> io::Result<bool> {
+        self.update_settings(|settings| {
+            if settings
+                .roots
+                .iter()
+                .any(|watch| WatchTarget::from(watch.clone()).path == path)
+            {
+                return false;
+            }
+            settings.roots.push(StoredWatch::Target {
+                path: path.to_owned(),
+                enabled: false,
+            });
+            true
+        })
+    }
+
+    pub fn remove_watch(&self, path: &str) -> io::Result<bool> {
+        self.update_settings(|settings| {
+            let before = settings.roots.len();
+            settings
+                .roots
+                .retain(|watch| WatchTarget::from(watch.clone()).path != path);
+            settings.roots.len() != before
+        })
     }
 
     /// Switches one folder on or off, leaving the rest of the list alone.
     /// Unknown paths are added, because a host that can name a folder is a
     /// host the user just asked to watch it.
     pub fn set_watch_enabled(&self, path: &str, enabled: bool) -> io::Result<()> {
-        let mut watches = self.watches();
-        match watches.iter_mut().find(|watch| watch.path == path) {
-            Some(watch) => watch.enabled = enabled,
-            None => watches.push(WatchTarget {
-                path: path.to_owned(),
-                enabled,
-            }),
-        }
-        self.set_watches(&watches)
+        self.update_settings(|settings| {
+            let mut watches: Vec<WatchTarget> = std::mem::take(&mut settings.roots)
+                .into_iter()
+                .map(WatchTarget::from)
+                .collect();
+            match watches.iter_mut().find(|watch| watch.path == path) {
+                Some(watch) => watch.enabled = enabled,
+                None => watches.push(WatchTarget {
+                    path: path.to_owned(),
+                    enabled,
+                }),
+            }
+            settings.roots = watches.into_iter().map(StoredWatch::from).collect();
+        })
     }
 
     /// How long a row is kept and how large the journal may get.
@@ -382,9 +504,7 @@ impl Storage {
                 "a retention of nothing would delete every grouped row as soon as it was written",
             ));
         }
-        let mut settings = self.settings();
-        settings.aggregate_retention_days = Some(days);
-        self.save(&settings)
+        self.update_settings(|settings| settings.aggregate_retention_days = Some(days))
     }
 
     /// Neither is allowed to be zero: a retention of nothing is a monitor that
@@ -397,10 +517,10 @@ impl Storage {
                 "a retention of nothing would delete every row as soon as it was written",
             ));
         }
-        let mut settings = self.settings();
-        settings.retention_days = Some(days);
-        settings.journal_limit_bytes = Some(limit_bytes);
-        self.save(&settings)
+        self.update_settings(|settings| {
+            settings.retention_days = Some(days);
+            settings.journal_limit_bytes = Some(limit_bytes);
+        })
     }
 
     /// How long the watcher coalesces before it hands events over.
@@ -425,9 +545,7 @@ impl Storage {
     }
 
     pub fn set_growth_alert_bytes(&self, bytes: i64) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.growth_alert_bytes = Some(bytes.max(0));
-        self.save(&settings)
+        self.update_settings(|settings| settings.growth_alert_bytes = Some(bytes.max(0)))
     }
 
     /// Whether every watch in this install is held off.
@@ -439,10 +557,20 @@ impl Storage {
         self.settings().paused.unwrap_or(false)
     }
 
+    pub fn records_epoch(&self) -> u64 {
+        self.settings().records_epoch
+    }
+
+    pub fn records_generation(&self) -> (u64, std::time::SystemTime) {
+        let settings = self.settings();
+        (
+            settings.records_epoch,
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(settings.records_reset_at_ns),
+        )
+    }
+
     pub fn set_paused(&self, paused: bool) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.paused = Some(paused);
-        self.save(&settings)?;
+        self.update_settings(|settings| settings.paused = Some(paused))?;
         self.note(match paused {
             true => "monitoring paused",
             false => "monitoring resumed",
@@ -451,9 +579,7 @@ impl Storage {
     }
 
     pub fn set_latency_ms(&self, latency_ms: u64) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.latency_ms = Some(latency_ms.max(1));
-        self.save(&settings)
+        self.update_settings(|settings| settings.latency_ms = Some(latency_ms.max(1)))
     }
 
     /// What every watch here leaves out, on top of the storage guard: the
@@ -470,9 +596,7 @@ impl Storage {
     }
 
     pub fn set_patterns(&self, patterns: &[String]) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.exclusion_patterns = Some(patterns.to_vec());
-        self.save(&settings)
+        self.update_settings(|settings| settings.exclusion_patterns = Some(patterns.to_vec()))
     }
 
     /// What is recorded and how it is folded together: the sizes of file this
@@ -513,31 +637,56 @@ impl Storage {
         records_file_names: bool,
         aggregation_window_secs: u64,
     ) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.records_file_names = Some(records_file_names);
-        settings.aggregation_window_secs = Some(aggregation_window_secs);
-        self.save(&settings)
+        self.update_settings(|settings| {
+            settings.records_file_names = Some(records_file_names);
+            settings.aggregation_window_secs = Some(aggregation_window_secs);
+        })
     }
 
     pub fn set_minimum_byte_delta(&self, bytes: i64) -> io::Result<()> {
-        let mut settings = self.settings();
-        settings.minimum_recorded_byte_delta = Some(bytes.max(0));
-        self.save(&settings)
+        self.update_settings(|settings| {
+            settings.minimum_recorded_byte_delta = Some(bytes.max(0));
+        })
     }
 
     /// What was saved, or the defaults. A file this build cannot parse reads
     /// as the defaults rather than as an error the user cannot act on.
     fn settings(&self) -> Settings {
+        let Ok(_guard) = self.lock() else {
+            return Settings::default();
+        };
+        self.settings_unlocked()
+    }
+
+    fn settings_unlocked(&self) -> Settings {
         fs::read_to_string(self.dir().join(WATCHES_FILE))
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
     }
 
-    fn save(&self, settings: &Settings) -> io::Result<()> {
-        fs::create_dir_all(self.dir())?;
+    fn update_settings<T>(&self, update: impl FnOnce(&mut Settings) -> T) -> io::Result<T> {
+        let _guard = self.lock()?;
+        let mut settings = self.settings_unlocked();
+        let result = update(&mut settings);
+        self.save_unlocked(&settings)?;
+        Ok(result)
+    }
+
+    fn save_unlocked(&self, settings: &Settings) -> io::Result<()> {
         let text = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
-        fs::write(self.dir().join(WATCHES_FILE), text)
+        let target = self.dir().join(WATCHES_FILE);
+        let temporary = self.dir().join("watches.json.writing");
+        let mut file = fs::File::create(&temporary)?;
+        use std::io::Write as _;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        if target.exists() {
+            fs::remove_file(&target)?;
+        }
+        fs::rename(temporary, target)
     }
 }
 
@@ -652,11 +801,50 @@ struct Settings {
     /// for everything to be recorded.
     #[serde(default)]
     exclusion_patterns: Option<Vec<String>>,
+    /// Incremented whenever all records are deleted. A running worker that
+    /// accepted a batch under an older value must not recreate that history.
+    #[serde(default)]
+    records_epoch: u64,
+    #[serde(default)]
+    records_reset_at_ns: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_storage_writer_waits_for_another_process_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("pathlight.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+
+        let storage = Storage::at(dir.path());
+        let (finished, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let saved = storage.set_paused(true);
+            let _ = finished.send(saved);
+        });
+
+        assert!(
+            result
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the settings write ignored the storage transaction"
+        );
+        std::fs::File::unlock(&lock).unwrap();
+        result
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the settings write stayed blocked after unlock")
+            .unwrap();
+    }
 
     /// Grouping is the setting that makes a whole-disk watch affordable, and
     /// the pair has to stay coherent: named rows are never grouped, and a
@@ -744,6 +932,22 @@ mod tests {
         assert_eq!(storage.watches().len(), 1);
         // Twice is not an error: nothing recorded is the state it asks for.
         storage.forget_records().unwrap();
+    }
+
+    #[test]
+    fn an_old_size_batch_cannot_recreate_the_index_after_records_are_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let generation = storage.records_epoch();
+        let index = storage.size_index();
+        index.record("watch", "/watched/old.bin", Some(4_096));
+
+        storage.forget_records().unwrap();
+
+        assert!(!storage
+            .persist_index_if_generation(&index, generation)
+            .unwrap());
+        assert!(!dir.path().join(SIZE_INDEX_FILE).exists());
     }
 
     /// A sibling whose name merely starts the same way is somebody else's

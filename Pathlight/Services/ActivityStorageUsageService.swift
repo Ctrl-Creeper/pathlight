@@ -43,12 +43,19 @@ nonisolated struct ActivityStorageUsageService: Sendable {
     }
 
     func resetStorage() async throws {
-        let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: eventJournalURL.path) {
-            try fileManager.removeItem(at: eventJournalURL)
-        }
-        if fileManager.fileExists(atPath: sizeIndexJournalURL.path) {
-            try fileManager.removeItem(at: sizeIndexJournalURL)
+        try ActivityStorageFileProtection.withStorageLock(
+            in: eventJournalURL.deletingLastPathComponent()
+        ) {
+            try ActivityStorageFileProtection.advanceRecordsGenerationWhileLocked(
+                in: eventJournalURL.deletingLastPathComponent()
+            )
+            let fileManager = FileManager.default
+            if fileManager.fileExists(atPath: eventJournalURL.path) {
+                try fileManager.removeItem(at: eventJournalURL)
+            }
+            if fileManager.fileExists(atPath: sizeIndexJournalURL.path) {
+                try fileManager.removeItem(at: sizeIndexJournalURL)
+            }
         }
     }
 
@@ -59,12 +66,24 @@ nonisolated struct ActivityStorageUsageService: Sendable {
     func availableEventJournalBytes(storageLimitBytes: Int64) async -> Int64 {
         await compactSizeIndex()
         let normalizedLimit = max(storageLimitBytes, 0)
-        guard fileSize(at: sizeIndexJournalURL) > normalizedLimit else {
-            return normalizedLimit - fileSize(at: sizeIndexJournalURL)
+        do {
+            return try ActivityStorageFileProtection.withStorageLock(
+                in: eventJournalURL.deletingLastPathComponent()
+            ) {
+                let sizeIndexBytes = fileSize(at: sizeIndexJournalURL)
+                guard sizeIndexBytes > normalizedLimit else {
+                    return normalizedLimit - sizeIndexBytes
+                }
+                do {
+                    try FileManager.default.removeItem(at: sizeIndexJournalURL)
+                    return normalizedLimit
+                } catch {
+                    return 0
+                }
+            }
+        } catch {
+            return 0
         }
-
-        try? FileManager.default.removeItem(at: sizeIndexJournalURL)
-        return normalizedLimit
     }
 
     private func fileSize(at url: URL) -> Int64 {

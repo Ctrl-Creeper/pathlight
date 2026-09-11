@@ -80,6 +80,10 @@ final class AppModel: ObservableObject {
     private var journalFlushImmediatelyRequested = false
     private var journalStorageBlocked = false
     private var journalFlushFailureCount = 0
+    /// Invalidates continuations from an append that was already in flight
+    /// when the user deleted all history.
+    private var journalGeneration: UInt64 = 0
+    private var activityStorageResetID: UUID?
     /// Rows wait until the live-monitor coalescing window (1 s) has closed so a
     /// created+modified burst lands in the journal as one final row.
     private static let journalFlushDelay: TimeInterval = 1.2
@@ -289,14 +293,46 @@ final class AppModel: ObservableObject {
     }
 
     func resetActivityStorage() {
-        let service = dependencies.activityStorageUsageService
+        let resetID = UUID()
+        activityStorageResetID = resetID
+        journalGeneration &+= 1
+        journalFlushTask?.cancel()
+        journalFlushTask = nil
+        journalFlushImmediatelyRequested = false
+        pendingJournalEvents.removeAll()
+        pendingJournalOrder.removeAll()
+        pendingJournalRoots.removeAll()
+        pendingJournalCheckpoints.removeAll()
+        pendingJournalSince = nil
+        committedJournalEvents.removeAll()
+
+        liveWatchTask?.cancel()
+        liveWatchTask = nil
+        liveWatchTaskID = nil
+        liveWatchBaselineTask?.cancel()
+        liveWatchBaselineTask = nil
+        liveWatchSession = nil
+        stopAllLongTermWatches()
+
+        let reset = dependencies.activityStorageReset
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await service.resetStorage()
+                try await reset()
+                guard self.activityStorageResetID == resetID else { return }
+                self.activityStorageResetID = nil
+                self.journalStorageBlocked = false
+                self.journalFlushFailureCount = 0
+                self.monitoringStatusMessage = nil
                 self.activityStorageUsage = .empty
+                self.activityHistory = nil
+                self.activityDashboardHistories.removeAll()
+                self.startEnabledLongTermWatches()
             } catch {
+                guard self.activityStorageResetID == resetID else { return }
+                self.activityStorageResetID = nil
                 self.lastErrorMessage = "Pathlight could not reset activity storage."
+                self.startEnabledLongTermWatches()
             }
         }
     }
@@ -461,6 +497,7 @@ final class AppModel: ObservableObject {
 
     private func flushJournal() async {
         guard let store = dependencies.activityEventStore, !journalFlushInProgress else { return }
+        let generation = journalGeneration
         let batch = takePendingJournalBatch()
         guard !batch.entries.isEmpty else {
             advanceUnblockedCheckpoints()
@@ -476,6 +513,10 @@ final class AppModel: ObservableObject {
                 )
             }
             try await store.append(journalEvents)
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushFailureCount = 0
             monitoringStatusMessage = nil
             journalFlushInProgress = false
@@ -488,6 +529,17 @@ final class AppModel: ObservableObject {
                 $0.value.timestamp >= retentionCutoff || pendingJournalEvents[$0.key] != nil
             }
             for (root, checkpoint) in batch.checkpoints {
+                var checkpoint = checkpoint
+                if checkpoint.hasHistoryGap,
+                   let current = pendingJournalCheckpoints[root],
+                   current.eventID >= checkpoint.eventID,
+                   !current.hasHistoryGap {
+                    checkpoint = LongTermWatchCheckpoint(
+                        eventID: checkpoint.eventID,
+                        recordedAt: checkpoint.recordedAt,
+                        hasHistoryGap: false
+                    )
+                }
                 persistCheckpoint(checkpoint, rootPath: root)
             }
             advanceUnblockedCheckpoints()
@@ -496,6 +548,10 @@ final class AppModel: ObservableObject {
                 scheduleEventDrivenHistoryRefresh(rootPath: URL(filePath: root, directoryHint: .isDirectory))
             }
         } catch ActivityEventStoreError.commitStateUnknown {
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             journalStorageBlocked = true
@@ -505,6 +561,10 @@ final class AppModel: ObservableObject {
             pendingJournalSince = nil
             monitoringStatusMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
         } catch {
+            guard generation == journalGeneration else {
+                discardInFlightJournalBatch(batch)
+                return
+            }
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             restorePendingJournalBatch(batch)
@@ -521,6 +581,15 @@ final class AppModel: ObservableObject {
             scheduleJournalFlush(after: delay)
         } else {
             journalFlushImmediatelyRequested = false
+        }
+    }
+
+    private func discardInFlightJournalBatch(_ batch: PendingJournalBatch) {
+        journalFlushInProgress = false
+        journalFlushInFlightRoots.subtract(batch.roots)
+        advanceUnblockedCheckpoints()
+        if !pendingJournalEvents.isEmpty {
+            scheduleJournalFlush(after: 0)
         }
     }
 
@@ -587,7 +656,7 @@ final class AppModel: ObservableObject {
     /// If the model is deallocated first, its checkpoint remains behind and the
     /// native journal replays the uncommitted interval on the next launch.
     /// The journal key is otherwise first touched by a background write minutes
-    /// after launch, where a keychain prompt can sit unnoticed and hold up
+    /// after launch, where a legacy migration prompt can sit unnoticed and hold up
     /// recording. Ask for it now, while the user is still looking at the app.
     private func warmActivityStorageKey() {
         let warmUp = dependencies.activityStorageKeyWarmUp
@@ -607,10 +676,10 @@ final class AppModel: ObservableObject {
         }
     }
     /// Each attempt waits out one key-load timeout, so this is how long a slow
-    /// answer to the keychain prompt stays quiet.
+    /// answer to a legacy Keychain migration prompt stays quiet.
     nonisolated private static let activityStorageKeyWarmUpAttempts = 3
     private func reportActivityStorageKeyUnavailable() {
-        monitoringStatusMessage = "Pathlight needs keychain access to record activity history. Grant it and recording continues."
+        monitoringStatusMessage = "Pathlight could not access its activity encryption key. Recording continues when the key becomes available."
     }
     /// Doubles per consecutive failure so a stalled store is retried without
     /// spinning, and stays at one second while flushes are succeeding.
@@ -1044,6 +1113,20 @@ final class AppModel: ObservableObject {
             forRootPath: target.rootPath,
             currentTargets: longTermWatchTargets
         )
+        if let pending = pendingJournalCheckpoints[targetID] {
+            pendingJournalCheckpoints[targetID] = LongTermWatchCheckpoint(
+                eventID: max(checkpoint.eventID, pending.eventID),
+                recordedAt: max(checkpoint.recordedAt, pending.recordedAt),
+                hasHistoryGap: false
+            )
+        } else {
+            pendingJournalCheckpoints[targetID] = LongTermWatchCheckpoint(
+                eventID: checkpoint.eventID,
+                recordedAt: checkpoint.recordedAt,
+                hasHistoryGap: false
+            )
+        }
+        advanceUnblockedCheckpoints()
         if let status = longTermWatchRuntimeStatuses[targetID], status.state == .historyGap {
             updateLongTermWatchRuntimeStatus(
                 targetID: targetID,

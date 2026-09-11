@@ -277,7 +277,7 @@ private struct ActivityStorageSettingsPane: View {
 
             Section("Privacy") {
                 Toggle("Encrypt new activity data", isOn: $appModel.activityEncryptNewData)
-                Text("New activity journals are sealed with AES-GCM before they are written. The key is stored in macOS Keychain.")
+                Text("New activity journals are sealed with AES-GCM before they are written. The protected key is shared by the app and command-line monitor on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -401,7 +401,7 @@ private struct UninstallSettingsPane: View {
     /// verify before agreeing to it.
     private static let everythingDetail = """
         Deletes the activity history journal, the size attribution index, all \
-        settings, the Keychain encryption key, and cached files. The folders \
+        settings, the encryption key, and cached files. The folders \
         you monitored are never touched.
         """
 }

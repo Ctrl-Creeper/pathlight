@@ -113,6 +113,7 @@ const COMPACT_AT: usize = 10_000;
 #[derive(Debug)]
 struct Persisted {
     path: PathBuf,
+    lock_dir: PathBuf,
     /// The journal whose key seals these lines, when the user asked for
     /// encrypted records: one key for everything Pathlight keeps, so turning
     /// encryption on does not leave every path readable over here.
@@ -138,10 +139,15 @@ impl SizeIndex {
     /// offers, because these lines name the same files.
     pub fn at(path: PathBuf, key_source: Option<PathBuf>) -> Self {
         let (sizes, written) = load(&path, key_source.as_deref());
+        let lock_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         Self {
             sizes: Mutex::new(sizes),
             file: Some(Persisted {
                 path,
+                lock_dir,
                 key_source,
                 state: Mutex::new(Pending {
                     lines: Vec::new(),
@@ -181,6 +187,15 @@ impl SizeIndex {
         self.sizes.lock().unwrap().get(&key(scope, path)).copied()
     }
 
+    pub(crate) fn reset(&self) {
+        self.sizes.lock().unwrap().clear();
+        if let Some(file) = &self.file {
+            let mut state = file.state.lock().unwrap();
+            state.lines.clear();
+            state.written = 0;
+        }
+    }
+
     /// Puts what changed since the last call on disk, rewriting the file once
     /// it is mostly superseded rows. A memory-only index does nothing.
     ///
@@ -192,8 +207,19 @@ impl SizeIndex {
         let Some(file) = &self.file else {
             return Ok(());
         };
-        // The two locks are never held at once, in either direction: one
-        // ordering to get wrong is one deadlock nobody can reproduce.
+        let _storage_lock = crate::store::lock_directory(&file.lock_dir)?;
+        self.persist_while_locked()
+    }
+
+    /// Persists while the caller holds the storage directory transaction.
+    /// Used by `Storage` to make a records-generation check and this write
+    /// indivisible across processes.
+    pub(crate) fn persist_while_locked(&self) -> Result<(), CoreError> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        // The storage transaction is always outermost; attribution releases
+        // its in-memory locks before asking Storage to persist.
         let (lines, compacting) = {
             let mut state = file.state.lock().unwrap();
             if state.lines.is_empty() {
@@ -207,13 +233,19 @@ impl SizeIndex {
             None => None,
         };
         let lines = match compacting {
-            true => self
-                .sizes
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(|(path, size)| line(path.clone(), Some(*size)))
-                .collect(),
+            true => {
+                // Another host may have appended since this instance loaded.
+                // Rebase local pending operations onto the locked on-disk
+                // state instead of publishing a stale in-memory snapshot.
+                let (mut merged, _) = load(&file.path, file.key_source.as_deref());
+                apply(&mut merged, &lines);
+                let mut lines: Vec<String> = merged
+                    .into_iter()
+                    .filter_map(|(path, size)| line(path, Some(size)))
+                    .collect();
+                lines.sort();
+                lines
+            }
             false => lines,
         };
         write(&file.path, &lines, key.as_ref(), !compacting)?;
@@ -306,6 +338,45 @@ fn load(path: &Path, key_source: Option<&Path>) -> (HashMap<String, i64>, usize)
         };
     }
     (sizes, written)
+}
+
+fn apply(sizes: &mut HashMap<String, i64>, lines: &[String]) {
+    for line in lines {
+        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
+            continue;
+        };
+        match entry.size.filter(|_| entry.kind == Kind::Record) {
+            Some(size) => {
+                sizes.insert(entry.path, size);
+            }
+            None => {
+                sizes.remove(&entry.path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_rebases_onto_entries_written_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity-size-index.jsonl");
+        let first = SizeIndex::at(path.clone(), None);
+        let second = SizeIndex::at(path.clone(), None);
+
+        first.record("first", "/first.bin", Some(1));
+        first.persist().unwrap();
+        second.record("second", "/second.bin", Some(2));
+        second.file.as_ref().unwrap().state.lock().unwrap().written = COMPACT_AT;
+        second.persist().unwrap();
+
+        let reopened = SizeIndex::at(path, None);
+        assert_eq!(reopened.peek("first", "/first.bin"), Some(1));
+        assert_eq!(reopened.peek("second", "/second.bin"), Some(2));
+    }
 }
 
 fn write(

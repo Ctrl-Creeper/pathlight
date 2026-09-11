@@ -126,6 +126,14 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     }
 
     func append(_ events: [DiskActivityEvent]) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try appendWhileLocked(events)
+        }
+    }
+
+    private func appendWhileLocked(_ events: [DiskActivityEvent]) throws {
         guard !events.isEmpty else {
             return
         }
@@ -273,6 +281,39 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         eventJournalLimitBytes: Int64,
         now: Date = Date()
     ) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try enforceStoragePolicyWhileLocked(
+                preferences,
+                eventJournalLimitBytes: eventJournalLimitBytes,
+                now: now
+            )
+        }
+    }
+
+    func reset(additionalStorageFiles: [URL] = []) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            try ActivityStorageFileProtection.advanceRecordsGenerationWhileLocked(
+                in: journalURL.deletingLastPathComponent()
+            )
+            for url in [journalURL] + additionalStorageFiles
+            where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        hasScannedJournal = false
+        oldestKnownEventTimestamp = nil
+        requiresReopenAfterFailedRollback = false
+    }
+
+    private func enforceStoragePolicyWhileLocked(
+        _ preferences: ActivityStoragePreferences,
+        eventJournalLimitBytes: Int64,
+        now: Date
+    ) throws {
         guard FileManager.default.fileExists(atPath: journalURL.path) else {
             return
         }
