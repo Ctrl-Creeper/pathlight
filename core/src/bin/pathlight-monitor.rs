@@ -6,9 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pathlight_core::history::Query;
-use pathlight_core::store::{
-    Storage, WatchTarget, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS,
-};
+use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
 use pathlight_core::{paths, ActivityEvent};
 
@@ -20,6 +18,14 @@ use pathlight_core::{paths, ActivityEvent};
 // signature would be a bigger diff than the feature. Only the commands that
 // read honour it; the ones that change something print a sentence either way.
 static AS_JSON: AtomicBool = AtomicBool::new(false);
+
+struct WatchedSession {
+    root: String,
+    session: pathlight_core::watch::Session,
+    printed: u64,
+    reported_dropped: u64,
+    reported_gaps: u64,
+}
 
 fn as_json() -> bool {
     AS_JSON.load(Ordering::Relaxed)
@@ -437,47 +443,86 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             "nothing to watch: name a folder, or switch one on with `watches enable FOLDER`",
         ));
     }
+    let mut sessions = open_watch_sessions(&roots, &storage)?;
+    println!(
+        "Recording to {}. Press Ctrl-C to stop.",
+        storage.journal().display()
+    );
+    let mut was_paused = false;
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let paused = storage.paused();
+        if paused != was_paused {
+            if paused {
+                sessions.clear();
+                println!("Monitoring paused.");
+            } else {
+                sessions = open_watch_sessions(&roots, &storage)?;
+                println!("Monitoring resumed.");
+            }
+            was_paused = paused;
+        }
+        for watched in &mut sessions {
+            let live = watched.session.live();
+            // Newest first in `rows`, so the new ones are the front slice;
+            // printed oldest first, which is how a log reads.
+            let fresh = (live.event_count - watched.printed).min(live.rows.len() as u64) as usize;
+            for event in live.rows.iter().take(fresh).rev() {
+                print_row(event);
+            }
+            watched.printed = live.event_count;
+            if live.dropped > watched.reported_dropped {
+                eprintln!(
+                    "! {}: {} watcher observation(s) were dropped; Pathlight is reconciling the folder.",
+                    watched.root,
+                    live.dropped - watched.reported_dropped
+                );
+                watched.reported_dropped = live.dropped;
+            }
+            if live.gaps > watched.reported_gaps {
+                eprintln!(
+                    "! {}: the watcher reported {} history gap(s); recovered changes are estimates.",
+                    watched.root,
+                    live.gaps - watched.reported_gaps
+                );
+                watched.reported_gaps = live.gaps;
+            }
+            if let Some(error) = &live.error {
+                eprintln!("! {}: {error}", watched.root);
+            }
+        }
+    }
+}
+
+fn open_watch_sessions(roots: &[String], storage: &Storage) -> io::Result<Vec<WatchedSession>> {
     let mut sessions = Vec::new();
     for root in roots {
         // Watching the journal's own folder is a feedback loop; the store
         // refuses to record it either way, and saying so beats a watch that
         // silently reports nothing.
-        if storage.is_own(&root) {
+        if storage.is_own(root) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
             ));
         }
         let session =
-            pathlight_core::watch::Session::start(&root, storage.clone(), |alert, scope| {
+            pathlight_core::watch::Session::start(root, storage.clone(), |alert, scope| {
                 // On stderr, so `watch | grep` still reads as rows while a finding
                 // is still seen by somebody watching the terminal.
                 eprintln!("! {} — {}", alert_title(alert, scope), alert_body(alert));
             })
             .map_err(io::Error::other)?;
         println!("Watching {root}");
-        sessions.push((root, session, 0u64));
+        sessions.push(WatchedSession {
+            root: root.clone(),
+            session,
+            printed: 0,
+            reported_dropped: 0,
+            reported_gaps: 0,
+        });
     }
-    println!(
-        "Recording to {}. Press Ctrl-C to stop.",
-        storage.journal().display()
-    );
-    loop {
-        std::thread::sleep(Duration::from_millis(500));
-        for (root, session, printed) in &mut sessions {
-            let live = session.live();
-            // Newest first in `rows`, so the new ones are the front slice;
-            // printed oldest first, which is how a log reads.
-            let fresh = (live.event_count - *printed).min(live.rows.len() as u64) as usize;
-            for event in live.rows.iter().take(fresh).rev() {
-                print_row(event);
-            }
-            *printed = live.event_count;
-            if let Some(error) = &live.error {
-                eprintln!("! {root}: {error}");
-            }
-        }
-    }
+    Ok(sessions)
 }
 
 fn print_row(event: &ActivityEvent) {
@@ -565,33 +610,23 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
                     format!("{root} is where Pathlight keeps its own records"),
                 ));
             }
-            let mut watches = storage.watches();
-            if watches.iter().any(|watch| watch.path == root) {
+            if !storage.add_watch(&root)? {
                 println!("{root} is already remembered.");
                 return Ok(());
             }
             // Switched off, like the windows add it: nothing starts recording
             // because a folder was named.
-            watches.push(WatchTarget {
-                path: root.clone(),
-                enabled: false,
-            });
-            storage.set_watches(&watches)?;
             println!("Added {root}, switched off. `watches enable {root}` switches it on.");
             Ok(())
         }
         "remove" => {
             let root = one_folder(&rest[1..], "usage: pathlight-monitor watches remove FOLDER")?;
-            let mut watches = storage.watches();
-            let before = watches.len();
-            watches.retain(|watch| watch.path != root);
-            if watches.len() == before {
+            if !storage.remove_watch(&root)? {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("{root} is not one of the remembered folders"),
                 ));
             }
-            storage.set_watches(&watches)?;
             println!("Forgot {root}. What was recorded for it is still in the journal.");
             Ok(())
         }

@@ -82,9 +82,8 @@ impl Default for Live {
 
 pub struct Session {
     live: Arc<Mutex<Live>>,
-    /// Held only to keep the watch open; dropping this ends the watch, which
-    /// closes the queue, which ends the worker.
-    _watcher: Arc<Watcher>,
+    watcher: Option<Arc<Watcher>>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Session {
@@ -109,6 +108,17 @@ impl Session {
         let options = storage.options();
         let latency_ms = storage.latency_ms();
         let storage_threshold = storage.growth_alert_bytes();
+        let now = SystemTime::now();
+        let day_start = utc_day_start(now);
+        let initial_growth = storage
+            .positive_growth_since(root, day_start)
+            .unwrap_or_else(|error| {
+                storage.note(&format!(
+                    "Could not restore today's growth total for {root}: {error}"
+                ));
+                0
+            });
+        let records_epoch = storage.records_epoch();
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let live = Arc::new(Mutex::new(Live::default()));
@@ -134,23 +144,40 @@ impl Session {
             exclusions,
             live: live.clone(),
             dropped,
-            alerts: Mutex::new(Alerts::watching(storage_threshold)),
+            records_epoch,
+            alerts: Mutex::new(Alerts::watching(storage_threshold, initial_growth, now)),
             announce: Box::new(announce),
         };
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("pathlight-session".into())
             .spawn(move || worker.run(receiver))
             .map_err(|error| error.to_string())?;
 
         Ok(Self {
             live,
-            _watcher: watcher,
+            watcher: Some(watcher),
+            worker: Some(worker),
         })
     }
 
     /// Reads the live state. Held for as long as one frame's drawing takes.
     pub fn live(&self) -> std::sync::MutexGuard<'_, Live> {
         self.live.lock().expect("session state mutex poisoned")
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.stop();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -219,6 +246,7 @@ struct Worker {
     exclusions: Option<ExclusionFilter>,
     live: Arc<Mutex<Live>>,
     dropped: Arc<AtomicU64>,
+    records_epoch: u64,
     /// What the user has already been told, so a background watch can speak
     /// up without becoming noise.
     alerts: Mutex<Alerts>,
@@ -226,21 +254,23 @@ struct Worker {
 }
 
 impl Worker {
-    fn run(self, receiver: mpsc::Receiver<StreamEvent>) {
+    fn run(mut self, receiver: mpsc::Receiver<StreamEvent>) {
         // Loaded from disk, so a watch reopened tomorrow measures deltas
         // against yesterday's sizes instead of calling every first change a
         // whole file and every deletion nothing at all.
         let index = self.storage.size_index();
-        let scope = self.scope.as_str();
+        let size_scope = self.scope.clone();
+        let prior_scope = self.scope.clone();
+        let known_scope = self.scope.clone();
         // The size provider records what it measured, so a later deletion of
         // the same path still has a size to report.
         let size = |path: &str| {
             let size = allocated_size(Path::new(path));
-            index.record(scope, path, size);
+            index.record(&size_scope, path, size);
             size
         };
-        let prior_size = |path: &str| index.take(scope, path);
-        let known_size = |path: &str| index.peek(scope, path);
+        let prior_size = |path: &str| index.take(&prior_scope, path);
+        let known_size = |path: &str| index.peek(&known_scope, path);
         let attributor = Attributor::new(self.options, &size, &prior_size, &known_size);
         let mut pending: Vec<Change> = Vec::new();
         // What the folder looked like when the watch opened. Without it a gap
@@ -278,7 +308,7 @@ impl Worker {
                 Ok(event) => self.accept(event, &mut pending, &baseline),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.flush(&attributor, &mut pending, &index);
+                    self.flush(&attributor, &mut pending, &index, &baseline);
                     self.storage
                         .note(&format!("watch closed on {}", self.scope));
                     return;
@@ -286,7 +316,7 @@ impl Worker {
             }
             let now = Instant::now();
             if now >= due {
-                self.flush(&attributor, &mut pending, &index);
+                self.flush(&attributor, &mut pending, &index, &baseline);
                 due = now + FLUSH;
             }
             if now >= trim_due {
@@ -430,28 +460,73 @@ impl Worker {
         trouble(&self.live, &self.storage, message);
     }
 
-    fn flush(&self, attributor: &Attributor<'_>, pending: &mut Vec<Change>, index: &SizeIndex) {
-        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+    fn flush(
+        &mut self,
+        attributor: &Attributor<'_>,
+        pending: &mut Vec<Change>,
+        index: &SizeIndex,
+        baseline: &Baseline,
+    ) {
+        let mut dropped = self.dropped.swap(0, Ordering::Relaxed);
         if pending.is_empty() && dropped == 0 {
             return;
         }
+        let (records_epoch, reset_at) = self.storage.records_generation();
+        if records_epoch != self.records_epoch {
+            pending.retain(|change| change.timestamp >= reset_at);
+            dropped = 0;
+            index.reset();
+            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                baseline_of(&self.scope, &self.live, &self.storage);
+            self.records_epoch = records_epoch;
+        }
         let events = attributor.process(pending);
         pending.clear();
-        self.publish(events, dropped);
+        if !self.publish(events, dropped) {
+            index.reset();
+            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                baseline_of(&self.scope, &self.live, &self.storage);
+            self.records_epoch = self.storage.records_epoch();
+            return;
+        }
+        if dropped > 0 {
+            self.storage.note(&format!(
+                "watch queue overflow on {}: {dropped} observation(s) dropped; reconciling",
+                self.scope
+            ));
+            self.reconcile(baseline);
+        }
         // After the rows, because a baseline nobody can compare against is
         // worth less than a row nobody has a baseline for.
-        if let Err(error) = index.persist() {
-            self.trouble(format!("Sizes could not be remembered: {error}"));
+        match self
+            .storage
+            .persist_index_if_generation(index, self.records_epoch)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                index.reset();
+                *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
+                    baseline_of(&self.scope, &self.live, &self.storage);
+                self.records_epoch = self.storage.records_epoch();
+            }
+            Err(error) => self.trouble(format!("Sizes could not be remembered: {error}")),
         }
     }
 
     /// Journal first, then the screen. A row on screen that was never written
     /// is the difference between a record and a display nobody can get back.
-    fn publish(&self, events: Vec<ActivityEvent>, dropped: u64) {
+    fn publish(&self, events: Vec<ActivityEvent>, dropped: u64) -> bool {
         let failure = if events.is_empty() {
             None
         } else {
-            self.storage.record(events.clone()).err()
+            match self
+                .storage
+                .record_if_generation(events.clone(), self.records_epoch)
+            {
+                Ok(true) => None,
+                Ok(false) => return false,
+                Err(error) => Some(error),
+            }
         };
 
         let mut live = self.live();
@@ -492,6 +567,7 @@ impl Worker {
                 .note(&crate::text::alert_title(&alert, &self.scope));
             (self.announce)(&alert, &self.scope);
         }
+        true
     }
 
     fn live(&self) -> std::sync::MutexGuard<'_, Live> {
@@ -510,19 +586,15 @@ struct Alerts {
     /// zero for never.
     threshold: i64,
     /// The day being added up, and what has arrived inside it.
-    // ponytail: counted from what this watch saw rather than read back out of
-    // the journal the way macOS does it. A running watch already has the
-    // number; re-reading a day of rows on every flush would be a disk read on
-    // the path that has to stay cheap. The cost is that a restart starts the
-    // day over, which is the same trade as the dropped-event counters.
     day: Option<(SystemTime, i64)>,
 }
 
 impl Alerts {
     /// Alerts that also watch for a folder gaining `threshold` bytes in a day.
-    fn watching(threshold: i64) -> Self {
+    fn watching(threshold: i64, initial_growth: i64, now: SystemTime) -> Self {
         Self {
             threshold,
+            day: Some((utc_day_start(now), initial_growth.max(0))),
             ..Self::default()
         }
     }
@@ -548,15 +620,16 @@ impl Alerts {
     }
 
     /// Adds `arrived` to the day and says whether the day is now past the
-    /// threshold. The day restarts once it is over, so this is the last 24
-    /// hours of watching rather than a total that only ever grows.
+    /// threshold. The total resets at the UTC day boundary, matching history
+    /// aggregation and the macOS host.
     fn grown(&mut self, arrived: i64, now: SystemTime) -> Option<Anomaly> {
         if self.threshold <= 0 {
             return None;
         }
-        let (start, gained) = self.day.get_or_insert((now, 0));
-        if now.duration_since(*start).unwrap_or_default() >= GROWTH_WINDOW {
-            *start = now;
+        let today = utc_day_start(now);
+        let (start, gained) = self.day.get_or_insert((today, 0));
+        if *start != today {
+            *start = today;
             *gained = 0;
         }
         *gained = gained.saturating_add(arrived);
@@ -581,6 +654,14 @@ impl Alerts {
         *slot = Some(now);
         true
     }
+}
+
+fn utc_day_start(time: SystemTime) -> SystemTime {
+    let seconds = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds / 86_400 * 86_400)
 }
 
 #[cfg(test)]
@@ -615,6 +696,42 @@ mod tests {
             |_, _| {},
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dropping_a_session_waits_for_its_worker_to_close() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let session = watch(root.path(), storage_dir.path());
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(storage_dir.path().join(crate::store::LOCK_FILE))
+            .unwrap();
+        lock.lock().unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            drop(session);
+            let _ = finished.send(());
+        });
+
+        assert!(
+            result.recv_timeout(Duration::from_millis(100)).is_err(),
+            "Session::drop returned while its worker was still closing"
+        );
+        fs::File::unlock(&lock).unwrap();
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Session::drop did not finish after storage unlocked");
+        assert!(
+            Storage::at(storage_dir.path())
+                .log_tail(10)
+                .contains("watch closed"),
+            "the worker did not finish its close record"
+        );
     }
 
     /// The whole pipeline on a real filesystem: kernel event, measurement,
@@ -782,6 +899,7 @@ mod tests {
             options: AggregationOptions::SHORT_TERM,
             live: Arc::new(Mutex::new(Live::default())),
             dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: Storage::at(storage_dir.path()).records_epoch(),
             alerts: Mutex::new(Alerts::default()),
             announce: Box::new(|_, _| {}),
         };
@@ -844,6 +962,89 @@ mod tests {
         assert!(journal.contains("later.bin"), "journal was {journal:?}");
     }
 
+    #[test]
+    fn a_reset_discards_a_batch_accepted_before_the_reset() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        let mut worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions::SHORT_TERM,
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+        };
+        let file = root.join("before-reset.txt");
+        fs::write(&file, b"queued").unwrap();
+        let mut pending = vec![Change {
+            kind: crate::monitor::ChangeKind::Created,
+            path: paths::normalize(&file.to_string_lossy()),
+            root_path: scope.clone(),
+            timestamp: SystemTime::now(),
+            process_name: None,
+        }];
+        let index = SizeIndex::default();
+        let size = |path: &str| allocated_size(Path::new(path));
+        let prior = |_: &str| None;
+        let known = |_: &str| None;
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        storage.forget_records().unwrap();
+        let baseline: Baseline = Arc::new(Mutex::new(None));
+        worker.flush(&attributor, &mut pending, &index, &baseline);
+
+        let journal = fs::read_to_string(storage.journal()).unwrap_or_default();
+        assert!(
+            !journal.contains("before-reset.txt"),
+            "a pre-reset batch recreated deleted history: {journal}"
+        );
+    }
+
+    #[test]
+    fn an_internal_queue_overflow_is_reconciled_and_written_to_the_diary() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        let mut worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions::SHORT_TERM,
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(1)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+        };
+        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&scope, &worker.live, &storage)));
+        fs::write(root.join("missed.txt"), b"reconcile me").unwrap();
+        let index = SizeIndex::default();
+        let size = |path: &str| allocated_size(Path::new(path));
+        let prior = |_: &str| None;
+        let known = |_: &str| None;
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        worker.flush(&attributor, &mut Vec::new(), &index, &baseline);
+
+        let live = worker.live();
+        assert_eq!(live.dropped, 1);
+        assert_eq!(
+            live.gaps, 1,
+            "overflow was counted but not treated as a gap"
+        );
+        assert!(live.rows.iter().any(|row| row.path.ends_with("missed.txt")));
+        drop(live);
+        assert!(storage.log_tail(20).contains("queue overflow"));
+    }
+
     fn row(kind: EventKind, delta: i64, items: u32, at: SystemTime) -> ActivityEvent {
         ActivityEvent {
             kind,
@@ -893,7 +1094,7 @@ mod tests {
         let ordinary = VecDeque::from([row(EventKind::Modified, 4096, 1, now)]);
         assert!(Alerts::default().news(&ordinary, 0, now).is_empty());
         // And a threshold nobody set is not a threshold anything crosses.
-        assert!(Alerts::watching(0)
+        assert!(Alerts::watching(0, 0, now)
             .news(&ordinary, 100 * 1_000_000_000, now)
             .is_empty());
     }
@@ -905,7 +1106,7 @@ mod tests {
     fn a_folder_past_the_size_the_user_asked_about_says_so_once_a_day() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let quiet = VecDeque::new();
-        let mut alerts = Alerts::watching(1_000_000_000);
+        let mut alerts = Alerts::watching(1_000_000_000, 0, now);
 
         assert!(alerts.news(&quiet, 600_000_000, now).is_empty());
         let news = alerts.news(&quiet, 600_000_000, now + Duration::from_secs(60));
@@ -924,5 +1125,18 @@ mod tests {
         assert!(alerts
             .news(&quiet, 600_000_000, now + GROWTH_WINDOW)
             .is_empty());
+    }
+
+    #[test]
+    fn growth_recorded_before_a_restart_counts_toward_todays_alert() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let quiet = VecDeque::new();
+        let mut alerts = Alerts::watching(1_000_000_000, 700_000_000, now);
+
+        let news = alerts.news(&quiet, 400_000_000, now + Duration::from_secs(60));
+
+        assert_eq!(news.len(), 1, "the pre-restart growth was forgotten");
+        assert_eq!(news[0].kind, AnomalyKind::Growth);
+        assert_eq!(news[0].bytes, 1_100_000_000);
     }
 }

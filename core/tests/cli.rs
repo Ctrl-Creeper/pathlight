@@ -5,7 +5,7 @@
 //! that a command nobody typed correctly says so instead of guessing.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, UNIX_EPOCH};
 
 use pathlight_core::{ActivityEvent, Confidence, EventKind, Journal};
@@ -348,6 +348,59 @@ fn a_pause_holds_every_watch_off_until_it_is_lifted() {
         "{}",
         text(&resumed)
     );
+}
+
+#[test]
+fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().to_string_lossy().replace('\\', "/");
+    let mut watched = Command::new(env!("CARGO_BIN_EXE_pathlight-monitor"))
+        .args(["watch", &path])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+
+    assert!(run(home.path(), &["pause"]).status.success());
+    std::thread::sleep(Duration::from_millis(750));
+    std::fs::write(
+        folder.path().join("while-paused.txt"),
+        b"must stay unrecorded",
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let storage = pathlight_core::uninstall::data_dir(home.path(), |_| None);
+    let journal =
+        std::fs::read_to_string(storage.join("activity-events.jsonl")).unwrap_or_default();
+    assert!(
+        !journal.contains("while-paused.txt"),
+        "the already-running watch ignored pause: {journal}"
+    );
+
+    assert!(run(home.path(), &["resume"]).status.success());
+    std::thread::sleep(Duration::from_millis(750));
+    std::fs::write(folder.path().join("after-resume.txt"), b"must be recorded").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let journal =
+            std::fs::read_to_string(storage.join("activity-events.jsonl")).unwrap_or_default();
+        if journal.contains("after-resume.txt") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watch did not reopen after resume: {journal}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = watched.kill();
+    let _ = watched.wait();
 }
 
 /// `--json` is the terminal's own convenience: the windows already show

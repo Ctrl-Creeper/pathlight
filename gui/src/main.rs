@@ -62,6 +62,7 @@ fn main() -> eframe::Result<()> {
             theme::install(&cc.egui_ctx, &theme::system_fonts());
             let mut app = App::resumed();
             app.hidden = hidden;
+            app.observe_shared_pause(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
@@ -103,6 +104,8 @@ struct App {
     /// Whether every watch is held off, mirrored from storage for the same
     /// reason.
     paused: bool,
+    shared_pause_changes: Option<Receiver<bool>>,
+    shared_pause_stop: Option<mpsc::Sender<()>>,
     /// What the two size boxes hold while they are being typed, in MB. Text
     /// rather than numbers, because an empty box is "no bound" and a
     /// half-typed one must not be read as a bound the user did not finish.
@@ -145,6 +148,8 @@ impl App {
         Self {
             encrypt,
             paused,
+            shared_pause_changes: None,
+            shared_pause_stop: None,
             min_mb: mb_text(min_bytes),
             max_mb: mb_text(max_bytes),
             selected: watches.first().map(|watch| watch.path.clone()),
@@ -189,7 +194,7 @@ impl App {
             .map(|watch| watch.path.clone())
             .collect();
         for root in enabled {
-            self.start(&root);
+            self.open(&root);
         }
     }
 
@@ -200,7 +205,7 @@ impl App {
     /// Starts reading the journal for `root`. The previous answer is cleared
     /// first: showing last folder's totals under this folder's name is worse
     /// than showing none.
-    fn load_history(&mut self, root: &str) {
+    fn load_history(&mut self, root: &str, ctx: &egui::Context) {
         self.history = None;
         self.history_root = Some(root.to_owned());
         self.history_pending = None;
@@ -210,6 +215,7 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         let root = root.to_owned();
         let query = self.query.clone();
+        let ctx = ctx.clone();
         // A failed spawn leaves `history` empty, which the pane reads as still
         // loading — wrong, but a thread that will not start is a machine with
         // worse problems than a missing panel.
@@ -221,6 +227,7 @@ impl App {
                         .search(&root, HISTORY_ROWS, &query)
                         .map_err(|error| error.to_string()),
                 );
+                ctx.request_repaint();
             })
             .is_ok()
         {
@@ -229,7 +236,7 @@ impl App {
     }
 
     /// Picks up a finished read, and starts one when the selection moved.
-    fn poll_history(&mut self) {
+    fn poll_history(&mut self, ctx: &egui::Context) {
         if let Some(pending) = &self.history_pending {
             if let Ok(result) = pending.try_recv() {
                 self.history = Some(result);
@@ -238,7 +245,7 @@ impl App {
         }
         if self.history_root.as_deref() != self.selected.as_deref() {
             match self.selected.clone() {
-                Some(root) => self.load_history(&root),
+                Some(root) => self.load_history(&root, ctx),
                 None => {
                     self.history = None;
                     self.history_root = None;
@@ -273,12 +280,11 @@ impl App {
                 return;
             }
         }
-        if !self.watches.iter().any(|watch| watch.path == root) {
-            self.watches.push(WatchTarget {
-                path: root.clone(),
-                enabled: false,
-            });
-            self.persist();
+        if let Some(storage) = self.storage().cloned() {
+            match storage.add_watch(&root) {
+                Ok(_) => self.watches = storage.watches(),
+                Err(error) => self.notice = Some(format!("Could not save that folder: {error}")),
+            }
         }
         self.selected = Some(root);
     }
@@ -337,11 +343,15 @@ impl App {
 
     fn forget(&mut self, root: &str) {
         self.sessions.remove(root);
-        self.watches.retain(|watch| watch.path != root);
+        if let Some(storage) = self.storage().cloned() {
+            match storage.remove_watch(root) {
+                Ok(_) => self.watches = storage.watches(),
+                Err(error) => self.notice = Some(format!("Could not forget that folder: {error}")),
+            }
+        }
         if self.selected.as_deref() == Some(root) {
             self.selected = self.watches.first().map(|watch| watch.path.clone());
         }
-        self.persist();
     }
 
     fn toggle(&mut self, root: &str) {
@@ -355,27 +365,36 @@ impl App {
     /// the same. A watch that could not be opened is not remembered as one:
     /// the next launch would fail the same way and say nothing new.
     fn start(&mut self, root: &str) {
+        if self.open(root) {
+            self.remember(root, true);
+        }
+    }
+
+    fn open(&mut self, root: &str) -> bool {
         let Some(storage) = self.storage().cloned() else {
-            return;
+            return false;
         };
         match Session::start(root, storage, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
-                self.remember(root, true);
+                true
             }
-            Err(error) => self.notice = Some(format!("Could not watch {root}: {error}")),
+            Err(error) => {
+                self.notice = Some(format!("Could not watch {root}: {error}"));
+                false
+            }
         }
     }
 
     fn remember(&mut self, root: &str, enabled: bool) {
-        match self.watches.iter_mut().find(|watch| watch.path == root) {
-            Some(watch) => watch.enabled = enabled,
-            None => self.watches.push(WatchTarget {
-                path: root.to_owned(),
-                enabled,
-            }),
+        let Some(storage) = self.storage().cloned() else {
+            return;
+        };
+        if let Err(error) = storage.set_watch_enabled(root, enabled) {
+            self.notice = Some(format!("Could not save that folder: {error}"));
+            return;
         }
-        self.persist();
+        self.watches = storage.watches();
     }
 
     /// Stops every watch and starts the same ones again, which is how a
@@ -386,8 +405,72 @@ impl App {
     fn restart_watches(&mut self) {
         for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
             self.sessions.remove(&root);
-            self.start(&root);
+            self.open(&root);
         }
+    }
+
+    fn apply_shared_pause(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            self.sessions.clear();
+        } else {
+            if let Some(storage) = self.storage() {
+                self.watches = storage.watches();
+            }
+            self.resume();
+        }
+    }
+
+    fn poll_shared_pause(&mut self) {
+        let changed = self
+            .shared_pause_changes
+            .as_ref()
+            .and_then(|changes| changes.try_iter().last());
+        if let Some(paused) = changed {
+            self.apply_shared_pause(paused);
+        }
+    }
+
+    /// Watches the one shared setting off the paint path. It wakes egui only
+    /// when the value changes, so a hidden or idle window remains idle while
+    /// still observing another host's pause within a second.
+    fn observe_shared_pause(&mut self, ctx: &egui::Context) {
+        let Some(storage) = self.storage().cloned() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let (stop_sender, stop_receiver) = mpsc::channel::<()>();
+        let ctx = ctx.clone();
+        let mut paused = self.paused;
+        if std::thread::Builder::new()
+            .name("pathlight-settings".into())
+            .spawn(move || loop {
+                match stop_receiver.recv_timeout(Duration::from_secs(1)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let current = storage.paused();
+                if current == paused {
+                    continue;
+                }
+                paused = current;
+                if sender.send(current).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            })
+            .is_ok()
+        {
+            self.shared_pause_changes = Some(receiver);
+            self.shared_pause_stop = Some(stop_sender);
+        }
+    }
+
+    fn stop_shared_pause_observer(&mut self) {
+        if let Some(stop) = self.shared_pause_stop.take() {
+            let _ = stop.send(());
+        }
+        self.shared_pause_changes = None;
     }
 
     /// Holds every watch off, or lets them open again.
@@ -458,22 +541,12 @@ impl App {
         self.restart_watches();
     }
 
-    fn persist(&mut self) {
-        if self.uninstalled {
-            return;
-        }
-        if let Some(storage) = self.storage() {
-            if let Err(error) = storage.set_watches(&self.watches) {
-                self.notice = Some(format!("Could not save the folder list: {error}"));
-            }
-        }
-    }
-
     fn uninstall(&mut self, targets: &[PathBuf]) {
         // Every watch stops first. A running session appends to the journal,
         // and a journal written after it was deleted is a half-removed
         // install that reports itself as removed.
         self.sessions.clear();
+        self.stop_shared_pause_observer();
         let failures = uninstall::remove_all(targets);
         self.uninstalled = true;
         self.watches.clear();
@@ -523,17 +596,13 @@ impl App {
         // is a window to draw it in: an idle window should cost nothing, and a
         // hidden one has nothing to show four times a second.
         let ctx = ui.ctx().clone();
+        self.poll_shared_pause();
         if !self.sessions.is_empty() && !self.hidden {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         self.shortcuts(&ctx);
         self.watch_the_tray(&ctx);
-        self.poll_history();
-        if self.history_pending.is_some() {
-            // Otherwise the finished read sits in the channel until something
-            // else asks for a frame, and the pane says "reading" forever.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+        self.poll_history(&ctx);
 
         egui::Panel::top(egui::Id::new("header")).show(ui, |ui| {
             ui.add_space(8.0);
@@ -649,12 +718,12 @@ impl App {
             Some(Ask::Requery(query)) => {
                 self.query = query;
                 if let Some(root) = self.selected.clone() {
-                    self.load_history(&root);
+                    self.load_history(&root, &ctx);
                 }
             }
             Some(Ask::Reload) => {
                 if let Some(root) = self.selected.clone() {
-                    self.load_history(&root);
+                    self.load_history(&root, &ctx);
                 }
             }
             Some(Ask::Export { as_report }) => self.export(as_report),
@@ -756,6 +825,7 @@ impl App {
             }
             Wish::Quit => {
                 self.quitting = true;
+                self.stop_shared_pause_observer();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -1471,6 +1541,8 @@ mod tests {
             uninstalled: false,
             encrypt: false,
             paused: false,
+            shared_pause_changes: None,
+            shared_pause_stop: None,
             min_mb: String::new(),
             max_mb: String::new(),
             tray: None,
@@ -1597,6 +1669,34 @@ mod tests {
             "resuming did not bring the watch back"
         );
         assert!(!Storage::at(storage_dir.path()).paused());
+    }
+
+    #[test]
+    fn a_pause_saved_by_another_process_reconciles_the_running_window() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut app = app(storage_dir.path(), vec![root.clone()]);
+        app.start(&root);
+        assert!(app.sessions.contains_key(&root));
+        app.observe_shared_pause(&egui::Context::default());
+
+        Storage::at(storage_dir.path()).set_paused(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !app.paused && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(app.paused && app.sessions.is_empty());
+
+        Storage::at(storage_dir.path()).set_paused(false).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while app.paused && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(!app.paused && app.sessions.contains_key(&root));
+        app.stop_shared_pause_observer();
     }
 
     /// The promise a restart has to keep: a folder that was being watched when
