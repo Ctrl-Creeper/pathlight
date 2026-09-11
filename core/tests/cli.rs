@@ -18,8 +18,10 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        // Otherwise a Linux runner's XDG variables point the store back at the
-        // tester's real home and the test writes where it was told not to.
+        // Otherwise a runner's platform data variables point the store back at
+        // the tester's real home and parallel tests share one set of records.
+        .env_remove("APPDATA")
+        .env_remove("LOCALAPPDATA")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .output()
@@ -359,6 +361,8 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
         .args(["watch", &path])
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
+        .env_remove("APPDATA")
+        .env_remove("LOCALAPPDATA")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .stdout(Stdio::null())
