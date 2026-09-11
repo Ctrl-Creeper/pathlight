@@ -66,8 +66,8 @@ The macOS app:
 
 The Windows and Linux window:
 
-- **Rust stable**, and nothing else. No Node, no WebView2, no GTK development headers
-- On Linux, the usual windowing libraries: `libxkbcommon`, `libwayland`, `libGL`
+- **Rust stable**. No Node or WebView2
+- On Linux, the window and tray development packages: `libxkbcommon`, `libwayland`, `libGL`, GTK 3, `libxdo`, and Ayatana AppIndicator 3
 
 ## Building from Source
 

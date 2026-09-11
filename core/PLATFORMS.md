@@ -109,7 +109,7 @@ they are plain functions rather than `cfg`-gated bodies.
 
 | Platform | Storage removed | Notes |
 |---|---|---|
-| macOS | `~/Library/Application Support/Pathlight` | The Swift host owns the full list: preferences, caches, saved state, the Keychain key, the login item and the app bundle. `Pathlight/Services/UninstallService.swift` is the authority; this module deliberately does not restate it, because two lists that have to agree eventually do not. |
+| macOS | `~/Library/Application Support/Pathlight` | The Swift host owns the full list: preferences, caches, saved state, the shared activity key file, its legacy Keychain migration item, the login item and the app bundle. `Pathlight/Services/UninstallService.swift` is the authority; this module deliberately does not restate it, because two lists that have to agree eventually do not. |
 | Linux | `$XDG_DATA_HOME`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME` (each `/pathlight`) | Unset roots fall back to the specification's defaults under `$HOME`. A root holding a relative path is ignored, per the specification — honouring one would delete relative to whatever the working directory happened to be. |
 | Windows | `%APPDATA%\Pathlight`, `%LOCALAPPDATA%\Pathlight` | Both fall back to their standard place under `%USERPROFILE%` when unset. |
 
