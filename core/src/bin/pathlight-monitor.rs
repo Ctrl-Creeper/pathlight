@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pathlight_core::history::Query;
-use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS};
+use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, HISTORY_ROWS, INTERACTIVE_LATENCY_MS};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
 use pathlight_core::{paths, ActivityEvent, AggregationOptions};
 
@@ -927,7 +927,7 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
             storage.set_size_bounds(min, max)?;
         }
         "latency" => match first {
-            "immediate" => storage.set_latency_ms(DEFAULT_LATENCY_MS)?,
+            "immediate" => storage.set_latency_ms(INTERACTIVE_LATENCY_MS)?,
             "power-saving" => storage.set_latency_ms(BACKGROUND_LATENCY_MS)?,
             value => storage.set_latency_ms(number(value, "latency")?)?,
         },
@@ -1034,9 +1034,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
         format!(
             "{} ms  ({})",
             storage.latency_ms(),
-            match storage.latency_ms() >= BACKGROUND_LATENCY_MS {
-                true => "power-saving",
-                false => "immediate",
+            match storage.latency_ms() {
+                INTERACTIVE_LATENCY_MS => "immediate",
+                value if value >= BACKGROUND_LATENCY_MS => "power-saving",
+                _ => "custom",
             }
         ),
     );

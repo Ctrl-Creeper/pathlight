@@ -477,26 +477,32 @@ impl<'a> Attributor<'a> {
     }
 
     pub fn process(&self, changes: &[Change]) -> Vec<ActivityEvent> {
-        let events: Vec<ActivityEvent> = changes
+        let events: Vec<AttributedEvent> = changes
             .iter()
             .filter_map(|change| self.event_for(change))
+            .map(|event| {
+                let threshold_exempt = matches!(event.kind, EventKind::Deleted | EventKind::Moved);
+                AttributedEvent {
+                    event,
+                    threshold_exempt,
+                }
+            })
             .collect();
         let mut events = self.aggregate(events);
-        events.retain(|event| self.is_recordable(event));
-        events
+        events.retain(|event| self.is_recordable(&event.event, event.threshold_exempt));
+        events.into_iter().map(|event| event.event).collect()
     }
 
     /// The size filter runs *after* aggregation so a folder's worth of small
     /// changes is judged as one change. Removals and moves skip it entirely:
     /// wiping tiny files or renaming one without changing its size are both
     /// filesystem changes the byte threshold must not hide.
-    fn is_recordable(&self, event: &ActivityEvent) -> bool {
+    fn is_recordable(&self, event: &ActivityEvent, threshold_exempt: bool) -> bool {
+        if threshold_exempt {
+            return true;
+        }
         match event.byte_delta {
-            Some(delta) => {
-                delta < 0
-                    || matches!(event.kind, EventKind::Deleted | EventKind::Moved)
-                    || delta >= self.options.minimum_recorded_byte_delta
-            }
+            Some(delta) => delta.saturating_abs() >= self.options.minimum_recorded_byte_delta,
             None => true,
         }
     }
@@ -577,25 +583,30 @@ impl<'a> Attributor<'a> {
         }
     }
 
-    fn aggregate(&self, mut events: Vec<ActivityEvent>) -> Vec<ActivityEvent> {
+    fn aggregate(&self, mut events: Vec<AttributedEvent>) -> Vec<AttributedEvent> {
         let window = self.options.aggregation_window_secs;
         if self.options.records_file_names || window == 0 {
             return events;
         }
 
-        let mut groups: BTreeMap<(String, String, u64), Vec<ActivityEvent>> = BTreeMap::new();
+        let mut groups: BTreeMap<(String, String, u64), Vec<AttributedEvent>> = BTreeMap::new();
         for event in events.drain(..) {
-            let bucket = unix_seconds(event.timestamp) / window;
-            let key = (event.root_path.clone(), parent_of(&event.path), bucket);
+            let bucket = unix_seconds(event.event.timestamp) / window;
+            let key = (
+                event.event.root_path.clone(),
+                parent_of(&event.event.path),
+                bucket,
+            );
             groups.entry(key).or_default().push(event);
         }
 
-        let mut aggregated: Vec<ActivityEvent> =
+        let mut aggregated: Vec<AttributedEvent> =
             groups.into_values().map(aggregate_group).collect();
         aggregated.sort_by(|lhs, rhs| {
-            lhs.timestamp
-                .cmp(&rhs.timestamp)
-                .then_with(|| lhs.path.cmp(&rhs.path))
+            lhs.event
+                .timestamp
+                .cmp(&rhs.event.timestamp)
+                .then_with(|| lhs.event.path.cmp(&rhs.event.path))
         });
         aggregated
     }
@@ -606,46 +617,59 @@ impl<'a> Attributor<'a> {
 /// Keeping the full path in that case would make the setting hold only for
 /// folders busy enough to have something to merge with, which is not what
 /// "do not record file names" means.
-fn aggregate_group(mut events: Vec<ActivityEvent>) -> ActivityEvent {
+struct AttributedEvent {
+    event: ActivityEvent,
+    threshold_exempt: bool,
+}
+
+fn aggregate_group(mut events: Vec<AttributedEvent>) -> AttributedEvent {
     events.sort_by(|lhs, rhs| {
-        lhs.timestamp
-            .cmp(&rhs.timestamp)
-            .then_with(|| lhs.path.cmp(&rhs.path))
+        lhs.event
+            .timestamp
+            .cmp(&rhs.event.timestamp)
+            .then_with(|| lhs.event.path.cmp(&rhs.event.path))
     });
 
-    let has_unknown = events.iter().any(|event| event.byte_delta.is_none());
+    let has_unknown = events.iter().any(|event| event.event.byte_delta.is_none());
     let byte_delta = if has_unknown {
         None
     } else {
-        Some(events.iter().filter_map(|e| e.byte_delta).sum())
+        Some(events.iter().filter_map(|e| e.event.byte_delta).sum())
     };
     let confidence = if byte_delta.is_none() {
         Confidence::Unknown
     } else if events
         .iter()
-        .all(|event| event.confidence == Confidence::Confirmed)
+        .all(|event| event.event.confidence == Confidence::Confirmed)
     {
         Confidence::Confirmed
     } else {
         Confidence::Estimated
     };
 
-    ActivityEvent {
+    let event = ActivityEvent {
         kind: EventKind::Aggregate,
-        path: parent_of(&events[0].path),
-        root_path: events[0].root_path.clone(),
-        timestamp: events[0].timestamp,
+        path: parent_of(&events[0].event.path),
+        root_path: events[0].event.root_path.clone(),
+        timestamp: events[0].event.timestamp,
         byte_delta,
         confidence,
         previous_path: None,
-        affected_item_count: events.iter().map(|event| event.affected_item_count).sum(),
+        affected_item_count: events
+            .iter()
+            .map(|event| event.event.affected_item_count)
+            .sum(),
         // One writer only when every change in the group came from the same
         // program. A mixed group has no single program to name.
-        process_name: events[0].process_name.clone().filter(|name| {
+        process_name: events[0].event.process_name.clone().filter(|name| {
             events
                 .iter()
-                .all(|event| event.process_name.as_deref() == Some(name.as_str()))
+                .all(|event| event.event.process_name.as_deref() == Some(name.as_str()))
         }),
+    };
+    AttributedEvent {
+        event,
+        threshold_exempt: events.iter().any(|event| event.threshold_exempt),
     }
 }
 

@@ -395,8 +395,7 @@ private struct MonitoringStartConfigurationView: View {
                 LabeledContent("Report changes every") {
                     Stepper(
                         value: $reportIntervalSeconds,
-                        in: MonitoringStartConfiguration.minimumMonitorLatency
-                            ...MonitoringStartConfiguration.maximumMonitorLatency,
+                        in: MonitoringStartConfiguration.minimumMonitorLatency...MonitoringStartConfiguration.maximumMonitorLatency,
                         step: 0.25
                     ) {
                         HStack(spacing: 6) {

@@ -238,6 +238,67 @@ fn renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
 }
 
 #[test]
+fn aggregated_renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
+    let current = |_: &str| Some(4_096);
+    let prior = |_: &str| Some(4_096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 10 * 1024 * 1024,
+            aggregation_window_secs: 300,
+            records_file_names: false,
+            min_file_bytes: None,
+            max_file_bytes: None,
+        },
+        &current,
+        &prior,
+        &none,
+    );
+
+    let events = attributor.process(&[change(
+        ChangeKind::Renamed {
+            previous_path: Some(format!("{ROOT}/before.txt")),
+        },
+        "after.txt",
+        1,
+    )]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Aggregate);
+    assert_eq!(events[0].path, ROOT);
+    assert_eq!(events[0].byte_delta, Some(0));
+}
+
+#[test]
+fn an_aggregated_removal_survives_when_arrivals_make_the_net_change_small() {
+    let current = |path: &str| path.ends_with("arrived.txt").then_some(4_000);
+    let prior = |path: &str| path.ends_with("gone.txt").then_some(4_096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 10 * 1024 * 1024,
+            aggregation_window_secs: 300,
+            records_file_names: false,
+            min_file_bytes: None,
+            max_file_bytes: None,
+        },
+        &current,
+        &prior,
+        &none,
+    );
+
+    let events = attributor.process(&[
+        change(ChangeKind::Deleted, "gone.txt", 1),
+        change(ChangeKind::Created, "arrived.txt", 2),
+    ]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Aggregate);
+    assert_eq!(events[0].byte_delta, Some(-96));
+    assert_eq!(events[0].affected_item_count, 2);
+}
+
+#[test]
 fn aggregated_small_writes_are_judged_as_one_change() {
     // Individually each write is under the threshold; together they are not,
     // so filtering after aggregation keeps the folder-level total.
@@ -263,6 +324,29 @@ fn aggregated_small_writes_are_judged_as_one_change() {
     assert_eq!(events[0].kind, EventKind::Aggregate);
     assert_eq!(events[0].byte_delta, Some(1_200));
     assert_eq!(events[0].affected_item_count, 2);
+}
+
+#[test]
+fn small_modification_shrinkage_respects_the_threshold() {
+    let current = |_: &str| Some(4_095);
+    let known = |_: &str| Some(4_096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 1_024,
+            ..AggregationOptions::SHORT_TERM
+        },
+        &current,
+        &none,
+        &known,
+    );
+
+    let events = attributor.process(&[change(ChangeKind::Modified, "file.txt", 1)]);
+
+    assert!(
+        events.is_empty(),
+        "a one-byte truncation bypassed the threshold"
+    );
 }
 
 /// Two watches over the same file are independent observers. Sharing one

@@ -41,6 +41,8 @@ pub const DEFAULT_JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_AGGREGATION_WINDOW_SECS: u64 = 5 * 60;
 /// The shipped coalescing window balances responsiveness with wake-ups.
 pub const DEFAULT_LATENCY_MS: u64 = 5_000;
+/// Compatibility name for the old interactive setting and CLI keyword.
+pub const INTERACTIVE_LATENCY_MS: u64 = 250;
 /// What the macOS app uses for a watch nobody is looking at. A wide window is
 /// how monitoring stays cheap: the kernel wakes the process once for a
 /// half-minute of churn instead of once per file.

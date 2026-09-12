@@ -115,6 +115,18 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     assert!(text(&run(home.path(), &["settings"])).contains("retention-days            30"));
 }
 
+#[test]
+fn immediate_latency_keeps_its_legacy_fast_value() {
+    let home = tempfile::tempdir().unwrap();
+    let output = run(home.path(), &["settings", "latency", "immediate"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let shown = text(&run(home.path(), &["settings"]));
+    assert!(
+        shown.contains("latency                   250 ms  (immediate)"),
+        "{shown}"
+    );
+}
+
 /// The three answers about somebody's own records, from a terminal: how much
 /// is there, put the settings back, and start the records over. The last one
 /// asks twice, because nothing recorded can be got back. What the counting

@@ -198,7 +198,7 @@ impl App {
             .map(|watch| watch.path.clone())
             .collect();
         for root in enabled {
-            self.open(&root);
+            self.open(&root, None);
         }
     }
 
@@ -372,17 +372,19 @@ impl App {
     /// Opens a watch, and remembers that it is open so the next launch does
     /// the same. A watch that could not be opened is not remembered as one:
     /// the next launch would fail the same way and say nothing new.
-    fn start(&mut self, root: &str) {
-        if self.open(root) {
-            self.remember(root, true);
-        }
-    }
-
-    fn open(&mut self, root: &str) -> bool {
+    fn open(&mut self, root: &str, configuration: Option<settings::StartConfiguration>) -> bool {
         let Some(storage) = self.storage().cloned() else {
             return false;
         };
-        match Session::start(root, storage, notify::post) {
+        let (options, latency_ms) = match configuration {
+            Some(configuration) => {
+                let mut options = storage.options();
+                options.minimum_recorded_byte_delta = configuration.minimum_recorded_byte_delta;
+                (options, configuration.latency_ms)
+            }
+            None => (storage.options(), storage.latency_ms()),
+        };
+        match Session::start_configured(root, storage, options, latency_ms, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
                 true
@@ -413,7 +415,7 @@ impl App {
     fn restart_watches(&mut self) {
         for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
             self.sessions.remove(&root);
-            self.open(&root);
+            self.open(&root, None);
         }
     }
 
@@ -1345,18 +1347,18 @@ impl App {
         if self.starting.is_some() {
             let mut verdict = None;
             let mut starting = self.starting.take();
-            if let (Some((_, draft)), Some(storage)) = (starting.as_mut(), self.storage().cloned())
-            {
+            if let Some((_, draft)) = starting.as_mut() {
                 egui::Modal::new(egui::Id::new("monitoring-settings"))
-                    .show(ctx, |ui| verdict = draft.ui(ui, &storage));
+                    .show(ctx, |ui| verdict = draft.ui(ui));
             }
             self.starting = starting;
             match verdict {
                 Some(settings::StartVerdict::Cancel) => self.starting = None,
-                Some(settings::StartVerdict::Start) => {
+                Some(settings::StartVerdict::Start(configuration)) => {
                     if let Some((root, _)) = self.starting.take() {
-                        self.restart_watches();
-                        self.start(&root);
+                        if self.open(&root, Some(configuration)) {
+                            self.remember(&root, true);
+                        }
                     }
                 }
                 None => {}
@@ -1720,7 +1722,8 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut app = app(storage_dir.path(), vec![root.clone()]);
-        app.start(&root);
+        assert!(app.open(&root, None));
+        app.remember(&root, true);
         assert!(app.sessions.contains_key(&root));
         app.observe_shared_pause(&egui::Context::default());
 

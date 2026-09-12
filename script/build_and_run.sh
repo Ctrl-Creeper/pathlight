@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="Pathlight"
-BUNDLE_ID="com.colinvkim.Pathlight"
+BUNDLE_ID="com.ctrlcreeper.Pathlight"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 APP_BUNDLE="$BUILD_DIR/Build/Products/Debug/$APP_NAME.app"

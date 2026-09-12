@@ -128,8 +128,9 @@ impl Watcher {
     ///
     /// `since_event_id` resumes from a previous cursor where the platform supports
     /// it (FSEvents); elsewhere a `RequiresRescan` is emitted so the host
-    /// re-baselines. `latency_ms` is the FSEvents coalescing window; inotify
-    /// delivers immediately and waits up to 250 ms only for unmatched renames.
+    /// re-baselines. `latency_ms` is the native coalescing window where the
+    /// backend supports one; the shared watch worker also uses it to batch
+    /// immediate inotify, fanotify and USN notifications before recording.
     #[uniffi::constructor]
     pub fn start(
         root_path: String,
