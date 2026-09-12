@@ -832,7 +832,7 @@ mod tests {
         let session = watch(root.path(), &storage_dir);
 
         fs::write(storage_dir.join("activity-events.jsonl"), b"a row\n").unwrap();
-        fs::write(root.path().join("ordinary.txt"), b"hello").unwrap();
+        fs::write(root.path().join("ordinary.txt"), vec![b'h'; 2 * 1024]).unwrap();
 
         eventually(&session, "the ordinary file to be recorded", |live| {
             live.rows
@@ -858,7 +858,7 @@ mod tests {
 
         fs::write(root.path().join(".DS_Store"), b"finder").unwrap();
         fs::write(root.path().join("movie.mp4.crdownload"), b"half").unwrap();
-        fs::write(root.path().join("keep.txt"), b"hello").unwrap();
+        fs::write(root.path().join("keep.txt"), vec![b'h'; 2 * 1024]).unwrap();
 
         eventually(&session, "the ordinary file to be recorded", |live| {
             live.rows.iter().any(|row| row.path.ends_with("keep.txt"))
@@ -896,7 +896,7 @@ mod tests {
         storage.record(vec![stale]).unwrap();
 
         let session = watch(root.path(), storage_dir.path());
-        fs::write(root.path().join("now.txt"), b"hello").unwrap();
+        fs::write(root.path().join("now.txt"), vec![b'n'; 2 * 1024]).unwrap();
         eventually(&session, "the new write to be recorded", |live| {
             live.event_count > 0
         });
