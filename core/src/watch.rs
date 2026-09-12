@@ -26,6 +26,7 @@ use crate::anomaly::{anomalies, growth, Anomaly, AnomalyKind, GROWTH_WINDOW, WIN
 use crate::store::Storage;
 
 /// How long a batch waits before it is attributed and written.
+#[cfg(any(target_os = "macos", test))]
 const MACOS_WORKER_FLUSH: Duration = Duration::from_millis(50);
 /// Bounded so a burst costs memory it cannot exceed. Overflow is counted and
 /// reported, never quietly dropped.
