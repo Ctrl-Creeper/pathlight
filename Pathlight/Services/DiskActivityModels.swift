@@ -126,6 +126,8 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
 /// threshold; the native monitor owns delivery latency.
 nonisolated struct MonitoringStartConfiguration: Equatable, Sendable {
     static let maximumMinimumKilobytes: Int64 = 1_000_000
+    static let minimumMonitorLatency: TimeInterval = 0.25
+    static let maximumMonitorLatency: TimeInterval = 300
 
     let minimumRecordedByteDelta: Int64
     let monitorLatency: TimeInterval
@@ -137,7 +139,7 @@ nonisolated struct MonitoringStartConfiguration: Equatable, Sendable {
 
     init(minimumRecordedByteDelta: Int64, monitorLatency: TimeInterval) {
         self.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
-        self.monitorLatency = max(monitorLatency, 0.25)
+        self.monitorLatency = Self.boundedMonitorLatency(monitorLatency)
     }
 
     init(minimumKilobytes: Int64, monitorLatency: TimeInterval) {
@@ -149,6 +151,10 @@ nonisolated struct MonitoringStartConfiguration: Equatable, Sendable {
             minimumRecordedByteDelta: boundedKilobytes * 1_024,
             monitorLatency: monitorLatency
         )
+    }
+
+    static func boundedMonitorLatency(_ latency: TimeInterval) -> TimeInterval {
+        min(max(latency, minimumMonitorLatency), maximumMonitorLatency)
     }
 
     var liveOptions: DiskActivityAggregationOptions {

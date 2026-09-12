@@ -55,4 +55,14 @@ struct MonitoringStartConfigurationTests {
 
         #expect(configuration.minimumRecordedByteDelta == 1_024_000_000)
     }
+
+    @Test("typed intervals stay within the watcher range")
+    func clampsLargeIntervals() {
+        let configuration = MonitoringStartConfiguration(
+            minimumKilobytes: 1,
+            monitorLatency: .greatestFiniteMagnitude
+        )
+
+        #expect(configuration.monitorLatency == 300)
+    }
 }

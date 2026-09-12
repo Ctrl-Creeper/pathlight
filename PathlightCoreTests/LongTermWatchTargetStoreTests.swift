@@ -42,6 +42,23 @@ final class LongTermWatchTargetStoreTests: XCTestCase {
         XCTAssertEqual(options.monitorLatency, 0.25)
     }
 
+    func testPersistedLatencyAboveTheWatcherLimitIsClamped() throws {
+        let data = Data(
+            """
+            {
+              "minimumRecordedByteDelta": 1024,
+              "aggregationWindow": 300,
+              "recordsFileNames": true,
+              "monitorLatency": 999999
+            }
+            """.utf8
+        )
+
+        let options = try JSONDecoder().decode(LongTermWatchTargetOptions.self, from: data)
+
+        XCTAssertEqual(options.monitorLatency, 300)
+    }
+
     func testUserDefaultsPersistenceRoundTripsTargets() {
         let defaults = makeIsolatedLongTermWatchDefaults()
         let persistence = UserDefaultsLongTermWatchTargetPersistence(defaults: defaults)

@@ -28,7 +28,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindow = aggregationWindow
         self.recordsFileNames = recordsFileNames
-        self.monitorLatency = max(monitorLatency, 0.25)
+        self.monitorLatency = MonitoringStartConfiguration.boundedMonitorLatency(monitorLatency)
         self.growthAlertThresholdBytes = growthAlertThresholdBytes
         self.exclusionPatterns = exclusionPatterns
         self.minimumFileBytes = minimumFileBytes
@@ -45,7 +45,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
             TimeInterval.self,
             forKey: .monitorLatency
         ) ?? 30
-        monitorLatency = max(persistedLatency, 0.25)
+        monitorLatency = MonitoringStartConfiguration.boundedMonitorLatency(persistedLatency)
         growthAlertThresholdBytes = try container.decodeIfPresent(Int64.self, forKey: .growthAlertThresholdBytes)
         // Targets persisted before exclusions existed adopt the defaults.
         exclusionPatterns = try container.decodeIfPresent([String].self, forKey: .exclusionPatterns)
