@@ -2,6 +2,46 @@ import XCTest
 @testable import PathlightCore
 
 final class LongTermWatchTargetStoreTests: XCTestCase {
+    func testNewWatchDefaultsRecordOneKilobyteChangesEveryFiveSeconds() {
+        XCTAssertEqual(LongTermWatchTargetOptions.default.minimumRecordedByteDelta, 1_024)
+        XCTAssertEqual(LongTermWatchTargetOptions.default.monitorLatency, 5)
+        XCTAssertEqual(DiskActivityAggregationOptions.shortTermDefault.minimumRecordedByteDelta, 1_024)
+    }
+
+    func testLegacyTargetWithoutLatencyKeepsThePreviousThirtySecondBehavior() throws {
+        let data = Data(
+            """
+            {
+              "minimumRecordedByteDelta": 10485760,
+              "aggregationWindow": 300,
+              "recordsFileNames": true
+            }
+            """.utf8
+        )
+
+        let options = try JSONDecoder().decode(LongTermWatchTargetOptions.self, from: data)
+
+        XCTAssertEqual(options.minimumRecordedByteDelta, 10 * 1_024 * 1_024)
+        XCTAssertEqual(options.monitorLatency, 30)
+    }
+
+    func testPersistedLatencyBelowTheWatcherLimitIsClamped() throws {
+        let data = Data(
+            """
+            {
+              "minimumRecordedByteDelta": 1024,
+              "aggregationWindow": 300,
+              "recordsFileNames": true,
+              "monitorLatency": 0
+            }
+            """.utf8
+        )
+
+        let options = try JSONDecoder().decode(LongTermWatchTargetOptions.self, from: data)
+
+        XCTAssertEqual(options.monitorLatency, 0.25)
+    }
+
     func testUserDefaultsPersistenceRoundTripsTargets() {
         let defaults = makeIsolatedLongTermWatchDefaults()
         let persistence = UserDefaultsLongTermWatchTargetPersistence(defaults: defaults)
@@ -11,7 +51,8 @@ final class LongTermWatchTargetStoreTests: XCTestCase {
             options: LongTermWatchTargetOptions(
                 minimumRecordedByteDelta: 512 * 1_024,
                 aggregationWindow: 120,
-                recordsFileNames: false
+                recordsFileNames: false,
+                monitorLatency: 7
             ),
             baseline: ActivityBaselineSnapshot(
                 rootPath: URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory),
@@ -30,6 +71,7 @@ final class LongTermWatchTargetStoreTests: XCTestCase {
         persistence.saveTargets([target])
 
         XCTAssertEqual(persistence.loadTargets(), [target])
+        XCTAssertEqual(persistence.loadTargets().first?.options.monitorLatency, 7)
     }
 
     func testStoreUpsertsDeduplicatesAndPersistsTargets() {

@@ -98,13 +98,13 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
     /// and "which file grew" is the answer the dashboard exists to give. Turning
     /// names off trades that answer for directory-level rows.
     static let `default` = DiskActivityAggregationOptions(
-        minimumRecordedByteDelta: 10 * 1_024 * 1_024,
+        minimumRecordedByteDelta: 1_024,
         aggregationWindow: 5 * 60,
         longTermRecordsFileNames: true
     )
 
     static let shortTermDefault = DiskActivityAggregationOptions(
-        minimumRecordedByteDelta: 0,
+        minimumRecordedByteDelta: 1_024,
         aggregationWindow: 0,
         longTermRecordsFileNames: true
     )
@@ -119,6 +119,55 @@ nonisolated struct DiskActivityAggregationOptions: Equatable, Sendable {
 
     var isDetailedFileTimeline: Bool {
         longTermRecordsFileNames && aggregationWindow == 0
+    }
+}
+
+/// The two choices made before a watch opens. Attribution owns the byte
+/// threshold; the native monitor owns delivery latency.
+nonisolated struct MonitoringStartConfiguration: Equatable, Sendable {
+    static let maximumMinimumKilobytes: Int64 = 1_000_000
+
+    let minimumRecordedByteDelta: Int64
+    let monitorLatency: TimeInterval
+
+    static let `default` = MonitoringStartConfiguration(
+        minimumRecordedByteDelta: 1_024,
+        monitorLatency: 5
+    )
+
+    init(minimumRecordedByteDelta: Int64, monitorLatency: TimeInterval) {
+        self.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
+        self.monitorLatency = max(monitorLatency, 0.25)
+    }
+
+    init(minimumKilobytes: Int64, monitorLatency: TimeInterval) {
+        let boundedKilobytes = min(
+            max(minimumKilobytes, 0),
+            Self.maximumMinimumKilobytes
+        )
+        self.init(
+            minimumRecordedByteDelta: boundedKilobytes * 1_024,
+            monitorLatency: monitorLatency
+        )
+    }
+
+    var liveOptions: DiskActivityAggregationOptions {
+        .shortTerm(minimumRecordedByteDelta: minimumRecordedByteDelta)
+    }
+
+    func longTermOptions(
+        basedOn base: LongTermWatchTargetOptions = .default
+    ) -> LongTermWatchTargetOptions {
+        LongTermWatchTargetOptions(
+            minimumRecordedByteDelta: minimumRecordedByteDelta,
+            aggregationWindow: base.aggregationWindow,
+            recordsFileNames: base.recordsFileNames,
+            monitorLatency: monitorLatency,
+            growthAlertThresholdBytes: base.growthAlertThresholdBytes,
+            exclusionPatterns: base.exclusionPatterns,
+            minimumFileBytes: base.minimumFileBytes,
+            maximumFileBytes: base.maximumFileBytes
+        )
     }
 }
 

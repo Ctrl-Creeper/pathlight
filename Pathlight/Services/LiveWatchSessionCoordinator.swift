@@ -25,7 +25,7 @@ struct LiveWatchSessionCoordinator: Sendable {
         sinceEventID: UInt64? = nil,
         startedAt: Date = Date(),
         options: DiskActivityAggregationOptions = .default,
-        monitorLatency: TimeInterval = 0.25,
+        monitorLatency: TimeInterval = 5,
         exclusionFilter: (any ActivityExcluding)? = nil,
         sizeProviders: ActivitySizeProviders
     ) -> AsyncStream<WatchSessionModel> {

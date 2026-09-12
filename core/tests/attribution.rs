@@ -11,6 +11,18 @@ use pathlight_core::{
 const SCOPE: &str = "short-term:/Users/example/Downloads";
 const ROOT: &str = "/Users/example/Downloads";
 
+#[test]
+fn new_watches_default_to_one_kibibyte_changes() {
+    assert_eq!(
+        AggregationOptions::LONG_TERM.minimum_recorded_byte_delta,
+        1_024
+    );
+    assert_eq!(
+        AggregationOptions::SHORT_TERM.minimum_recorded_byte_delta,
+        1_024
+    );
+}
+
 fn change(kind: ChangeKind, name: &str, seconds: u64) -> Change {
     Change {
         kind,
@@ -195,6 +207,34 @@ fn small_deletions_survive_the_size_threshold() {
     ]);
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|e| e.byte_delta == Some(-4_096)));
+}
+
+#[test]
+fn renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
+    let current = |_: &str| Some(4_096);
+    let prior = |_: &str| Some(4_096);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(
+        AggregationOptions {
+            minimum_recorded_byte_delta: 10 * 1024 * 1024,
+            ..AggregationOptions::SHORT_TERM
+        },
+        &current,
+        &prior,
+        &none,
+    );
+
+    let events = attributor.process(&[change(
+        ChangeKind::Renamed {
+            previous_path: Some(format!("{ROOT}/before.txt")),
+        },
+        "after.txt",
+        1,
+    )]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Moved);
+    assert_eq!(events[0].byte_delta, Some(0));
 }
 
 #[test]

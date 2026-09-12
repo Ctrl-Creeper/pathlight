@@ -4,6 +4,8 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     let minimumRecordedByteDelta: Int64
     let aggregationWindow: TimeInterval
     let recordsFileNames: Bool
+    /// How long the native watcher coalesces changes before reporting them.
+    let monitorLatency: TimeInterval
     /// Daily net growth that triggers a notification; nil means alerts are off.
     var growthAlertThresholdBytes: Int64?
     /// Gitignore-style patterns filtered out of this target's event stream.
@@ -17,6 +19,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         minimumRecordedByteDelta: Int64,
         aggregationWindow: TimeInterval,
         recordsFileNames: Bool,
+        monitorLatency: TimeInterval = 5,
         growthAlertThresholdBytes: Int64? = nil,
         exclusionPatterns: [String] = ActivityExclusionPatterns.defaults,
         minimumFileBytes: Int64? = nil,
@@ -25,6 +28,7 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         self.minimumRecordedByteDelta = minimumRecordedByteDelta
         self.aggregationWindow = aggregationWindow
         self.recordsFileNames = recordsFileNames
+        self.monitorLatency = max(monitorLatency, 0.25)
         self.growthAlertThresholdBytes = growthAlertThresholdBytes
         self.exclusionPatterns = exclusionPatterns
         self.minimumFileBytes = minimumFileBytes
@@ -36,6 +40,12 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
         minimumRecordedByteDelta = try container.decode(Int64.self, forKey: .minimumRecordedByteDelta)
         aggregationWindow = try container.decode(TimeInterval.self, forKey: .aggregationWindow)
         recordsFileNames = try container.decode(Bool.self, forKey: .recordsFileNames)
+        // Before this was configurable, background watches always used 30 s.
+        let persistedLatency = try container.decodeIfPresent(
+            TimeInterval.self,
+            forKey: .monitorLatency
+        ) ?? 30
+        monitorLatency = max(persistedLatency, 0.25)
         growthAlertThresholdBytes = try container.decodeIfPresent(Int64.self, forKey: .growthAlertThresholdBytes)
         // Targets persisted before exclusions existed adopt the defaults.
         exclusionPatterns = try container.decodeIfPresent([String].self, forKey: .exclusionPatterns)
@@ -49,7 +59,8 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     static let `default` = LongTermWatchTargetOptions(
         minimumRecordedByteDelta: DiskActivityAggregationOptions.default.minimumRecordedByteDelta,
         aggregationWindow: DiskActivityAggregationOptions.default.aggregationWindow,
-        recordsFileNames: DiskActivityAggregationOptions.default.longTermRecordsFileNames
+        recordsFileNames: DiskActivityAggregationOptions.default.longTermRecordsFileNames,
+        monitorLatency: 5
     )
 
     var diskActivityOptions: DiskActivityAggregationOptions {

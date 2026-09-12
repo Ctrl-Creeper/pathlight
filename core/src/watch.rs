@@ -92,6 +92,21 @@ impl Session {
         storage: Storage,
         announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        let options = storage.options();
+        let latency_ms = storage.latency_ms();
+        Self::start_configured(root, storage, options, latency_ms, announce)
+    }
+
+    /// Opens one watch with per-run recording choices. The store still owns
+    /// exclusions, alerts, journals and pause state; only the two startup
+    /// controls are overridden.
+    pub fn start_configured(
+        root: &str,
+        storage: Storage,
+        options: AggregationOptions,
+        latency_ms: u64,
+        announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         // The pause is checked here rather than in each host: a host that
         // forgot would record through a pause the user asked for, and there is
         // no message for that afterwards.
@@ -102,11 +117,6 @@ impl Session {
         // events started arriving would record the noise it exists to drop.
         let exclusions =
             ExclusionFilter::new(&storage.patterns(), root).map_err(|error| error.to_string())?;
-        // Read once, here: a watch runs for months, and re-reading the file
-        // per event would be a disk read on the path that must stay cheap. A
-        // host restarts what is running when the user changes any of them.
-        let options = storage.options();
-        let latency_ms = storage.latency_ms();
         let storage_threshold = storage.growth_alert_bytes();
         let now = SystemTime::now();
         let day_start = utc_day_start(now);

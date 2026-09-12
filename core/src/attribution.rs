@@ -27,18 +27,18 @@ pub struct AggregationOptions {
 }
 
 impl AggregationOptions {
-    /// Long-term default: 10 MiB threshold, 5-minute aggregation, no file names.
+    /// Long-term default: 1 KiB threshold, 5-minute aggregation, no file names.
     pub const LONG_TERM: Self = Self {
-        minimum_recorded_byte_delta: 10 * 1024 * 1024,
+        minimum_recorded_byte_delta: 1024,
         aggregation_window_secs: 5 * 60,
         records_file_names: false,
         min_file_bytes: None,
         max_file_bytes: None,
     };
 
-    /// Live monitor default: everything, individually.
+    /// Live monitor default: 1 KiB changes, individually.
     pub const SHORT_TERM: Self = Self {
-        minimum_recorded_byte_delta: 0,
+        minimum_recorded_byte_delta: 1024,
         aggregation_window_secs: 0,
         records_file_names: true,
         min_file_bytes: None,
@@ -487,13 +487,14 @@ impl<'a> Attributor<'a> {
     }
 
     /// The size filter runs *after* aggregation so a folder's worth of small
-    /// changes is judged as one change, and removals skip it entirely: wiping a
-    /// thousand tiny files is the thing a threshold should surface, not hide.
+    /// changes is judged as one change. Removals and moves skip it entirely:
+    /// wiping tiny files or renaming one without changing its size are both
+    /// filesystem changes the byte threshold must not hide.
     fn is_recordable(&self, event: &ActivityEvent) -> bool {
         match event.byte_delta {
             Some(delta) => {
                 delta < 0
-                    || matches!(event.kind, EventKind::Deleted)
+                    || matches!(event.kind, EventKind::Deleted | EventKind::Moved)
                     || delta >= self.options.minimum_recorded_byte_delta
             }
             None => true,

@@ -39,9 +39,8 @@ pub const DEFAULT_JOURNAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 /// How wide a group is when rows are grouped rather than named, matching the
 /// macOS app's long-term default.
 pub const DEFAULT_AGGREGATION_WINDOW_SECS: u64 = 5 * 60;
-/// The interactive coalescing window: wide enough that a save is one event
-/// rather than five, short enough to feel immediate.
-pub const DEFAULT_LATENCY_MS: u64 = 250;
+/// The shipped coalescing window balances responsiveness with wake-ups.
+pub const DEFAULT_LATENCY_MS: u64 = 5_000;
 /// What the macOS app uses for a watch nobody is looking at. A wide window is
 /// how monitoring stays cheap: the kernel wakes the process once for a
 /// half-minute of churn instead of once per file.
@@ -609,7 +608,10 @@ impl Storage {
         let settings = self.settings();
         let records_file_names = settings.records_file_names.unwrap_or(true);
         AggregationOptions {
-            minimum_recorded_byte_delta: settings.minimum_recorded_byte_delta.unwrap_or(0).max(0),
+            minimum_recorded_byte_delta: settings
+                .minimum_recorded_byte_delta
+                .unwrap_or(1_024)
+                .max(0),
             min_file_bytes: settings.min_file_bytes,
             max_file_bytes: settings.max_file_bytes,
             records_file_names,
@@ -1091,9 +1093,9 @@ mod tests {
             storage.retention(),
             (DEFAULT_RETENTION_DAYS, DEFAULT_JOURNAL_LIMIT_BYTES)
         );
-        assert_eq!(storage.latency_ms(), DEFAULT_LATENCY_MS);
+        assert_eq!(storage.latency_ms(), 5_000);
         assert_eq!(storage.patterns(), DEFAULT_PATTERNS.to_vec());
-        assert_eq!(storage.options().minimum_recorded_byte_delta, 0);
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 1_024);
         // Nobody is told about a folder growing until they ask to be.
         assert_eq!(storage.growth_alert_bytes(), 0);
 

@@ -144,20 +144,25 @@ final class AppModel: ObservableObject {
 
     // MARK: - Folder selection
 
-    func addLongTermWatchFromOpenPanel() {
+    func addLongTermWatchFromOpenPanel(
+        configuration: MonitoringStartConfiguration = .default
+    ) {
         guard let url = dependencies.systemActions.presentFolderPanel(
             "Monitor",
             "Choose a folder to monitor for long-term changes."
         ) else {
             return
         }
-        enableLongTermWatch(rootPath: url)
+        enableLongTermWatch(
+            rootPath: url,
+            options: configuration.longTermOptions()
+        )
     }
 
     /// Returns true when a watch started, so callers can open the Live Monitor window.
     @discardableResult
     func startShortTermWatchFromOpenPanel(
-        options: DiskActivityAggregationOptions = .shortTermDefault
+        configuration: MonitoringStartConfiguration = .default
     ) -> Bool {
         guard let url = dependencies.systemActions.presentFolderPanel(
             "Watch",
@@ -165,7 +170,11 @@ final class AppModel: ObservableObject {
         ) else {
             return false
         }
-        startShortTermWatch(rootPath: url, options: options)
+        startShortTermWatch(
+            rootPath: url,
+            options: configuration.liveOptions,
+            monitorLatency: configuration.monitorLatency
+        )
         return true
     }
 
@@ -186,11 +195,17 @@ final class AppModel: ObservableObject {
         dependencies.systemActions.reveal(url)
     }
 
-    func addPreset(_ preset: MonitoringPreset) {
+    func addPreset(
+        _ preset: MonitoringPreset,
+        configuration: MonitoringStartConfiguration = .default
+    ) {
         guard !isLongTermWatchTarget(preset.rootPath) else {
             return
         }
-        enableLongTermWatch(rootPath: preset.rootPath, options: preset.options)
+        enableLongTermWatch(
+            rootPath: preset.rootPath,
+            options: configuration.longTermOptions(basedOn: preset.options)
+        )
     }
 
     // MARK: - Export
@@ -367,7 +382,8 @@ final class AppModel: ObservableObject {
 
     func startShortTermWatch(
         rootPath: URL,
-        options: DiskActivityAggregationOptions = .shortTermDefault
+        options: DiskActivityAggregationOptions = .shortTermDefault,
+        monitorLatency: TimeInterval = MonitoringStartConfiguration.default.monitorLatency
     ) {
         stopShortTermWatch()
         guard !isMonitoringPaused else {
@@ -399,6 +415,7 @@ final class AppModel: ObservableObject {
             let stream = coordinator.sessions(
                 rootPath: rootPath,
                 options: options,
+                monitorLatency: monitorLatency,
                 sizeProviders: sizeProviders
             )
             for await session in stream {
@@ -1215,9 +1232,7 @@ final class AppModel: ObservableObject {
                     rootPath: currentTarget.rootPath,
                     sinceEventID: resumeCheckpoint?.eventID,
                     options: currentTarget.options.diskActivityOptions,
-                    // Background watches don't need sub-second delivery; a wide
-                    // latency window lets the kernel coalesce and saves wakeups.
-                    monitorLatency: 30,
+                    monitorLatency: currentTarget.options.monitorLatency,
                     exclusionFilter: self.dependencies.activityExclusion(
                         currentTarget.options.exclusionPatterns,
                         currentTarget.rootPath

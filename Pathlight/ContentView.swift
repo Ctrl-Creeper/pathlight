@@ -65,11 +65,11 @@ struct ContentView: View {
             },
             enableLaunchAtLogin: { appModel.setLaunchAtLoginEnabled(true) },
             dismissLaunchAtLoginNudge: { appModel.dismissLaunchAtLoginNudge() },
-            addFolder: { appModel.addLongTermWatchFromOpenPanel() },
-            addPreset: { appModel.addPreset($0) },
+            addFolder: { appModel.addLongTermWatchFromOpenPanel(configuration: $0) },
+            addPreset: { appModel.addPreset($0, configuration: $1) },
             exportHistory: { appModel.exportHistoryCSV(rootPath: $0) },
-            startLiveMonitor: { options in
-                if appModel.startShortTermWatchFromOpenPanel(options: options) {
+            startLiveMonitor: { configuration in
+                if appModel.startShortTermWatchFromOpenPanel(configuration: configuration) {
                     openWindow(id: "live-monitor")
                 }
             },
