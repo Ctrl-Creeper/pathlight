@@ -715,12 +715,16 @@ mod tests {
 
     fn watch(root: &std::path::Path, storage: &std::path::Path) -> Session {
         let root = fs::canonicalize(root).unwrap();
-        Session::start(
+        let session = Session::start(
             &crate::paths::normalize(&root.to_string_lossy()),
             Storage::at(storage),
             |_, _| {},
         )
-        .unwrap()
+        .unwrap();
+        // The Windows notify backend arms its recursive handle asynchronously;
+        // give it a scheduling turn before the test performs its first write.
+        std::thread::sleep(Duration::from_millis(250));
+        session
     }
 
     #[test]
