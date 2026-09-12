@@ -398,7 +398,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that SWIFT handles always have the lowest bit set
 fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
 fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
@@ -654,9 +654,9 @@ fileprivate struct FfiConverterTimestamp: FfiConverterRustBuffer {
  * [`Attributor`] for a host: the same logic, reached across the FFI.
  */
 public protocol ActivityAttributorProtocol: AnyObject, Sendable {
-    
+
     func process(changes: [Change])  -> [ActivityEvent]
-    
+
 }
 /**
  * [`Attributor`] for a host: the same logic, reached across the FFI.
@@ -721,9 +721,9 @@ public convenience init(options: AggregationOptions, sizes: SizeLookup) {
         try! rustCall { uniffi_pathlight_core_fn_free_activityattributor(handle, $0) }
     }
 
-    
 
-    
+
+
 open func process(changes: [Change]) -> [ActivityEvent]  {
     return try!  FfiConverterSequenceTypeActivityEvent.lift(try! rustCall() {
         uniffiCallStatus in
@@ -733,9 +733,9 @@ open func process(changes: [Change]) -> [ActivityEvent]  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -788,9 +788,9 @@ public func FfiConverterTypeActivityAttributor_lower(_ value: ActivityAttributor
  * Implemented by the host (Swift/Kotlin). Called from the watcher's thread.
  */
 public protocol ActivityListener: AnyObject, Sendable {
-    
-    func onEvent(event: StreamEvent) 
-    
+
+    func onEvent(event: StreamEvent)
+
 }
 /**
  * Implemented by the host (Swift/Kotlin). Called from the watcher's thread.
@@ -845,9 +845,9 @@ open class ActivityListenerImpl: ActivityListener, @unchecked Sendable {
         try! rustCall { uniffi_pathlight_core_fn_free_activitylistener(handle, $0) }
     }
 
-    
 
-    
+
+
 open func onEvent(event: StreamEvent)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_pathlight_core_fn_method_activitylistener_on_event(
@@ -856,9 +856,9 @@ open func onEvent(event: StreamEvent)  {try! rustCall() {
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -901,7 +901,7 @@ fileprivate struct UniffiCallbackInterfaceActivityListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -996,15 +996,15 @@ public func FfiConverterTypeActivityListener_lower(_ value: ActivityListener) ->
  * the other side, and "record everything" is a filter like any other.
  */
 public protocol ExclusionMatcherProtocol: AnyObject, Sendable {
-    
+
     func excludes(path: String)  -> Bool
-    
+
     /**
      * True when nothing is being excluded, so a caller can skip the filter
      * rather than ask it about every path.
      */
     func isEmpty()  -> Bool
-    
+
 }
 /**
  * [`ExclusionFilter`] for a host: the same rules, reached across the FFI.
@@ -1073,9 +1073,9 @@ public convenience init(patterns: [String], root: String)throws  {
         try! rustCall { uniffi_pathlight_core_fn_free_exclusionmatcher(handle, $0) }
     }
 
-    
 
-    
+
+
 open func excludes(path: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
@@ -1085,7 +1085,7 @@ open func excludes(path: String) -> Bool  {
     )
 })
 }
-    
+
     /**
      * True when nothing is being excluded, so a caller can skip the filter
      * rather than ask it about every path.
@@ -1098,9 +1098,9 @@ open func isEmpty() -> Bool  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -1150,22 +1150,23 @@ public func FfiConverterTypeExclusionMatcher_lower(_ value: ExclusionMatcher) ->
 
 
 public protocol JournalProtocol: AnyObject, Sendable {
-    
+
     /**
      * Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
      */
-    func append(events: [ActivityEvent]) throws 
-    
+    func append(events: [ActivityEvent]) throws
+
     /**
      * Newest first, then path descending, limited — the same order Swift returns.
      */
     func load(rootPath: String, limit: UInt32) throws  -> [ActivityEvent]
-    
+
     /**
-     * Dashboard history for one root: buckets, totals, and the newest rows.
+     * Dashboard history for one root: buckets, totals, and the page of rows
+     * `query` asked for.
      */
-    func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64) throws  -> HistorySnapshot
-    
+    func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64, query: Query) throws  -> HistorySnapshot
+
     /**
      * Drops rows that are older than `retention_days`, then, if the file
      * still would not fit in `limit_bytes`, the oldest of what is left.
@@ -1178,9 +1179,14 @@ public protocol JournalProtocol: AnyObject, Sendable {
      * build cannot date (an encrypted line, or a line from a newer format)
      * must not be aged out on a guess. It still counts against the cap, and
      * the cap drops from the front, which is oldest for an append-only file.
+     * Grouped rows are kept for `aggregate_days` instead, which is how the
+     * long tail of "this folder grew by 4 GB in March" outlives the file-level
+     * rows it was made of without keeping the whole journal that long. Older
+     * detailed rows are rolled into one row per root and UTC day before their
+     * detail expires, matching the macOS host.
      */
-    func trim(retentionDays: UInt32, limitBytes: UInt64) throws  -> UInt64
-    
+    func trim(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64) throws  -> UInt64
+
 }
 open class Journal: JournalProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1241,7 +1247,7 @@ public convenience init(path: String) {
         try! rustCall { uniffi_pathlight_core_fn_free_journal(handle, $0) }
     }
 
-    
+
     /**
      * The same journal, appending encrypted rows.
      */
@@ -1253,9 +1259,9 @@ public static func encrypting(path: String) -> Journal  {
     )
 })
 }
-    
 
-    
+
+
     /**
      * Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
      */
@@ -1267,7 +1273,7 @@ open func append(events: [ActivityEvent])throws   {try rustCallWithError(FfiConv
     )
 }
 }
-    
+
     /**
      * Newest first, then path descending, limited — the same order Swift returns.
      */
@@ -1281,22 +1287,24 @@ open func load(rootPath: String, limit: UInt32)throws  -> [ActivityEvent]  {
     )
 })
 }
-    
+
     /**
-     * Dashboard history for one root: buckets, totals, and the newest rows.
+     * Dashboard history for one root: buckets, totals, and the page of rows
+     * `query` asked for.
      */
-open func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64)throws  -> HistorySnapshot  {
+open func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt64, query: Query)throws  -> HistorySnapshot  {
     return try  FfiConverterTypeHistorySnapshot_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
     uniffi_pathlight_core_fn_method_journal_load_history(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(rootPath),
         FfiConverterUInt32.lower(limit),
-        FfiConverterUInt64.lower(bucketIntervalSecs),uniffiCallStatus
+        FfiConverterUInt64.lower(bucketIntervalSecs),
+        FfiConverterTypeQuery_lower(query),uniffiCallStatus
     )
 })
 }
-    
+
     /**
      * Drops rows that are older than `retention_days`, then, if the file
      * still would not fit in `limit_bytes`, the oldest of what is left.
@@ -1309,20 +1317,26 @@ open func loadHistory(rootPath: String, limit: UInt32, bucketIntervalSecs: UInt6
      * build cannot date (an encrypted line, or a line from a newer format)
      * must not be aged out on a guess. It still counts against the cap, and
      * the cap drops from the front, which is oldest for an append-only file.
+     * Grouped rows are kept for `aggregate_days` instead, which is how the
+     * long tail of "this folder grew by 4 GB in March" outlives the file-level
+     * rows it was made of without keeping the whole journal that long. Older
+     * detailed rows are rolled into one row per root and UTC day before their
+     * detail expires, matching the macOS host.
      */
-open func trim(retentionDays: UInt32, limitBytes: UInt64)throws  -> UInt64  {
+open func trim(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
     uniffi_pathlight_core_fn_method_journal_trim(
             self.uniffiCloneHandle(),
         FfiConverterUInt32.lower(retentionDays),
+        FfiConverterUInt32.lower(aggregateDays),
         FfiConverterUInt64.lower(limitBytes),uniffiCallStatus
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -1380,23 +1394,23 @@ public func FfiConverterTypeJournal_lower(_ value: Journal) -> UInt64 {
  * arithmetic below, which is the same on every platform.
  */
 public protocol SizeLookup: AnyObject, Sendable {
-    
+
     /**
      * Current allocated size. Implementations record it for later lookups.
      */
     func size(path: String)  -> Int64?
-    
+
     /**
      * Last known size of a path that just vanished; consumed on use.
      */
     func priorSize(path: String)  -> Int64?
-    
+
     /**
      * Last known size of a path that still exists, read before `size` so a
      * modification reports growth instead of the whole file again.
      */
     func knownSize(path: String)  -> Int64?
-    
+
 }
 /**
  * The three size lookups attribution needs, implemented by the host.
@@ -1456,9 +1470,9 @@ open class SizeLookupImpl: SizeLookup, @unchecked Sendable {
         try! rustCall { uniffi_pathlight_core_fn_free_sizelookup(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Current allocated size. Implementations record it for later lookups.
      */
@@ -1471,7 +1485,7 @@ open func size(path: String) -> Int64?  {
     )
 })
 }
-    
+
     /**
      * Last known size of a path that just vanished; consumed on use.
      */
@@ -1484,7 +1498,7 @@ open func priorSize(path: String) -> Int64?  {
     )
 })
 }
-    
+
     /**
      * Last known size of a path that still exists, read before `size` so a
      * modification reports growth instead of the whole file again.
@@ -1498,9 +1512,9 @@ open func knownSize(path: String) -> Int64?  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -1543,7 +1557,7 @@ fileprivate struct UniffiCallbackInterfaceSizeLookup {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1567,7 +1581,7 @@ fileprivate struct UniffiCallbackInterfaceSizeLookup {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1591,7 +1605,7 @@ fileprivate struct UniffiCallbackInterfaceSizeLookup {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionInt64.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1679,9 +1693,9 @@ public func FfiConverterTypeSizeLookup_lower(_ value: SizeLookup) -> UInt64 {
 
 
 public protocol WatcherProtocol: AnyObject, Sendable {
-    
-    func stop() 
-    
+
+    func stop()
+
 }
 open class Watcher: WatcherProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1733,7 +1747,7 @@ open class Watcher: WatcherProtocol, @unchecked Sendable {
         try! rustCall { uniffi_pathlight_core_fn_free_watcher(handle, $0) }
     }
 
-    
+
     /**
      * Starts watching `root_path` recursively.
      *
@@ -1753,9 +1767,9 @@ public static func start(rootPath: String, sinceEventId: UInt64?, latencyMs: UIn
     )
 })
 }
-    
 
-    
+
+
 open func stop()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_pathlight_core_fn_method_watcher_stop(
@@ -1763,9 +1777,9 @@ open func stop()  {try! rustCall() {
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -1832,7 +1846,7 @@ public struct ActivityEvent: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: EventKind, path: String, rootPath: String, timestamp: Date, byteDelta: Int64?, confidence: Confidence, previousPath: String?, affectedItemCount: UInt32, 
+    public init(kind: EventKind, path: String, rootPath: String, timestamp: Date, byteDelta: Int64?, confidence: Confidence, previousPath: String?, affectedItemCount: UInt32,
         /**
          * Best-effort owning process; absent from rows written before the field existed.
          */processName: String?) {
@@ -1847,9 +1861,9 @@ public struct ActivityEvent: Equatable, Hashable {
         self.processName = processName
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1863,14 +1877,14 @@ public struct FfiConverterTypeActivityEvent: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ActivityEvent {
         return
             try ActivityEvent(
-                kind: FfiConverterTypeEventKind.read(from: &buf), 
-                path: FfiConverterString.read(from: &buf), 
-                rootPath: FfiConverterString.read(from: &buf), 
-                timestamp: FfiConverterTimestamp.read(from: &buf), 
-                byteDelta: FfiConverterOptionInt64.read(from: &buf), 
-                confidence: FfiConverterTypeConfidence.read(from: &buf), 
-                previousPath: FfiConverterOptionString.read(from: &buf), 
-                affectedItemCount: FfiConverterUInt32.read(from: &buf), 
+                kind: FfiConverterTypeEventKind.read(from: &buf),
+                path: FfiConverterString.read(from: &buf),
+                rootPath: FfiConverterString.read(from: &buf),
+                timestamp: FfiConverterTimestamp.read(from: &buf),
+                byteDelta: FfiConverterOptionInt64.read(from: &buf),
+                confidence: FfiConverterTypeConfidence.read(from: &buf),
+                previousPath: FfiConverterOptionString.read(from: &buf),
+                affectedItemCount: FfiConverterUInt32.read(from: &buf),
                 processName: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -1930,13 +1944,13 @@ public struct AggregationOptions: Equatable, Hashable {
     public init(
         /**
          * Events whose |delta| is below this are dropped (unknown-size events pass).
-         */minimumRecordedByteDelta: Int64, 
+         */minimumRecordedByteDelta: Int64,
         /**
          * Seconds; 0 disables grouping into `Aggregate` rows.
-         */aggregationWindowSecs: UInt64, 
+         */aggregationWindowSecs: UInt64,
         /**
          * When true, individual file rows are kept (no aggregation).
-         */recordsFileNames: Bool, 
+         */recordsFileNames: Bool,
         /**
          * Smallest and largest file this watch records at all, in bytes; `None`
          * is no bound. Judged on the file's own size, not on how much of it
@@ -1949,9 +1963,9 @@ public struct AggregationOptions: Equatable, Hashable {
         self.maxFileBytes = maxFileBytes
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1965,10 +1979,10 @@ public struct FfiConverterTypeAggregationOptions: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AggregationOptions {
         return
             try AggregationOptions(
-                minimumRecordedByteDelta: FfiConverterInt64.read(from: &buf), 
-                aggregationWindowSecs: FfiConverterUInt64.read(from: &buf), 
-                recordsFileNames: FfiConverterBool.read(from: &buf), 
-                minFileBytes: FfiConverterOptionInt64.read(from: &buf), 
+                minimumRecordedByteDelta: FfiConverterInt64.read(from: &buf),
+                aggregationWindowSecs: FfiConverterUInt64.read(from: &buf),
+                recordsFileNames: FfiConverterBool.read(from: &buf),
+                minFileBytes: FfiConverterOptionInt64.read(from: &buf),
                 maxFileBytes: FfiConverterOptionInt64.read(from: &buf)
         )
     }
@@ -2008,7 +2022,7 @@ public struct Anomaly: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: AnomalyKind, items: UInt64, 
+    public init(kind: AnomalyKind, items: UInt64,
         /**
          * Always positive: the size of what happened, not its direction.
          */bytes: Int64) {
@@ -2017,9 +2031,9 @@ public struct Anomaly: Equatable, Hashable {
         self.bytes = bytes
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2033,8 +2047,8 @@ public struct FfiConverterTypeAnomaly: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Anomaly {
         return
             try Anomaly(
-                kind: FfiConverterTypeAnomalyKind.read(from: &buf), 
-                items: FfiConverterUInt64.read(from: &buf), 
+                kind: FfiConverterTypeAnomalyKind.read(from: &buf),
+                items: FfiConverterUInt64.read(from: &buf),
                 bytes: FfiConverterInt64.read(from: &buf)
         )
     }
@@ -2101,16 +2115,16 @@ public struct Capabilities: Equatable, Hashable {
         /**
          * Event IDs come from the kernel, so `since_event_id` really resumes a
          * previous session instead of silently starting over.
-         */resumableCursor: Bool, 
+         */resumableCursor: Bool,
         /**
          * Pairs observed rename halves within the backend's matching window.
          * Moves across the root boundary, expired halves, and gaps can still be
          * unpaired. When false the host must pair even ordinary in-root renames.
-         */pairsRenames: Bool, 
+         */pairsRenames: Bool,
         /**
          * Changes name the process responsible. When false the host should show
          * nothing rather than a guess.
-         */reportsProcess: Bool, 
+         */reportsProcess: Bool,
         /**
          * Events can be lost under load. The backend reports it with
          * `RequiresRescan`, so the host re-baselines rather than under-count.
@@ -2121,9 +2135,9 @@ public struct Capabilities: Equatable, Hashable {
         self.mayDropEvents = mayDropEvents
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2137,9 +2151,9 @@ public struct FfiConverterTypeCapabilities: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Capabilities {
         return
             try Capabilities(
-                resumableCursor: FfiConverterBool.read(from: &buf), 
-                pairsRenames: FfiConverterBool.read(from: &buf), 
-                reportsProcess: FfiConverterBool.read(from: &buf), 
+                resumableCursor: FfiConverterBool.read(from: &buf),
+                pairsRenames: FfiConverterBool.read(from: &buf),
+                reportsProcess: FfiConverterBool.read(from: &buf),
                 mayDropEvents: FfiConverterBool.read(from: &buf)
         )
     }
@@ -2183,7 +2197,7 @@ public struct Change: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: ChangeKind, path: String, rootPath: String, timestamp: Date, 
+    public init(kind: ChangeKind, path: String, rootPath: String, timestamp: Date,
         /**
          * The program that caused this change, where the backend knows. Only a
          * privileged Linux watch does today, and `Capabilities::reports_process`
@@ -2197,9 +2211,9 @@ public struct Change: Equatable, Hashable {
         self.processName = processName
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2213,10 +2227,10 @@ public struct FfiConverterTypeChange: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Change {
         return
             try Change(
-                kind: FfiConverterTypeChangeKind.read(from: &buf), 
-                path: FfiConverterString.read(from: &buf), 
-                rootPath: FfiConverterString.read(from: &buf), 
-                timestamp: FfiConverterTimestamp.read(from: &buf), 
+                kind: FfiConverterTypeChangeKind.read(from: &buf),
+                path: FfiConverterString.read(from: &buf),
+                rootPath: FfiConverterString.read(from: &buf),
+                timestamp: FfiConverterTimestamp.read(from: &buf),
                 processName: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -2263,9 +2277,9 @@ public struct HistoryBucket: Equatable, Hashable {
         self.unknownSizeEventCount = unknownSizeEventCount
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2279,10 +2293,10 @@ public struct FfiConverterTypeHistoryBucket: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoryBucket {
         return
             try HistoryBucket(
-                start: FfiConverterTimestamp.read(from: &buf), 
-                end: FfiConverterTimestamp.read(from: &buf), 
-                byteDelta: FfiConverterInt64.read(from: &buf), 
-                eventCount: FfiConverterUInt32.read(from: &buf), 
+                start: FfiConverterTimestamp.read(from: &buf),
+                end: FfiConverterTimestamp.read(from: &buf),
+                byteDelta: FfiConverterInt64.read(from: &buf),
+                eventCount: FfiConverterUInt32.read(from: &buf),
                 unknownSizeEventCount: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -2330,10 +2344,10 @@ public struct HistorySnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(rootPath: String, generatedAt: Date, totalNetByteDelta: Int64, eventCount: UInt32, unknownSizeEventCount: UInt32, buckets: [HistoryBucket], 
+    public init(rootPath: String, generatedAt: Date, totalNetByteDelta: Int64, eventCount: UInt32, unknownSizeEventCount: UInt32, buckets: [HistoryBucket],
         /**
          * Newest first, at most `recent_limit` rows.
-         */recentEvents: [ActivityEvent], 
+         */recentEvents: [ActivityEvent],
         /**
          * The totals above cover more rows than `recent_events` lists.
          */isTruncated: Bool) {
@@ -2347,9 +2361,9 @@ public struct HistorySnapshot: Equatable, Hashable {
         self.isTruncated = isTruncated
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2363,13 +2377,13 @@ public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistorySnapshot {
         return
             try HistorySnapshot(
-                rootPath: FfiConverterString.read(from: &buf), 
-                generatedAt: FfiConverterTimestamp.read(from: &buf), 
-                totalNetByteDelta: FfiConverterInt64.read(from: &buf), 
-                eventCount: FfiConverterUInt32.read(from: &buf), 
-                unknownSizeEventCount: FfiConverterUInt32.read(from: &buf), 
-                buckets: FfiConverterSequenceTypeHistoryBucket.read(from: &buf), 
-                recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf), 
+                rootPath: FfiConverterString.read(from: &buf),
+                generatedAt: FfiConverterTimestamp.read(from: &buf),
+                totalNetByteDelta: FfiConverterInt64.read(from: &buf),
+                eventCount: FfiConverterUInt32.read(from: &buf),
+                unknownSizeEventCount: FfiConverterUInt32.read(from: &buf),
+                buckets: FfiConverterSequenceTypeHistoryBucket.read(from: &buf),
+                recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf),
                 isTruncated: FfiConverterBool.read(from: &buf)
         )
     }
@@ -2402,9 +2416,107 @@ public func FfiConverterTypeHistorySnapshot_lower(_ value: HistorySnapshot) -> R
 }
 
 
+/**
+ * What a person narrowed the history to.
+ *
+ * The default is the whole record, newest first — what every host asks for
+ * before anybody has typed anything, so the plain case costs no words.
+ */
+public struct Query: Equatable, Hashable {
+    /**
+     * Part of a path, matched without regard to case. Empty matches every row.
+     */
+    public var text: String
+    /**
+     * One kind of change, or every kind.
+     */
+    public var kind: EventKind?
+    /**
+     * Biggest change first rather than newest first. The sign is ignored: the
+     * question is which change moved the most bytes, and a deletion moves as
+     * many as the write that made the file.
+     */
+    public var largestFirst: Bool
+    /**
+     * Matching rows to step over before the listed page starts, so a host can
+     * page through without asking for a bigger limit each time.
+     */
+    public var skip: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Part of a path, matched without regard to case. Empty matches every row.
+         */text: String,
+        /**
+         * One kind of change, or every kind.
+         */kind: EventKind?,
+        /**
+         * Biggest change first rather than newest first. The sign is ignored: the
+         * question is which change moved the most bytes, and a deletion moves as
+         * many as the write that made the file.
+         */largestFirst: Bool,
+        /**
+         * Matching rows to step over before the listed page starts, so a host can
+         * page through without asking for a bigger limit each time.
+         */skip: UInt32) {
+        self.text = text
+        self.kind = kind
+        self.largestFirst = largestFirst
+        self.skip = skip
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension Query: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeQuery: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Query {
+        return
+            try Query(
+                text: FfiConverterString.read(from: &buf),
+                kind: FfiConverterOptionTypeEventKind.read(from: &buf),
+                largestFirst: FfiConverterBool.read(from: &buf),
+                skip: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Query, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterOptionTypeEventKind.write(value.kind, into: &buf)
+        FfiConverterBool.write(value.largestFirst, into: &buf)
+        FfiConverterUInt32.write(value.skip, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeQuery_lift(_ buf: RustBuffer) throws -> Query {
+    return try FfiConverterTypeQuery.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeQuery_lower(_ value: Query) -> RustBuffer {
+    return FfiConverterTypeQuery.lower(value)
+}
+
+
 
 public enum AnomalyKind: Equatable, Hashable {
-    
+
     /**
      * A lot of this folder just stopped existing.
      */
@@ -2413,6 +2525,13 @@ public enum AnomalyKind: Equatable, Hashable {
      * A lot of this folder just arrived.
      */
     case burst
+    /**
+     * This folder has grown past the size the user asked to be told about.
+     * Unlike the other two this has no fixed threshold — it is the one the
+     * user set — so [`anomalies`] never returns it; a host that keeps a
+     * running total raises it.
+     */
+    case growth
 
 
 
@@ -2433,26 +2552,32 @@ public struct FfiConverterTypeAnomalyKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AnomalyKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .removal
-        
+
         case 2: return .burst
-        
+
+        case 3: return .growth
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: AnomalyKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .removal:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .burst:
             writeInt(&buf, Int32(2))
-        
+
+
+        case .growth:
+            writeInt(&buf, Int32(3))
+
         }
     }
 }
@@ -2476,7 +2601,7 @@ public func FfiConverterTypeAnomalyKind_lower(_ value: AnomalyKind) -> RustBuffe
 
 
 public enum ChangeKind: Equatable, Hashable {
-    
+
     case created
     case modified
     case deleted
@@ -2502,40 +2627,40 @@ public struct FfiConverterTypeChangeKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChangeKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .created
-        
+
         case 2: return .modified
-        
+
         case 3: return .deleted
-        
+
         case 4: return .renamed(previousPath: try FfiConverterOptionString.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: ChangeKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .created:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .modified:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .deleted:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case let .renamed(previousPath):
             writeInt(&buf, Int32(4))
             FfiConverterOptionString.write(previousPath, into: &buf)
-            
+
         }
     }
 }
@@ -2559,7 +2684,7 @@ public func FfiConverterTypeChangeKind_lower(_ value: ChangeKind) -> RustBuffer 
 
 
 public enum Confidence: Equatable, Hashable {
-    
+
     case confirmed
     case estimated
     case unknown
@@ -2583,32 +2708,32 @@ public struct FfiConverterTypeConfidence: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Confidence {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .confirmed
-        
+
         case 2: return .estimated
-        
+
         case 3: return .unknown
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: Confidence, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .confirmed:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .estimated:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .unknown:
             writeInt(&buf, Int32(3))
-        
+
         }
     }
 }
@@ -2630,11 +2755,11 @@ public func FfiConverterTypeConfidence_lower(_ value: Confidence) -> RustBuffer 
 
 
 
-public 
+public
 enum CoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Io(message: String
     )
     case Encoding(message: String
@@ -2642,15 +2767,15 @@ enum CoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Watch(message: String
     )
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -2667,9 +2792,9 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Io(
             message: try FfiConverterString.read(from: &buf)
             )
@@ -2687,24 +2812,24 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
     public static func write(_ value: CoreError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case let .Io(message):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(message, into: &buf)
-            
-        
+
+
         case let .Encoding(message):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(message, into: &buf)
-            
-        
+
+
         case let .Watch(message):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(message, into: &buf)
-            
+
         }
     }
 }
@@ -2727,7 +2852,7 @@ public func FfiConverterTypeCoreError_lower(_ value: CoreError) -> RustBuffer {
 
 
 public enum EventKind: Equatable, Hashable {
-    
+
     case created
     case modified
     case deleted
@@ -2753,44 +2878,44 @@ public struct FfiConverterTypeEventKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EventKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .created
-        
+
         case 2: return .modified
-        
+
         case 3: return .deleted
-        
+
         case 4: return .moved
-        
+
         case 5: return .aggregate
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: EventKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .created:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .modified:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .deleted:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .moved:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .aggregate:
             writeInt(&buf, Int32(5))
-        
+
         }
     }
 }
@@ -2814,7 +2939,7 @@ public func FfiConverterTypeEventKind_lower(_ value: EventKind) -> RustBuffer {
 
 
 public enum StreamEvent: Equatable, Hashable {
-    
+
     case change(change: Change, eventId: UInt64
     )
     case historyCaughtUp(eventId: UInt64
@@ -2841,39 +2966,39 @@ public struct FfiConverterTypeStreamEvent: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamEvent {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .change(change: try FfiConverterTypeChange.read(from: &buf), eventId: try FfiConverterUInt64.read(from: &buf)
         )
-        
+
         case 2: return .historyCaughtUp(eventId: try FfiConverterUInt64.read(from: &buf)
         )
-        
+
         case 3: return .requiresRescan(eventId: try FfiConverterUInt64.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: StreamEvent, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .change(change,eventId):
             writeInt(&buf, Int32(1))
             FfiConverterTypeChange.write(change, into: &buf)
             FfiConverterUInt64.write(eventId, into: &buf)
-            
-        
+
+
         case let .historyCaughtUp(eventId):
             writeInt(&buf, Int32(2))
             FfiConverterUInt64.write(eventId, into: &buf)
-            
-        
+
+
         case let .requiresRescan(eventId):
             writeInt(&buf, Int32(3))
             FfiConverterUInt64.write(eventId, into: &buf)
-            
+
         }
     }
 }
@@ -2985,6 +3110,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = EventKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeEventKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeEventKind.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3162,8 +3311,8 @@ public func openStorageLine(line: String, key: Data)throws  -> Data?  {
 })
 }
 /**
- * One journal line for a host that keeps its own key: the whole stored line,
- * marker and framing included. Every host loads the shared key itself.
+ * One journal line for a host that loads the shared key itself: the whole
+ * stored line, marker and framing included.
  */
 public func sealStorageLine(payload: Data, key: Data)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
@@ -3238,10 +3387,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_func_open_storage_line() != 61108) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_func_seal_storage_line() != 32343) {
+    if (uniffi_pathlight_core_checksum_func_seal_storage_line() != 51633) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_func_storage_line_marker() != 64290) {
+    if (uniffi_pathlight_core_checksum_func_storage_line_marker() != 63442) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_normalized_exclusion_patterns() != 41574) {
@@ -3274,10 +3423,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_journal_load() != 33495) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_method_journal_load_history() != 30952) {
+    if (uniffi_pathlight_core_checksum_method_journal_load_history() != 5311) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_method_journal_trim() != 19990) {
+    if (uniffi_pathlight_core_checksum_method_journal_trim() != 8913) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_activitylistener_on_event() != 31555) {

@@ -65,7 +65,11 @@ cargo run --quiet --features cli --bin uniffi-bindgen -- \
 
 cp "$STAGING/bindings/PathlightRustCoreFFI.h" "$STAGING/include/"
 cp "$STAGING/bindings/PathlightRustCoreFFI.modulemap" "$STAGING/include/module.modulemap"
-cp "$STAGING/bindings/PathlightRustCore.swift" swift/Sources/PathlightRustCore/PathlightRustCore.swift
+# UniFFI's Swift template emits trailing spaces in a few generated declarations.
+# Normalize them here so regenerating bindings leaves a reviewable worktree.
+sed 's/[[:space:]]*$//' \
+    "$STAGING/bindings/PathlightRustCore.swift" \
+    > swift/Sources/PathlightRustCore/PathlightRustCore.swift
 
 if [ "$(echo $LIBS | wc -w)" -gt 1 ]; then
     lipo -create $LIBS -output "$STAGING/libpathlight_core.a"
