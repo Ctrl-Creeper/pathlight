@@ -115,6 +115,18 @@ fn a_setting_changed_in_the_terminal_is_what_the_next_watch_reads() {
     assert!(text(&run(home.path(), &["settings"])).contains("retention-days            30"));
 }
 
+#[test]
+fn immediate_latency_keeps_its_legacy_fast_value() {
+    let home = tempfile::tempdir().unwrap();
+    let output = run(home.path(), &["settings", "latency", "immediate"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let shown = text(&run(home.path(), &["settings"]));
+    assert!(
+        shown.contains("latency                   250 ms  (immediate)"),
+        "{shown}"
+    );
+}
+
 /// The three answers about somebody's own records, from a terminal: how much
 /// is there, put the settings back, and start the records over. The last one
 /// asks twice, because nothing recorded can be got back. What the counting
@@ -358,7 +370,7 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().to_string_lossy().replace('\\', "/");
     let mut watched = Command::new(env!("CARGO_BIN_EXE_pathlight-monitor"))
-        .args(["watch", &path])
+        .args(["watch", "--interval-ms", "250", &path])
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env_remove("APPDATA")
@@ -373,11 +385,7 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
 
     assert!(run(home.path(), &["pause"]).status.success());
     std::thread::sleep(Duration::from_millis(750));
-    std::fs::write(
-        folder.path().join("while-paused.txt"),
-        b"must stay unrecorded",
-    )
-    .unwrap();
+    std::fs::write(folder.path().join("while-paused.txt"), vec![b'p'; 2 * 1024]).unwrap();
     std::thread::sleep(Duration::from_secs(1));
     let storage = pathlight_core::uninstall::data_dir(home.path(), |_| None);
     let journal =
@@ -389,7 +397,7 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
 
     assert!(run(home.path(), &["resume"]).status.success());
     std::thread::sleep(Duration::from_millis(750));
-    std::fs::write(folder.path().join("after-resume.txt"), b"must be recorded").unwrap();
+    std::fs::write(folder.path().join("after-resume.txt"), vec![b'r'; 2 * 1024]).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let journal =

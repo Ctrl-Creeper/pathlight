@@ -7,9 +7,7 @@
 
 use eframe::egui;
 use pathlight_core::exclusion::DEFAULT_PATTERNS;
-use pathlight_core::store::{
-    Storage, BACKGROUND_LATENCY_MS, DEFAULT_AGGREGATION_WINDOW_SECS, DEFAULT_LATENCY_MS,
-};
+use pathlight_core::store::{Storage, DEFAULT_AGGREGATION_WINDOW_SECS};
 use pathlight_core::text::human_bytes;
 
 use crate::{show_in_file_manager, BYTES_PER_MB};
@@ -17,6 +15,7 @@ use crate::{show_in_file_manager, BYTES_PER_MB};
 /// How much of the diary the pane shows. Enough to cover the last few watch
 /// sessions; the whole file is one button away.
 const LOG_LINES_SHOWN: usize = 200;
+const BYTES_PER_KB: i64 = 1_024;
 
 /// Where the window was, and how big, when it was last put away.
 ///
@@ -76,7 +75,10 @@ pub struct Draft {
     /// The smallest change worth a row, in KB — the unit the number is
     /// actually chosen in, where MB would mean "0" for every useful value.
     least_kb: String,
-    power_saving: bool,
+    least_bytes: i64,
+    initial_least_kb: String,
+    /// Watcher coalescing interval in milliseconds.
+    latency_ms: String,
     /// How much a folder may gain in a day before a notification, in MB, or
     /// empty for never — the shipped answer, because an alert nobody asked
     /// for is how notifications get switched off wholesale.
@@ -110,6 +112,102 @@ pub enum Verdict {
     Saved,
 }
 
+/// The two settings a person confirms before one stopped folder begins
+/// monitoring. They are kept on that run; the full settings pane remains the
+/// place for install-wide defaults.
+pub struct StartDraft {
+    least_kb: String,
+    least_bytes: i64,
+    initial_least_kb: String,
+    latency_ms: String,
+    message: Option<String>,
+}
+
+pub enum StartVerdict {
+    Cancel,
+    Start(StartConfiguration),
+}
+
+#[derive(Clone, Copy)]
+pub struct StartConfiguration {
+    pub minimum_recorded_byte_delta: i64,
+    pub latency_ms: u64,
+}
+
+impl StartDraft {
+    pub fn read(storage: &Storage) -> Self {
+        let least_bytes = storage.options().minimum_recorded_byte_delta;
+        let least_kb = display_kilobytes(least_bytes);
+        Self {
+            least_kb: least_kb.clone(),
+            least_bytes,
+            initial_least_kb: least_kb,
+            latency_ms: storage.latency_ms().to_string(),
+            message: None,
+        }
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<StartVerdict> {
+        ui.set_max_width(440.0);
+        ui.label(
+            egui::RichText::new("Monitoring settings")
+                .size(16.0)
+                .strong(),
+        );
+        ui.add_space(10.0);
+        number(ui, "Smallest change to record (KB)", &mut self.least_kb);
+        number(
+            ui,
+            "Report changes every (milliseconds)",
+            &mut self.latency_ms,
+        );
+        if let Some(message) = &self.message {
+            ui.label(
+                egui::RichText::new(message)
+                    .small()
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+        ui.add_space(12.0);
+
+        let mut verdict = None;
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                verdict = Some(StartVerdict::Cancel);
+            }
+            if ui.button("Start monitoring").clicked() {
+                match self.save() {
+                    Ok(configuration) => verdict = Some(StartVerdict::Start(configuration)),
+                    Err(error) => self.message = Some(error),
+                }
+            }
+        });
+        verdict
+    }
+
+    fn save(&self) -> Result<StartConfiguration, String> {
+        let least_kb: i64 = digits(&self.least_kb, "Smallest change to record")?;
+        if least_kb < 0 {
+            return Err("Smallest change to record must be at least 0 KB.".to_owned());
+        }
+        let latency_ms: u64 = digits(&self.latency_ms, "Report changes every")?;
+        let least = least_kb
+            .checked_mul(BYTES_PER_KB)
+            .ok_or_else(|| "That smallest change is larger than any file.".to_owned())?;
+        if latency_ms == 0 {
+            return Err("Report changes every must be at least 1 millisecond.".to_owned());
+        }
+        Ok(StartConfiguration {
+            minimum_recorded_byte_delta: if self.least_kb == self.initial_least_kb {
+                self.least_bytes
+            } else {
+                least
+            },
+            latency_ms,
+        })
+    }
+}
+
 /// The arguments the login item launches with: watching, without a window
 /// nobody asked for at sign-in.
 pub const HIDDEN: &str = "--hidden";
@@ -119,13 +217,17 @@ impl Draft {
     pub fn read(storage: &Storage) -> Self {
         let (days, cap) = storage.retention();
         let options = storage.options();
+        let least_bytes = options.minimum_recorded_byte_delta;
+        let least_kb = display_kilobytes(least_bytes);
         let item = pathlight_core::autostart::login_item(&[HIDDEN]);
         Self {
             days: days.to_string(),
             aggregate_days: storage.aggregate_retention_days().to_string(),
             cap_mb: (cap / BYTES_PER_MB as u64).to_string(),
-            least_kb: (options.minimum_recorded_byte_delta / 1000).to_string(),
-            power_saving: storage.latency_ms() >= BACKGROUND_LATENCY_MS,
+            least_kb: least_kb.clone(),
+            least_bytes,
+            initial_least_kb: least_kb,
+            latency_ms: storage.latency_ms().to_string(),
             growth_alert_mb: match storage.growth_alert_bytes() {
                 0 => String::new(),
                 bytes => (bytes / BYTES_PER_MB).to_string(),
@@ -215,12 +317,7 @@ impl Draft {
 
         ui.add_space(12.0);
         ui.label(egui::RichText::new("How soon changes are reported").strong());
-        ui.radio_value(&mut self.power_saving, false, "Immediately (0.25 s)");
-        ui.radio_value(
-            &mut self.power_saving,
-            true,
-            "Power saving (every 30 s, fewer wake-ups)",
-        );
+        number(ui, "Report every (milliseconds)", &mut self.latency_ms);
 
         ui.add_space(12.0);
         ui.label(egui::RichText::new("Tell me when a folder grows").strong());
@@ -424,6 +521,13 @@ impl Draft {
         let window_minutes: u64 = digits(&self.window_minutes, "Group changes within")?;
         let cap_mb: u64 = digits(&self.cap_mb, "Stop recording past")?;
         let least_kb: i64 = digits(&self.least_kb, "Smallest change to record")?;
+        if least_kb < 0 {
+            return Err("Smallest change to record must be at least 0 KB.".to_owned());
+        }
+        let latency_ms: u64 = digits(&self.latency_ms, "Report every")?;
+        if latency_ms == 0 {
+            return Err("Report every must be at least 1 millisecond.".to_owned());
+        }
         // Empty is "never", which is the answer a box nobody typed in has.
         let growth_mb: i64 = match self.growth_alert_mb.trim().is_empty() {
             true => 0,
@@ -432,9 +536,13 @@ impl Draft {
         let cap = cap_mb
             .checked_mul(BYTES_PER_MB as u64)
             .ok_or_else(|| "That records cap is larger than any disk.".to_owned())?;
-        let least = least_kb
-            .checked_mul(1000)
-            .ok_or_else(|| "That smallest change is larger than any file.".to_owned())?;
+        let least = if self.least_kb == self.initial_least_kb {
+            self.least_bytes
+        } else {
+            least_kb
+                .checked_mul(BYTES_PER_KB)
+                .ok_or_else(|| "That smallest change is larger than any file.".to_owned())?
+        };
         let growth = growth_mb
             .checked_mul(BYTES_PER_MB)
             .ok_or_else(|| "That growth is larger than any disk.".to_owned())?;
@@ -458,10 +566,7 @@ impl Draft {
             .set_minimum_byte_delta(least)
             .map_err(|error| format!("Could not save the smallest change: {error}"))?;
         storage
-            .set_latency_ms(match self.power_saving {
-                true => BACKGROUND_LATENCY_MS,
-                false => DEFAULT_LATENCY_MS,
-            })
+            .set_latency_ms(latency_ms)
             .map_err(|error| format!("Could not save how soon changes are reported: {error}"))?;
         storage
             .set_growth_alert_bytes(growth)
@@ -478,6 +583,18 @@ fn number(ui: &mut egui::Ui, title: &str, value: &mut String) {
         ui.add(egui::TextEdit::singleline(value).desired_width(70.0))
             .labelled_by(label.id);
     });
+}
+
+/// Keep an older decimal-KB value stable when a user opens and confirms the
+/// settings. Newly entered values use binary KB, matching the rest of Pathlight.
+fn display_kilobytes(bytes: i64) -> String {
+    if bytes % BYTES_PER_KB == 0 {
+        (bytes / BYTES_PER_KB).to_string()
+    } else if bytes % 1_000 == 0 {
+        (bytes / 1_000).to_string()
+    } else {
+        bytes.to_string()
+    }
 }
 
 /// A typed box as a number, or what to tell the user. Zero is refused
@@ -564,6 +681,8 @@ mod tests {
             draft.cap_mb,
             (DEFAULT_JOURNAL_LIMIT_BYTES / BYTES_PER_MB as u64).to_string()
         );
+        assert_eq!(draft.least_kb, "1");
+        assert_eq!(draft.latency_ms, "5000");
 
         draft.days = "30".to_owned();
         draft.aggregate_days = "365".to_owned();
@@ -571,7 +690,7 @@ mod tests {
         draft.window_minutes = "2".to_owned();
         draft.cap_mb = "500".to_owned();
         draft.least_kb = "4".to_owned();
-        draft.power_saving = true;
+        draft.latency_ms = "7000".to_owned();
         draft.growth_alert_mb = "5000".to_owned();
         draft.patterns = "*.tmp\n\n  node_modules/  \n".to_owned();
         draft.save(&storage).unwrap();
@@ -580,8 +699,8 @@ mod tests {
         assert_eq!(storage.aggregate_retention_days(), 365);
         assert!(!storage.options().records_file_names);
         assert_eq!(storage.options().aggregation_window_secs, 120);
-        assert_eq!(storage.options().minimum_recorded_byte_delta, 4000);
-        assert_eq!(storage.latency_ms(), BACKGROUND_LATENCY_MS);
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 4096);
+        assert_eq!(storage.latency_ms(), 7_000);
         assert_eq!(storage.patterns(), ["*.tmp", "node_modules/"]);
         assert_eq!(storage.growth_alert_bytes(), 5_000 * BYTES_PER_MB);
         // And a fresh draft shows it back, which is the half that silently
@@ -591,7 +710,7 @@ mod tests {
         assert_eq!(reread.least_kb, "4");
         assert_eq!(reread.aggregate_days, "365");
         assert_eq!(reread.window_minutes, "2");
-        assert!(reread.power_saving);
+        assert_eq!(reread.latency_ms, "7000");
         assert_eq!(reread.growth_alert_mb, "5000");
 
         // And an emptied box is "never", not a number that failed to parse.
@@ -599,6 +718,24 @@ mod tests {
         draft.save(&storage).unwrap();
         assert_eq!(storage.growth_alert_bytes(), 0);
         assert_eq!(Draft::read(&storage).growth_alert_mb, "");
+    }
+
+    #[test]
+    fn confirming_a_legacy_decimal_kilobyte_value_does_not_change_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        storage.set_minimum_byte_delta(4_000).unwrap();
+
+        let draft = Draft::read(&storage);
+        assert_eq!(draft.least_kb, "4");
+        draft.save(&storage).unwrap();
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 4_000);
+
+        let draft = StartDraft::read(&storage);
+        assert_eq!(draft.least_kb, "4");
+        let configuration = draft.save().unwrap();
+        assert_eq!(configuration.minimum_recorded_byte_delta, 4_000);
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 4_000);
     }
 
     /// Nothing is saved when a box cannot be read, and the message names the

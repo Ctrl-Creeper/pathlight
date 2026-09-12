@@ -26,7 +26,8 @@ use crate::anomaly::{anomalies, growth, Anomaly, AnomalyKind, GROWTH_WINDOW, WIN
 use crate::store::Storage;
 
 /// How long a batch waits before it is attributed and written.
-const FLUSH: Duration = Duration::from_millis(200);
+#[cfg(any(target_os = "macos", test))]
+const MACOS_WORKER_FLUSH: Duration = Duration::from_millis(50);
 /// Bounded so a burst costs memory it cannot exceed. Overflow is counted and
 /// reported, never quietly dropped.
 const QUEUE_CAPACITY: usize = 4096;
@@ -92,6 +93,21 @@ impl Session {
         storage: Storage,
         announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        let options = storage.options();
+        let latency_ms = storage.latency_ms();
+        Self::start_configured(root, storage, options, latency_ms, announce)
+    }
+
+    /// Opens one watch with per-run recording choices. The store still owns
+    /// exclusions, alerts, journals and pause state; only the two startup
+    /// controls are overridden.
+    pub fn start_configured(
+        root: &str,
+        storage: Storage,
+        options: AggregationOptions,
+        latency_ms: u64,
+        announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         // The pause is checked here rather than in each host: a host that
         // forgot would record through a pause the user asked for, and there is
         // no message for that afterwards.
@@ -102,11 +118,6 @@ impl Session {
         // events started arriving would record the noise it exists to drop.
         let exclusions =
             ExclusionFilter::new(&storage.patterns(), root).map_err(|error| error.to_string())?;
-        // Read once, here: a watch runs for months, and re-reading the file
-        // per event would be a disk read on the path that must stay cheap. A
-        // host restarts what is running when the user changes any of them.
-        let options = storage.options();
-        let latency_ms = storage.latency_ms();
         let storage_threshold = storage.growth_alert_bytes();
         let now = SystemTime::now();
         let day_start = utc_day_start(now);
@@ -147,6 +158,7 @@ impl Session {
             records_epoch,
             alerts: Mutex::new(Alerts::watching(storage_threshold, initial_growth, now)),
             announce: Box::new(announce),
+            flush_interval: worker_flush_interval(latency_ms),
         };
         let worker = std::thread::Builder::new()
             .name("pathlight-session".into())
@@ -251,6 +263,19 @@ struct Worker {
     /// up without becoming noise.
     alerts: Mutex<Alerts>,
     announce: Announcer,
+    flush_interval: Duration,
+}
+
+fn worker_flush_interval(latency_ms: u64) -> Duration {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = latency_ms;
+        MACOS_WORKER_FLUSH
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Duration::from_millis(latency_ms.max(1))
+    }
 }
 
 impl Worker {
@@ -297,7 +322,7 @@ impl Worker {
                 self.trouble(format!("Could not take a baseline: {error}"));
             }
         }
-        let mut due = Instant::now() + FLUSH;
+        let mut due = Instant::now() + self.flush_interval;
         // Before the first row of this watch, so a journal left over the cap
         // by an earlier run does not have to wait an hour to come back under it.
         self.trim();
@@ -317,7 +342,7 @@ impl Worker {
             let now = Instant::now();
             if now >= due {
                 self.flush(&attributor, &mut pending, &index, &baseline);
-                due = now + FLUSH;
+                due = now + self.flush_interval;
             }
             if now >= trim_due {
                 self.trim();
@@ -690,12 +715,16 @@ mod tests {
 
     fn watch(root: &std::path::Path, storage: &std::path::Path) -> Session {
         let root = fs::canonicalize(root).unwrap();
-        Session::start(
+        let session = Session::start(
             &crate::paths::normalize(&root.to_string_lossy()),
             Storage::at(storage),
             |_, _| {},
         )
-        .unwrap()
+        .unwrap();
+        // The Windows notify backend arms its recursive handle asynchronously;
+        // give it a scheduling turn before the test performs its first write.
+        std::thread::sleep(Duration::from_millis(250));
+        session
     }
 
     #[test]
@@ -803,7 +832,7 @@ mod tests {
         let session = watch(root.path(), &storage_dir);
 
         fs::write(storage_dir.join("activity-events.jsonl"), b"a row\n").unwrap();
-        fs::write(root.path().join("ordinary.txt"), b"hello").unwrap();
+        fs::write(root.path().join("ordinary.txt"), vec![b'h'; 2 * 1024]).unwrap();
 
         eventually(&session, "the ordinary file to be recorded", |live| {
             live.rows
@@ -829,7 +858,7 @@ mod tests {
 
         fs::write(root.path().join(".DS_Store"), b"finder").unwrap();
         fs::write(root.path().join("movie.mp4.crdownload"), b"half").unwrap();
-        fs::write(root.path().join("keep.txt"), b"hello").unwrap();
+        fs::write(root.path().join("keep.txt"), vec![b'h'; 2 * 1024]).unwrap();
 
         eventually(&session, "the ordinary file to be recorded", |live| {
             live.rows.iter().any(|row| row.path.ends_with("keep.txt"))
@@ -867,7 +896,7 @@ mod tests {
         storage.record(vec![stale]).unwrap();
 
         let session = watch(root.path(), storage_dir.path());
-        fs::write(root.path().join("now.txt"), b"hello").unwrap();
+        fs::write(root.path().join("now.txt"), vec![b'n'; 2 * 1024]).unwrap();
         eventually(&session, "the new write to be recorded", |live| {
             live.event_count > 0
         });
@@ -878,6 +907,62 @@ mod tests {
             "the stale row survived: {journal}"
         );
         assert!(journal.contains("now.txt"), "journal was {journal:?}");
+    }
+
+    #[test]
+    fn a_watch_reports_changes_on_its_configured_interval() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        let live = Arc::new(Mutex::new(Live::default()));
+        let worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions {
+                minimum_recorded_byte_delta: 0,
+                ..AggregationOptions::SHORT_TERM
+            },
+            live: live.clone(),
+            dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+            flush_interval: Duration::from_millis(800),
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || worker.run(receiver));
+        let path = root.join("paced.txt");
+        fs::write(&path, b"paced change").unwrap();
+        sender
+            .send(StreamEvent::Change {
+                change: Change {
+                    kind: crate::monitor::ChangeKind::Created,
+                    path: paths::normalize(&path.to_string_lossy()),
+                    root_path: scope,
+                    timestamp: SystemTime::now(),
+                    process_name: None,
+                },
+                event_id: 1,
+            })
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            live.lock().unwrap().event_count,
+            0,
+            "the worker flushed before the configured interval"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while live.lock().unwrap().event_count == 0 {
+            assert!(Instant::now() < deadline, "the configured flush never ran");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        drop(sender);
+        worker.join().unwrap();
     }
 
     /// The gap path, driven directly: a baseline, then changes the watcher
@@ -902,6 +987,7 @@ mod tests {
             records_epoch: Storage::at(storage_dir.path()).records_epoch(),
             alerts: Mutex::new(Alerts::default()),
             announce: Box::new(|_, _| {}),
+            flush_interval: MACOS_WORKER_FLUSH,
         };
 
         let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
@@ -979,6 +1065,7 @@ mod tests {
             records_epoch: storage.records_epoch(),
             alerts: Mutex::new(Alerts::default()),
             announce: Box::new(|_, _| {}),
+            flush_interval: MACOS_WORKER_FLUSH,
         };
         let file = root.join("before-reset.txt");
         fs::write(&file, b"queued").unwrap();
@@ -1023,6 +1110,7 @@ mod tests {
             records_epoch: storage.records_epoch(),
             alerts: Mutex::new(Alerts::default()),
             announce: Box::new(|_, _| {}),
+            flush_interval: MACOS_WORKER_FLUSH,
         };
         let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&scope, &worker.live, &storage)));
         fs::write(root.join("missed.txt"), b"reconcile me").unwrap();

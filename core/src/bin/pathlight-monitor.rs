@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pathlight_core::history::Query;
-use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, DEFAULT_LATENCY_MS, HISTORY_ROWS};
+use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, HISTORY_ROWS, INTERACTIVE_LATENCY_MS};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
-use pathlight_core::{paths, ActivityEvent};
+use pathlight_core::{paths, ActivityEvent, AggregationOptions};
 
 /// Whether the reading commands answer a program instead of a person.
 ///
@@ -25,6 +25,13 @@ struct WatchedSession {
     printed: u64,
     reported_dropped: u64,
     reported_gaps: u64,
+}
+
+#[derive(Debug, PartialEq)]
+struct WatchRequest {
+    roots: Vec<OsString>,
+    minimum_recorded_byte_delta: Option<i64>,
+    latency_ms: Option<u64>,
 }
 
 fn as_json() -> bool {
@@ -303,6 +310,8 @@ Usage: pathlight-monitor <command> [arguments]
 
   watch [FOLDER…]         Watch folders and print what changes, recording it.
                           With no folder, watches the ones that are switched on.
+                          Override this run with --min-delta-bytes N and
+                          --interval-ms N.
   presets                 The folders worth watching on this machine, named.
   watches                 List the folders this install remembers.
   watches add FOLDER      Remember a folder, switched off.
@@ -427,7 +436,8 @@ fn log_lines(rest: &[OsString]) -> io::Result<()> {
 /// folder is switched on for good.
 fn watch(rest: &[OsString]) -> io::Result<()> {
     let storage = storage()?;
-    let roots: Vec<String> = if rest.is_empty() {
+    let request = watch_request(rest)?;
+    let roots: Vec<String> = if request.roots.is_empty() {
         storage
             .watches()
             .into_iter()
@@ -435,7 +445,7 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             .map(|watch| watch.path)
             .collect()
     } else {
-        rest.iter().map(root_of).collect()
+        request.roots.iter().map(root_of).collect()
     };
     if roots.is_empty() {
         return Err(io::Error::new(
@@ -443,7 +453,12 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             "nothing to watch: name a folder, or switch one on with `watches enable FOLDER`",
         ));
     }
-    let mut sessions = open_watch_sessions(&roots, &storage)?;
+    let mut options = storage.options();
+    if let Some(minimum) = request.minimum_recorded_byte_delta {
+        options.minimum_recorded_byte_delta = minimum;
+    }
+    let latency_ms = request.latency_ms.unwrap_or_else(|| storage.latency_ms());
+    let mut sessions = open_watch_sessions(&roots, &storage, options, latency_ms)?;
     println!(
         "Recording to {}. Press Ctrl-C to stop.",
         storage.journal().display()
@@ -457,7 +472,7 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
                 sessions.clear();
                 println!("Monitoring paused.");
             } else {
-                sessions = open_watch_sessions(&roots, &storage)?;
+                sessions = open_watch_sessions(&roots, &storage, options, latency_ms)?;
                 println!("Monitoring resumed.");
             }
             was_paused = paused;
@@ -494,7 +509,37 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
     }
 }
 
-fn open_watch_sessions(roots: &[String], storage: &Storage) -> io::Result<Vec<WatchedSession>> {
+fn watch_request(rest: &[OsString]) -> io::Result<WatchRequest> {
+    let mut roots = rest.to_vec();
+    let minimum_recorded_byte_delta = take_bytes(&mut roots, "--min-delta-bytes")?;
+    let latency_ms = match take_value(&mut roots, "--interval-ms")? {
+        None => None,
+        Some(value) => Some(
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--interval-ms needs a positive whole number",
+                    )
+                })?,
+        ),
+    };
+    Ok(WatchRequest {
+        roots,
+        minimum_recorded_byte_delta,
+        latency_ms,
+    })
+}
+
+fn open_watch_sessions(
+    roots: &[String],
+    storage: &Storage,
+    options: AggregationOptions,
+    latency_ms: u64,
+) -> io::Result<Vec<WatchedSession>> {
     let mut sessions = Vec::new();
     for root in roots {
         // Watching the journal's own folder is a feedback loop; the store
@@ -506,13 +551,18 @@ fn open_watch_sessions(roots: &[String], storage: &Storage) -> io::Result<Vec<Wa
                 format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
             ));
         }
-        let session =
-            pathlight_core::watch::Session::start(root, storage.clone(), |alert, scope| {
+        let session = pathlight_core::watch::Session::start_configured(
+            root,
+            storage.clone(),
+            options,
+            latency_ms,
+            |alert, scope| {
                 // On stderr, so `watch | grep` still reads as rows while a finding
                 // is still seen by somebody watching the terminal.
                 eprintln!("! {} — {}", alert_title(alert, scope), alert_body(alert));
-            })
-            .map_err(io::Error::other)?;
+            },
+        )
+        .map_err(io::Error::other)?;
         println!("Watching {root}");
         sessions.push(WatchedSession {
             root: root.clone(),
@@ -877,7 +927,7 @@ fn settings(rest: &[OsString]) -> io::Result<()> {
             storage.set_size_bounds(min, max)?;
         }
         "latency" => match first {
-            "immediate" => storage.set_latency_ms(DEFAULT_LATENCY_MS)?,
+            "immediate" => storage.set_latency_ms(INTERACTIVE_LATENCY_MS)?,
             "power-saving" => storage.set_latency_ms(BACKGROUND_LATENCY_MS)?,
             value => storage.set_latency_ms(number(value, "latency")?)?,
         },
@@ -984,9 +1034,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
         format!(
             "{} ms  ({})",
             storage.latency_ms(),
-            match storage.latency_ms() >= BACKGROUND_LATENCY_MS {
-                true => "power-saving",
-                false => "immediate",
+            match storage.latency_ms() {
+                INTERACTIVE_LATENCY_MS => "immediate",
+                value if value >= BACKGROUND_LATENCY_MS => "power-saving",
+                _ => "custom",
             }
         ),
     );
@@ -1170,4 +1221,37 @@ fn run() -> io::Result<()> {
         journal.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_accepts_per_run_threshold_and_interval_before_opening() {
+        let request = watch_request(&[
+            OsString::from("--min-delta-bytes"),
+            OsString::from("4096"),
+            OsString::from("--interval-ms"),
+            OsString::from("7500"),
+            OsString::from("/watched"),
+        ])
+        .unwrap();
+
+        assert_eq!(request.roots, [OsString::from("/watched")]);
+        assert_eq!(request.minimum_recorded_byte_delta, Some(4096));
+        assert_eq!(request.latency_ms, Some(7500));
+    }
+
+    #[test]
+    fn watch_rejects_a_zero_interval() {
+        let error = watch_request(&[
+            OsString::from("--interval-ms"),
+            OsString::from("0"),
+            OsString::from("/watched"),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("positive"));
+    }
 }

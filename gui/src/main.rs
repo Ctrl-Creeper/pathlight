@@ -129,6 +129,9 @@ struct App {
     /// The settings pane, while it is open, holding what has been typed but
     /// not yet applied.
     settings: Option<settings::Draft>,
+    /// A stopped folder and its two startup choices. No session opens until
+    /// the modal returns `Start`.
+    starting: Option<(String, settings::StartDraft)>,
 }
 
 impl App {
@@ -171,6 +174,7 @@ impl App {
             on_top: false,
             quitting: false,
             settings: None,
+            starting: None,
         }
     }
 
@@ -194,7 +198,7 @@ impl App {
             .map(|watch| watch.path.clone())
             .collect();
         for root in enabled {
-            self.open(&root);
+            self.open(&root, None);
         }
     }
 
@@ -357,24 +361,30 @@ impl App {
     fn toggle(&mut self, root: &str) {
         match self.sessions.remove(root).is_some() {
             true => self.remember(root, false),
-            false => self.start(root),
+            false => {
+                self.starting = self
+                    .storage()
+                    .map(|storage| (root.to_owned(), settings::StartDraft::read(storage)));
+            }
         }
     }
 
     /// Opens a watch, and remembers that it is open so the next launch does
     /// the same. A watch that could not be opened is not remembered as one:
     /// the next launch would fail the same way and say nothing new.
-    fn start(&mut self, root: &str) {
-        if self.open(root) {
-            self.remember(root, true);
-        }
-    }
-
-    fn open(&mut self, root: &str) -> bool {
+    fn open(&mut self, root: &str, configuration: Option<settings::StartConfiguration>) -> bool {
         let Some(storage) = self.storage().cloned() else {
             return false;
         };
-        match Session::start(root, storage, notify::post) {
+        let (options, latency_ms) = match configuration {
+            Some(configuration) => {
+                let mut options = storage.options();
+                options.minimum_recorded_byte_delta = configuration.minimum_recorded_byte_delta;
+                (options, configuration.latency_ms)
+            }
+            None => (storage.options(), storage.latency_ms()),
+        };
+        match Session::start_configured(root, storage, options, latency_ms, notify::post) {
             Ok(session) => {
                 self.sessions.insert(root.to_owned(), session);
                 true
@@ -405,7 +415,7 @@ impl App {
     fn restart_watches(&mut self) {
         for root in self.sessions.keys().cloned().collect::<Vec<_>>() {
             self.sessions.remove(&root);
-            self.open(&root);
+            self.open(&root, None);
         }
     }
 
@@ -775,7 +785,11 @@ impl App {
     /// Not while a dialog is open: a shortcut that acted behind a modal would
     /// change something the user cannot see.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.settings.is_some() || self.notice.is_some() || self.uninstall_prompt.is_some() {
+        if self.settings.is_some()
+            || self.starting.is_some()
+            || self.notice.is_some()
+            || self.uninstall_prompt.is_some()
+        {
             return;
         }
         // `consume_key`, so a shortcut that did something does not also reach
@@ -1330,6 +1344,27 @@ impl App {
             }
         }
 
+        if self.starting.is_some() {
+            let mut verdict = None;
+            let mut starting = self.starting.take();
+            if let Some((_, draft)) = starting.as_mut() {
+                egui::Modal::new(egui::Id::new("monitoring-settings"))
+                    .show(ctx, |ui| verdict = draft.ui(ui));
+            }
+            self.starting = starting;
+            match verdict {
+                Some(settings::StartVerdict::Cancel) => self.starting = None,
+                Some(settings::StartVerdict::Start(configuration)) => {
+                    if let Some((root, _)) = self.starting.take() {
+                        if self.open(&root, Some(configuration)) {
+                            self.remember(&root, true);
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+
         if let Some(notice) = self.notice.clone() {
             egui::Modal::new(egui::Id::new("notice")).show(ctx, |ui| {
                 ui.set_max_width(460.0);
@@ -1553,6 +1588,7 @@ mod tests {
             on_top: false,
             quitting: false,
             settings: None,
+            starting: None,
         }
     }
 
@@ -1560,6 +1596,13 @@ mod tests {
         let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.draw(ui), app);
         harness.run();
         harness
+    }
+
+    fn confirm_watch_configuration(harness: &mut Harness<'static, App>) {
+        harness.get_by_label("Watch").click();
+        harness.run();
+        harness.get_by_label("Start monitoring").click();
+        harness.step();
     }
 
     /// The interaction the whole program is for, driven through the real
@@ -1577,13 +1620,17 @@ mod tests {
         // waiting for the ui to go quiet would wait forever — which is the
         // point of that repaint.
         harness.get_by_label("Watch").click();
+        harness.run();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "pressing Watch started before the configuration was confirmed"
+        );
+        harness.get_by_label("Start monitoring").click();
         harness.step();
         assert!(
             harness.state().sessions.contains_key(&root),
-            "pressing Watch did not start a watch"
+            "confirming the configuration did not start the watch"
         );
-        // One more frame, so the labels describe the state the click made:
-        // the button that started the watch is now the one that ends it.
         harness.step();
 
         harness.get_by_label("Stop").click();
@@ -1603,8 +1650,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
-        harness.get_by_label("Watch").click();
-        harness.step();
+        confirm_watch_configuration(&mut harness);
 
         harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
         harness.step();
@@ -1642,8 +1688,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
-        harness.get_by_label("Watch").click();
-        harness.step();
+        confirm_watch_configuration(&mut harness);
         assert!(harness.state().sessions.contains_key(&root));
 
         harness.get_by_label("Pause all watches").click();
@@ -1677,7 +1722,8 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut app = app(storage_dir.path(), vec![root.clone()]);
-        app.start(&root);
+        assert!(app.open(&root, None));
+        app.remember(&root, true);
         assert!(app.sessions.contains_key(&root));
         app.observe_shared_pause(&egui::Context::default());
 
@@ -1711,8 +1757,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
-        harness.get_by_label("Watch").click();
-        harness.step();
+        confirm_watch_configuration(&mut harness);
 
         assert_eq!(
             Storage::at(storage_dir.path()).watches(),
@@ -1752,8 +1797,7 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage.path(), vec![root.clone()]));
-        harness.get_by_label("Watch").click();
-        harness.step();
+        confirm_watch_configuration(&mut harness);
         assert!(harness.state().sessions.contains_key(&root));
 
         let ctx = harness.ctx.clone();
@@ -2014,9 +2058,11 @@ mod tests {
         harness.run();
         // Through accesskit rather than a pointer: the pane scrolls in a
         // window this size, and a real user scrolls to what a test cannot.
+        harness.get_by_label("Report every (milliseconds)").focus();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
         harness
-            .get_by_label_contains("Power saving")
-            .click_accesskit();
+            .get_by_label("Report every (milliseconds)")
+            .type_text("30000");
         harness.run();
         harness.get_by_label("Apply").click_accesskit();
         harness.run();

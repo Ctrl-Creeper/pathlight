@@ -13,10 +13,10 @@ struct ActivityDashboardActions {
     let setRecordingFilters: ([String], Int64?, Int64?, URL) -> Void
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
-    let addFolder: () -> Void
-    let addPreset: (MonitoringPreset) -> Void
+    let addFolder: (MonitoringStartConfiguration) -> Void
+    let addPreset: (MonitoringPreset, MonitoringStartConfiguration) -> Void
     let exportHistory: (URL) -> Void
-    let startLiveMonitor: (DiskActivityAggregationOptions) -> Void
+    let startLiveMonitor: (MonitoringStartConfiguration) -> Void
     let stopLiveMonitor: () -> Void
     let setMonitoringPaused: (Bool) -> Void
 }
@@ -34,6 +34,7 @@ struct ActivityDashboardView: View {
 
     @State private var selectedTargetID: String?
     @State private var presets = MonitoringPreset.available()
+    @State private var monitoringSetup: MonitoringSetup?
 
     private var untrackedPresets: [MonitoringPreset] {
         let tracked = Set(targets.map(\.id))
@@ -89,13 +90,13 @@ struct ActivityDashboardView: View {
 
                 Menu {
                     Button("Choose Folder…") {
-                        actions.addFolder()
+                        monitoringSetup = .longTerm
                     }
                     if !untrackedPresets.isEmpty {
                         Divider()
                         ForEach(untrackedPresets) { preset in
                             Button(preset.title) {
-                                actions.addPreset(preset)
+                                monitoringSetup = .preset(preset)
                             }
                         }
                     }
@@ -112,16 +113,8 @@ struct ActivityDashboardView: View {
                     }
                     .help("Stop Live Monitor")
                 } else {
-                    Menu {
-                        Button("Every file change") {
-                            actions.startLiveMonitor(.shortTermDefault)
-                        }
-                        Button("Changes 1 KB and larger") {
-                            actions.startLiveMonitor(.shortTerm(minimumRecordedByteDelta: 1_024))
-                        }
-                        Button("Changes 1 MB and larger") {
-                            actions.startLiveMonitor(.shortTerm(minimumRecordedByteDelta: 1_024 * 1_024))
-                        }
+                    Button {
+                        monitoringSetup = .live
                     } label: {
                         Label("Live Monitor", systemImage: "waveform.path.ecg")
                     }
@@ -163,6 +156,18 @@ struct ActivityDashboardView: View {
         .onChange(of: selectedTargetID) { _, _ in
             refreshSelectedHistory()
         }
+        .sheet(item: $monitoringSetup) { setup in
+            MonitoringStartConfigurationView(setup: setup) { configuration in
+                switch setup {
+                case .longTerm:
+                    actions.addFolder(configuration)
+                case let .preset(preset):
+                    actions.addPreset(preset, configuration)
+                case .live:
+                    actions.startLiveMonitor(configuration)
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -191,7 +196,7 @@ struct ActivityDashboardView: View {
         if targets.isEmpty {
             ActivityDashboardEmptyState(
                 title: presentation.emptyStateTitle ?? "No Activity",
-                onAddFolder: actions.addFolder
+                onAddFolder: { monitoringSetup = .longTerm }
             )
         } else {
             HSplitView {
@@ -319,6 +324,116 @@ struct ActivityDashboardView: View {
 
     private func refreshAllTargetHistories() {
         actions.refreshActivityDashboardHistories(targets.map(\.rootPath))
+    }
+}
+
+private enum MonitoringSetup: Identifiable {
+    case longTerm
+    case preset(MonitoringPreset)
+    case live
+
+    var id: String {
+        switch self {
+        case .longTerm: "long-term"
+        case let .preset(preset): "preset-\(preset.id)"
+        case .live: "live"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .longTerm: "Monitor a Folder"
+        case let .preset(preset): "Monitor \(preset.title)"
+        case .live: "Start Live Monitor"
+        }
+    }
+
+    var actionTitle: String {
+        switch self {
+        case .preset: "Start Monitoring"
+        case .longTerm, .live: "Choose Folder and Start"
+        }
+    }
+}
+
+private struct MonitoringStartConfigurationView: View {
+    let setup: MonitoringSetup
+    let onStart: (MonitoringStartConfiguration) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var minimumKilobytes: Int64 = 1
+    @State private var reportIntervalSeconds = 5.0
+
+    private var configuration: MonitoringStartConfiguration {
+        MonitoringStartConfiguration(
+            minimumKilobytes: minimumKilobytes,
+            monitorLatency: reportIntervalSeconds
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(setup.title)
+                .font(.title2.weight(.semibold))
+
+            Form {
+                LabeledContent("Smallest change") {
+                    Stepper(
+                        value: $minimumKilobytes,
+                        in: 0...MonitoringStartConfiguration.maximumMinimumKilobytes
+                    ) {
+                        HStack(spacing: 6) {
+                            TextField("Kilobytes", value: $minimumKilobytes, format: .number)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 90)
+                            Text("KB")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                LabeledContent("Report changes every") {
+                    Stepper(
+                        value: $reportIntervalSeconds,
+                        in: MonitoringStartConfiguration.minimumMonitorLatency...MonitoringStartConfiguration.maximumMonitorLatency,
+                        step: 0.25
+                    ) {
+                        HStack(spacing: 6) {
+                            TextField(
+                                "Seconds",
+                                value: $reportIntervalSeconds,
+                                format: .number.precision(.fractionLength(0...2))
+                            )
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 90)
+                            Text("seconds")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            HStack {
+                if minimumKilobytes == 0 {
+                    Text("Every measurable change will be recorded.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    dismiss()
+                }
+                Button(setup.actionTitle) {
+                    onStart(configuration)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
     }
 }
 
