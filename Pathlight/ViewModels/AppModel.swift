@@ -101,6 +101,21 @@ final class AppModel: ObservableObject {
     init(dependencies: AppDependencies) {
         self.dependencies = dependencies
 
+        // Surface a watcher the Rust core could not start, instead of letting it
+        // fail silently. The monitor has no UI of its own, so it reports back
+        // here to raise the visible monitoring status banner. Routed through the
+        // DiskActivityMonitoring protocol (not a cast to the concrete monitor),
+        // so it also compiles in the SwiftPM core, where the Rust-backed monitor
+        // is not linked.
+        var monitor = dependencies.activityMonitor
+        monitor.onStartFailure = { error, root in
+            let message = "Pathlight could not start monitoring \(root.lastPathComponent): " +
+                "\(error.localizedDescription). This folder is not being watched."
+            Task { @MainActor [weak self] in
+                self?.monitoringStatusMessage = message
+            }
+        }
+
         let activityStoragePreferences = dependencies.activityStoragePreferences.loadPreferences()
         activityDetailedRetentionDays = activityStoragePreferences.detailedRetentionDays
         activityAggregateRetentionDays = activityStoragePreferences.aggregateRetentionDays

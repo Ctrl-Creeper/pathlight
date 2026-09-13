@@ -4,6 +4,12 @@ import PathlightRustCore
 /// Event source backed by the Rust core (FSEvents on macOS), so macOS and the
 /// other platforms share one monitoring implementation.
 nonisolated final class RustDiskActivityMonitor: DiskActivityMonitoring {
+    /// Called when the Rust core cannot start a filesystem watch for a root
+    /// (for example, the user revoked Full Disk Access). Without it a failing
+    /// watch goes quiet with no explanation. `AppModel` sets this to raise the
+    /// visible monitoring status, since the monitor has no UI of its own.
+    var onStartFailure: (@Sendable (Error, URL) -> Void)?
+
     nonisolated func events(
         for root: URL,
         since eventID: UInt64?,
@@ -21,6 +27,7 @@ nonisolated final class RustDiskActivityMonitor: DiskActivityMonitoring {
                     listener: listener
                 )
             } catch {
+                onStartFailure?(error, standardizedRoot)
                 continuation.finish()
                 return
             }
