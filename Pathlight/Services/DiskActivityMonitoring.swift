@@ -15,4 +15,18 @@ protocol DiskActivityMonitoring: Sendable {
         since eventID: UInt64?,
         latency: TimeInterval
     ) -> AsyncStream<DiskActivityStreamEvent>
+
+    /// Called when a watch cannot be started for a root (for example, the user
+    /// revoked Full Disk Access). Without it a failing watch goes quiet with no
+    /// explanation. `AppModel` sets this to raise the visible monitoring status,
+    /// since the monitor has no UI of its own. Conformers that have nothing to
+    /// report (test doubles, hosts without a status surface) get a no-op default.
+    var onStartFailure: (@Sendable (Error, URL) -> Void)? { get set }
+}
+
+extension DiskActivityMonitoring {
+    var onStartFailure: (@Sendable (Error, URL) -> Void)? {
+        get { nil }
+        set { }
+    }
 }
