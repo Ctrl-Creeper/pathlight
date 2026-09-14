@@ -332,28 +332,38 @@ private enum MonitoringSetup: Identifiable {
     case preset(MonitoringPreset)
     case live
 
-    var id: String {
+    private struct Presentation {
+        let id: String
+        let title: String
+        let actionTitle: String
+    }
+
+    private var presentation: Presentation {
         switch self {
-        case .longTerm: "long-term"
-        case let .preset(preset): "preset-\(preset.id)"
-        case .live: "live"
+        case .longTerm:
+            Presentation(
+                id: "long-term",
+                title: "Monitor a Folder",
+                actionTitle: "Choose Folder and Start"
+            )
+        case let .preset(preset):
+            Presentation(
+                id: "preset-\(preset.id)",
+                title: "Monitor \(preset.title)",
+                actionTitle: "Start Monitoring"
+            )
+        case .live:
+            Presentation(
+                id: "live",
+                title: "Start Live Monitor",
+                actionTitle: "Choose Folder and Start"
+            )
         }
     }
 
-    var title: String {
-        switch self {
-        case .longTerm: "Monitor a Folder"
-        case let .preset(preset): "Monitor \(preset.title)"
-        case .live: "Start Live Monitor"
-        }
-    }
-
-    var actionTitle: String {
-        switch self {
-        case .preset: "Start Monitoring"
-        case .longTerm, .live: "Choose Folder and Start"
-        }
-    }
+    var id: String { presentation.id }
+    var title: String { presentation.title }
+    var actionTitle: String { presentation.actionTitle }
 }
 
 private struct MonitoringStartConfigurationView: View {
