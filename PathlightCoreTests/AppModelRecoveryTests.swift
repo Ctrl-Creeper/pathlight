@@ -504,18 +504,12 @@ final class AppModelRecoveryTests: XCTestCase {
     }
 }
 
-private enum RecoveryTestError: Error { case timedOut, startFailed }
+private enum RecoveryTestError: Error { case timedOut }
 
 private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<DiskActivityStreamEvent>.Continuation?
     private var sinceEventIDs: [UInt64?] = []
-    private var startFailure: (@Sendable (Error, URL) -> Void)?
-
-    var onStartFailure: (@Sendable (Error, URL) -> Void)? {
-        get { lock.withLock { startFailure } }
-        set { lock.withLock { startFailure = newValue } }
-    }
 
     var isSubscribed: Bool {
         lock.lock()
@@ -549,8 +543,9 @@ private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Send
     }
 
     func failStart(root: URL) {
-        let callback = lock.withLock { startFailure }
-        callback?(RecoveryTestError.startFailed, root)
+        let current = lock.withLock { continuation }
+        current?.yield(.startFailed(message: "injected start failure"))
+        current?.finish()
     }
 }
 

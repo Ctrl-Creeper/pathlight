@@ -23,6 +23,7 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
     private(set) var receivedStreamEventCount: UInt64 = 0
     private(set) var historyGapCount: UInt64 = 0
     private(set) var historyState: WatchSessionHistoryState
+    private(set) var startFailureMessage: String?
     /// Oldest events dropped once `maxRetainedEvents` is exceeded, so a storm
     /// cannot grow memory without bound.
     private(set) var droppedEventCount = 0
@@ -39,7 +40,8 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
         startedAt: Date = Date(),
         events: [DiskActivityEvent] = [],
         lastObservedEventID: UInt64? = nil,
-        historyState: WatchSessionHistoryState = .live
+        historyState: WatchSessionHistoryState = .live,
+        startFailureMessage: String? = nil
     ) {
         self.id = id
         self.rootPath = rootPath
@@ -48,6 +50,7 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
         self.eventIDs = events.map { _ in UUID() }
         self.lastObservedEventID = lastObservedEventID
         self.historyState = historyState
+        self.startFailureMessage = startFailureMessage
     }
 
     mutating func append(
@@ -163,6 +166,10 @@ nonisolated struct WatchSessionModel: Equatable, Sendable {
 
     mutating func setHistoryState(_ historyState: WatchSessionHistoryState) {
         self.historyState = historyState
+    }
+
+    mutating func recordStartFailure(_ message: String) {
+        startFailureMessage = message
     }
 
     func summary(endedAt: Date = Date()) -> WatchSessionSummary {
