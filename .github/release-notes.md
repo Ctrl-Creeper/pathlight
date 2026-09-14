@@ -1,6 +1,15 @@
 A pre-release. Nothing here is signed or notarized, so both desktop platforms
 will warn before running it:
 
+## Changes in v1.5.0-rc.6
+
+- Remembers each folder's confirmed minimum change and reporting interval.
+- Applies the minimum byte-delta threshold consistently to known deletions,
+  moves, and aggregated changes; `0 KB` records every measurable change.
+- Uses the same supported reporting range (250 ms to 5 minutes) in every host.
+- Reports macOS watcher startup failures without leaving a finished live
+  monitor active or hiding the failure after a successful journal write.
+
 - **macOS**: right-click `Pathlight.app` and choose Open, or
   `xattr -dr com.apple.quarantine Pathlight.app`.
 - **Windows**: SmartScreen shows "unrecognized app"; More info → Run anyway.
