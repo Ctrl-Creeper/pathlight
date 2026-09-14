@@ -44,7 +44,8 @@ pub use exclusion::ExclusionFilter;
 pub use history::{HistoryBucket, HistorySnapshot};
 pub use journal::Journal;
 pub use monitor::{
-    watcher_capabilities, ActivityListener, Capabilities, Change, ChangeKind, StreamEvent, Watcher,
+    bounded_monitor_latency_ms, watcher_capabilities, ActivityListener, Capabilities, Change,
+    ChangeKind, StreamEvent, Watcher, MAX_MONITOR_LATENCY_MS, MIN_MONITOR_LATENCY_MS,
 };
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
 use crate::exclusion::ExclusionFilter;
-use crate::monitor::{ActivityListener, Change, StreamEvent, Watcher};
+use crate::monitor::{bounded_monitor_latency_ms, ActivityListener, Change, StreamEvent, Watcher};
 use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
 use crate::{paths, ActivityEvent, Confidence, EventKind};
 
@@ -108,6 +108,7 @@ impl Session {
         latency_ms: u64,
         announce: impl Fn(&Anomaly, &str) + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        let latency_ms = bounded_monitor_latency_ms(latency_ms);
         // The pause is checked here rather than in each host: a host that
         // forgot would record through a pause the user asked for, and there is
         // no message for that afterwards.
@@ -274,7 +275,7 @@ fn worker_flush_interval(latency_ms: u64) -> Duration {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Duration::from_millis(latency_ms.max(1))
+        Duration::from_millis(bounded_monitor_latency_ms(latency_ms))
     }
 }
 

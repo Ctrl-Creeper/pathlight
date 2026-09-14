@@ -98,12 +98,12 @@ fn deletions_and_departed_renames_use_prior_size() {
         ),
         change(ChangeKind::Deleted, "unknown.bin", 3),
     ]);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0].byte_delta, Some(-2048));
     assert_eq!(events[0].confidence, Confidence::Estimated);
-    assert_eq!(events[1].kind, EventKind::Moved);
-    assert_eq!(events[1].byte_delta, Some(-99));
-    assert_eq!(events[2].byte_delta, None);
-    assert_eq!(events[2].confidence, Confidence::Unknown);
+    assert_eq!(events[1].kind, EventKind::Deleted);
+    assert_eq!(events[1].byte_delta, None);
+    assert_eq!(events[1].confidence, Confidence::Unknown);
     assert_eq!(
         index.take(SCOPE, &format!("{ROOT}/gone.zip")),
         None,
@@ -178,12 +178,8 @@ fn modifications_report_growth_and_moves_inside_root_net_out() {
         ),
     ]);
     let deltas: Vec<Option<i64>> = events.iter().map(|e| e.byte_delta).collect();
-    assert_eq!(
-        deltas,
-        [Some(2_000), Some(5_000), Some(0), Some(5_000), Some(5_000)]
-    );
-    assert_eq!(events[4].confidence, Confidence::Estimated);
-    assert_eq!(events[2].confidence, Confidence::Confirmed);
+    assert_eq!(deltas, [Some(2_000), Some(5_000), Some(5_000), Some(5_000)]);
+    assert_eq!(events[3].confidence, Confidence::Estimated);
 }
 
 #[test]

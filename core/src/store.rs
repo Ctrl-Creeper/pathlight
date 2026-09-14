@@ -14,6 +14,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::attribution::AggregationOptions;
 use crate::exclusion::DEFAULT_PATTERNS;
+use crate::monitor::bounded_monitor_latency_ms;
 use crate::{paths, uninstall, ActivityEvent, CoreError, HistorySnapshot, Journal};
 
 const JOURNAL_FILE: &str = "activity-events.jsonl";
@@ -428,7 +429,21 @@ impl Storage {
 
     pub fn set_watches(&self, watches: &[WatchTarget]) -> io::Result<()> {
         self.update_settings(|settings| {
-            settings.roots = watches.iter().cloned().map(StoredWatch::from).collect();
+            let previous = std::mem::take(&mut settings.roots);
+            settings.roots = watches
+                .iter()
+                .map(|watch| {
+                    previous
+                        .iter()
+                        .find(|stored| stored.path() == watch.path)
+                        .cloned()
+                        .map(|mut stored| {
+                            stored.set_enabled(watch.enabled);
+                            stored
+                        })
+                        .unwrap_or_else(|| StoredWatch::from(watch.clone()))
+                })
+                .collect();
         })
     }
 
@@ -444,6 +459,8 @@ impl Storage {
             settings.roots.push(StoredWatch::Target {
                 path: path.to_owned(),
                 enabled: false,
+                minimum_recorded_byte_delta: None,
+                latency_ms: None,
             });
             true
         })
@@ -464,18 +481,61 @@ impl Storage {
     /// host the user just asked to watch it.
     pub fn set_watch_enabled(&self, path: &str, enabled: bool) -> io::Result<()> {
         self.update_settings(|settings| {
-            let mut watches: Vec<WatchTarget> = std::mem::take(&mut settings.roots)
-                .into_iter()
-                .map(WatchTarget::from)
-                .collect();
-            match watches.iter_mut().find(|watch| watch.path == path) {
-                Some(watch) => watch.enabled = enabled,
-                None => watches.push(WatchTarget {
+            match settings.roots.iter_mut().find(|watch| watch.path() == path) {
+                Some(watch) => watch.set_enabled(enabled),
+                None => settings.roots.push(StoredWatch::Target {
                     path: path.to_owned(),
                     enabled,
+                    minimum_recorded_byte_delta: None,
+                    latency_ms: None,
                 }),
             }
-            settings.roots = watches.into_iter().map(StoredWatch::from).collect();
+        })
+    }
+
+    /// Startup controls remembered for one folder. Old entries and folders
+    /// created by the CLI inherit the install-wide defaults.
+    pub fn watch_start_configuration(&self, path: &str) -> WatchStartConfiguration {
+        let settings = self.settings();
+        let stored = settings.roots.iter().find(|watch| watch.path() == path);
+        WatchStartConfiguration {
+            minimum_recorded_byte_delta: stored
+                .and_then(StoredWatch::minimum_recorded_byte_delta)
+                .unwrap_or_else(|| {
+                    settings
+                        .minimum_recorded_byte_delta
+                        .unwrap_or(AggregationOptions::LONG_TERM.minimum_recorded_byte_delta)
+                })
+                .max(0),
+            latency_ms: bounded_monitor_latency_ms(
+                stored
+                    .and_then(StoredWatch::latency_ms)
+                    .filter(|value| *value > 0)
+                    .or(settings.latency_ms.filter(|value| *value > 0))
+                    .unwrap_or(DEFAULT_LATENCY_MS),
+            ),
+        }
+    }
+
+    pub fn set_watch_start_configuration(
+        &self,
+        path: &str,
+        configuration: WatchStartConfiguration,
+    ) -> io::Result<()> {
+        self.update_settings(|settings| {
+            let configuration = WatchStartConfiguration {
+                minimum_recorded_byte_delta: configuration.minimum_recorded_byte_delta.max(0),
+                latency_ms: bounded_monitor_latency_ms(configuration.latency_ms),
+            };
+            match settings.roots.iter_mut().find(|watch| watch.path() == path) {
+                Some(watch) => watch.set_start_configuration(configuration),
+                None => settings.roots.push(StoredWatch::Target {
+                    path: path.to_owned(),
+                    enabled: false,
+                    minimum_recorded_byte_delta: Some(configuration.minimum_recorded_byte_delta),
+                    latency_ms: Some(configuration.latency_ms),
+                }),
+            }
         })
     }
 
@@ -530,10 +590,12 @@ impl Storage {
     /// offer the pair ([`DEFAULT_LATENCY_MS`], [`BACKGROUND_LATENCY_MS`]) as a
     /// choice and anybody editing the file by hand can still say 5 seconds.
     pub fn latency_ms(&self) -> u64 {
-        self.settings()
-            .latency_ms
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_LATENCY_MS)
+        bounded_monitor_latency_ms(
+            self.settings()
+                .latency_ms
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_LATENCY_MS),
+        )
     }
 
     /// How much a folder may grow in a day before the user is told, or zero
@@ -580,7 +642,9 @@ impl Storage {
     }
 
     pub fn set_latency_ms(&self, latency_ms: u64) -> io::Result<()> {
-        self.update_settings(|settings| settings.latency_ms = Some(latency_ms.max(1)))
+        self.update_settings(|settings| {
+            settings.latency_ms = Some(bounded_monitor_latency_ms(latency_ms))
+        })
     }
 
     /// What every watch here leaves out, on top of the storage guard: the
@@ -720,6 +784,12 @@ pub struct WatchTarget {
     pub enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchStartConfiguration {
+    pub minimum_recorded_byte_delta: i64,
+    pub latency_ms: u64,
+}
+
 /// A folder in the settings file, in either shape it has been written in.
 ///
 /// Untagged, so a list written before a watch could be left switched off — a
@@ -733,6 +803,10 @@ enum StoredWatch {
         path: String,
         #[serde(default)]
         enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum_recorded_byte_delta: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latency_ms: Option<u64>,
     },
     Path(String),
 }
@@ -740,7 +814,7 @@ enum StoredWatch {
 impl From<StoredWatch> for WatchTarget {
     fn from(stored: StoredWatch) -> Self {
         match stored {
-            StoredWatch::Target { path, enabled } => Self { path, enabled },
+            StoredWatch::Target { path, enabled, .. } => Self { path, enabled },
             // A list from before the flag existed was the list of folders
             // being watched, so that is what it still means.
             StoredWatch::Path(path) => Self {
@@ -756,6 +830,70 @@ impl From<WatchTarget> for StoredWatch {
         Self::Target {
             path: watch.path,
             enabled: watch.enabled,
+            minimum_recorded_byte_delta: None,
+            latency_ms: None,
+        }
+    }
+}
+
+impl StoredWatch {
+    fn path(&self) -> &str {
+        match self {
+            Self::Target { path, .. } | Self::Path(path) => path,
+        }
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        match self {
+            Self::Target {
+                enabled: current, ..
+            } => *current = enabled,
+            Self::Path(path) => {
+                *self = Self::Target {
+                    path: std::mem::take(path),
+                    enabled,
+                    minimum_recorded_byte_delta: None,
+                    latency_ms: None,
+                };
+            }
+        }
+    }
+
+    fn minimum_recorded_byte_delta(&self) -> Option<i64> {
+        match self {
+            Self::Target {
+                minimum_recorded_byte_delta,
+                ..
+            } => *minimum_recorded_byte_delta,
+            Self::Path(_) => None,
+        }
+    }
+
+    fn latency_ms(&self) -> Option<u64> {
+        match self {
+            Self::Target { latency_ms, .. } => *latency_ms,
+            Self::Path(_) => None,
+        }
+    }
+
+    fn set_start_configuration(&mut self, configuration: WatchStartConfiguration) {
+        match self {
+            Self::Target {
+                minimum_recorded_byte_delta,
+                latency_ms,
+                ..
+            } => {
+                *minimum_recorded_byte_delta = Some(configuration.minimum_recorded_byte_delta);
+                *latency_ms = Some(configuration.latency_ms);
+            }
+            Self::Path(path) => {
+                *self = Self::Target {
+                    path: std::mem::take(path),
+                    enabled: true,
+                    minimum_recorded_byte_delta: Some(configuration.minimum_recorded_byte_delta),
+                    latency_ms: Some(configuration.latency_ms),
+                };
+            }
         }
     }
 }
@@ -1132,6 +1270,37 @@ mod tests {
 
         storage.set_latency_ms(u64::MAX).unwrap();
         assert_eq!(storage.latency_ms(), 300_000);
+    }
+
+    #[test]
+    fn a_watch_keeps_its_start_configuration_when_it_is_toggled_or_reordered() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        storage.add_watch("/a").unwrap();
+        storage.add_watch("/b").unwrap();
+        let configuration = WatchStartConfiguration {
+            minimum_recorded_byte_delta: 0,
+            latency_ms: 750,
+        };
+
+        storage
+            .set_watch_start_configuration("/a", configuration)
+            .unwrap();
+        storage.set_watch_enabled("/a", true).unwrap();
+        storage
+            .set_watches(&[watch("/b", false), watch("/a", false)])
+            .unwrap();
+
+        let reopened = Storage::at(dir.path());
+        assert_eq!(reopened.watch_start_configuration("/a"), configuration);
+        assert_eq!(reopened.watches(), [watch("/b", false), watch("/a", false)]);
+        assert_eq!(
+            reopened.watch_start_configuration("/b"),
+            WatchStartConfiguration {
+                minimum_recorded_byte_delta: 1_024,
+                latency_ms: 5_000,
+            }
+        );
     }
 
     /// The diary answers "what happened while nobody was looking", so what it
