@@ -21,6 +21,7 @@ nonisolated final class RustDiskActivityMonitor: DiskActivityMonitoring {
                     listener: listener
                 )
             } catch {
+                continuation.yield(.startFailed(message: error.localizedDescription))
                 continuation.finish()
                 return
             }

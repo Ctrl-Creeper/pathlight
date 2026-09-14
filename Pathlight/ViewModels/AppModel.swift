@@ -17,7 +17,7 @@ final class AppModel: ObservableObject {
     @Published var lastErrorMessage: String?
     /// Recording health. Shown as a banner beside the data it affects, because
     /// a modal alert interrupts without offering anything to act on.
-    @Published var monitoringStatusMessage: String?
+    @Published private(set) var monitoringStatusMessage: String?
     @Published private(set) var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
     @Published private(set) var liveWatchSession: WatchSessionModel?
     @Published private(set) var activityHistory: ActivityHistorySnapshot?
@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     private var fullDiskAccessRefreshTask: Task<Void, Never>?
     private var liveWatchTask: Task<Void, Never>?
     private var liveWatchTaskID: UUID?
+    private var liveWatcherStatusKey: String?
     private var liveWatchBaselineTask: Task<Void, Never>?
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
@@ -80,6 +81,13 @@ final class AppModel: ObservableObject {
     private var journalFlushImmediatelyRequested = false
     private var journalStorageBlocked = false
     private var journalFlushFailureCount = 0
+    private enum MonitoringStatusSource: Hashable {
+        case journal
+        case encryptionKey
+        case paused
+    }
+    private var monitoringStatusMessages: [MonitoringStatusSource: String] = [:]
+    private var watcherStartFailures: [String: String] = [:]
     /// Invalidates continuations from an append that was already in flight
     /// when the user deleted all history.
     private var journalGeneration: UInt64 = 0
@@ -338,7 +346,7 @@ final class AppModel: ObservableObject {
                 self.activityStorageResetID = nil
                 self.journalStorageBlocked = false
                 self.journalFlushFailureCount = 0
-                self.monitoringStatusMessage = nil
+                self.setMonitoringStatus(nil, for: .journal)
                 self.activityStorageUsage = .empty
                 self.activityHistory = nil
                 self.activityDashboardHistories.removeAll()
@@ -387,9 +395,15 @@ final class AppModel: ObservableObject {
     ) {
         stopShortTermWatch()
         guard !isMonitoringPaused else {
-            monitoringStatusMessage = "Monitoring is paused. Resume it and this folder starts again."
+            setMonitoringStatus(
+                "Monitoring is paused. Resume it and this folder starts again.",
+                for: .paused
+            )
             return
         }
+
+        let watcherStatusKey = "live:\(rootPath.standardizedFileURL.path)"
+        liveWatcherStatusKey = watcherStatusKey
 
         let taskID = UUID()
         liveWatchTaskID = taskID
@@ -409,6 +423,7 @@ final class AppModel: ObservableObject {
                 if self.liveWatchTaskID == taskID {
                     self.liveWatchTask = nil
                     self.liveWatchTaskID = nil
+                    self.liveWatchSession = nil
                 }
             }
 
@@ -421,6 +436,15 @@ final class AppModel: ObservableObject {
             for await session in stream {
                 guard !Task.isCancelled, self.liveWatchTaskID == taskID else {
                     break
+                }
+                if let message = session.startFailureMessage {
+                    self.reportWatcherStartFailure(
+                        key: watcherStatusKey,
+                        rootPath: session.rootPath,
+                        message: message
+                    )
+                } else if session.receivedStreamEventCount > 0 {
+                    self.clearWatcherStartFailure(key: watcherStatusKey)
                 }
                 if session.receivedStreamEventCount > 0, self.liveWatchBaselineTask == nil {
                     self.liveWatchBaselineTask = Task.detached {
@@ -441,6 +465,10 @@ final class AppModel: ObservableObject {
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
         liveWatchSession = nil
+        if let liveWatcherStatusKey {
+            clearWatcherStartFailure(key: liveWatcherStatusKey)
+            self.liveWatcherStatusKey = nil
+        }
     }
 
     // MARK: - Journal persistence
@@ -535,7 +563,7 @@ final class AppModel: ObservableObject {
                 return
             }
             journalFlushFailureCount = 0
-            monitoringStatusMessage = nil
+            setMonitoringStatus(nil, for: .journal)
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             for entry in batch.entries {
@@ -576,7 +604,10 @@ final class AppModel: ObservableObject {
             pendingJournalOrder.removeAll()
             pendingJournalRoots.removeAll()
             pendingJournalSince = nil
-            monitoringStatusMessage = "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts."
+            setMonitoringStatus(
+                "Activity history storage became inconsistent. Monitoring continues, but recording is paused until Pathlight restarts.",
+                for: .journal
+            )
         } catch {
             guard generation == journalGeneration else {
                 discardInFlightJournalBatch(batch)
@@ -587,7 +618,10 @@ final class AppModel: ObservableObject {
             restorePendingJournalBatch(batch)
             journalFlushFailureCount += 1
             if journalFlushFailureCount >= Self.journalFlushFailureReportThreshold {
-                monitoringStatusMessage = "Pathlight could not write activity history. Monitoring continues and recording keeps retrying."
+                setMonitoringStatus(
+                    "Pathlight could not write activity history. Monitoring continues and recording keeps retrying.",
+                    for: .journal
+                )
             }
         }
         if !pendingJournalEvents.isEmpty {
@@ -696,7 +730,10 @@ final class AppModel: ObservableObject {
     /// answer to a legacy Keychain migration prompt stays quiet.
     nonisolated private static let activityStorageKeyWarmUpAttempts = 3
     private func reportActivityStorageKeyUnavailable() {
-        monitoringStatusMessage = "Pathlight could not access its activity encryption key. Recording continues when the key becomes available."
+        setMonitoringStatus(
+            "Pathlight could not access its activity encryption key. Recording continues when the key becomes available.",
+            for: .encryptionKey
+        )
     }
     /// Doubles per consecutive failure so a stalled store is retried without
     /// spinning, and stays at one second while flushes are succeeding.
@@ -1165,9 +1202,11 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(paused, forKey: Self.monitoringPausedKey)
         note(paused ? "monitoring paused" : "monitoring resumed")
         guard paused else {
+            setMonitoringStatus(nil, for: .paused)
             startEnabledLongTermWatches()
             return
         }
+        setMonitoringStatus("Monitoring is paused.", for: .paused)
         stopShortTermWatch()
         stopAllLongTermWatches()
     }
@@ -1195,6 +1234,7 @@ final class AppModel: ObservableObject {
         stopLongTermWatch(targetID: target.id)
 
         let taskID = UUID()
+        let watcherStatusKey = "long-term:\(target.id)"
         longTermWatchTaskIDs[target.id] = taskID
         updateLongTermWatchRuntimeStatus(
             targetID: target.id,
@@ -1247,6 +1287,15 @@ final class AppModel: ObservableObject {
                         break
                     }
 
+                    if let message = session.startFailureMessage {
+                        self.reportWatcherStartFailure(
+                            key: watcherStatusKey,
+                            rootPath: currentTarget.rootPath,
+                            message: message
+                        )
+                        continue
+                    }
+
                     // The coordinator yields once before the monitor stream produces
                     // anything, so only later yields prove the watch is alive; resetting
                     // on the first would defeat the reconnect backoff for dead watches.
@@ -1254,6 +1303,7 @@ final class AppModel: ObservableObject {
                         isInitialSessionYield = false
                     } else {
                         retryCount = 0
+                        self.clearWatcherStartFailure(key: watcherStatusKey)
                     }
                     let existingCheckpoint = self.pendingJournalCheckpoints[rootKey]
                         ?? self.longTermWatchTargets.first(where: { $0.id == target.id })?.checkpoint
@@ -1363,6 +1413,7 @@ final class AppModel: ObservableObject {
         longTermWatchTasks[targetID]?.cancel()
         longTermWatchTasks[targetID] = nil
         longTermWatchTaskIDs[targetID] = nil
+        clearWatcherStartFailure(key: "long-term:\(targetID)")
         updateLongTermWatchRuntimeStatus(targetID: targetID, state: .paused, retryCount: 0)
     }
 
@@ -1374,6 +1425,7 @@ final class AppModel: ObservableObject {
         longTermWatchTasks.removeAll()
         longTermWatchTaskIDs.removeAll()
         for target in longTermWatchTargets {
+            clearWatcherStartFailure(key: "long-term:\(target.id)")
             updateLongTermWatchRuntimeStatus(targetID: target.id, state: .paused, retryCount: 0)
         }
     }
@@ -1438,6 +1490,31 @@ final class AppModel: ObservableObject {
     /// same file for the other two hosts.
     private func note(_ line: String) {
         dependencies.diary?.note(line)
+    }
+
+    private func setMonitoringStatus(
+        _ message: String?,
+        for source: MonitoringStatusSource
+    ) {
+        monitoringStatusMessages[source] = message
+        refreshMonitoringStatusMessage()
+    }
+
+    private func reportWatcherStartFailure(key: String, rootPath: URL, message: String) {
+        watcherStartFailures[key] = "Pathlight could not start monitoring \(rootPath.path). This folder is not being watched: \(message)"
+        refreshMonitoringStatusMessage()
+    }
+
+    private func clearWatcherStartFailure(key: String) {
+        watcherStartFailures.removeValue(forKey: key)
+        refreshMonitoringStatusMessage()
+    }
+
+    private func refreshMonitoringStatusMessage() {
+        monitoringStatusMessage = monitoringStatusMessages[.journal]
+            ?? monitoringStatusMessages[.encryptionKey]
+            ?? watcherStartFailures.sorted(by: { $0.key < $1.key }).first?.value
+            ?? monitoringStatusMessages[.paused]
     }
 
     /// Every message the window shows about trouble is also written down, once

@@ -18,6 +18,7 @@ nonisolated enum DiskActivityStreamEvent: Equatable, Sendable {
     case change(DiskActivityChange, eventID: UInt64)
     case historyCaughtUp(eventID: UInt64)
     case requiresRescan(eventID: UInt64)
+    case startFailed(message: String)
 }
 
 nonisolated enum DiskActivityEventKind: Equatable, Codable, Sendable, CaseIterable {

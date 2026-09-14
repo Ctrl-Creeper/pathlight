@@ -21,7 +21,7 @@ use std::time::Duration;
 use eframe::egui;
 use pathlight_core::history::Query;
 use pathlight_core::monitor::watcher_capabilities;
-use pathlight_core::store::{Storage, WatchTarget, HISTORY_ROWS};
+use pathlight_core::store::{Storage, WatchStartConfiguration, WatchTarget, HISTORY_ROWS};
 use pathlight_core::text::{elapsed, human_bytes, kind_label, leaf};
 use pathlight_core::watch::Session;
 use pathlight_core::{paths, uninstall, ActivityEvent, Confidence, HistorySnapshot};
@@ -364,7 +364,7 @@ impl App {
             false => {
                 self.starting = self
                     .storage()
-                    .map(|storage| (root.to_owned(), settings::StartDraft::read(storage)));
+                    .map(|storage| (root.to_owned(), settings::StartDraft::read(storage, root)));
             }
         }
     }
@@ -382,10 +382,25 @@ impl App {
                 options.minimum_recorded_byte_delta = configuration.minimum_recorded_byte_delta;
                 (options, configuration.latency_ms)
             }
-            None => (storage.options(), storage.latency_ms()),
+            None => {
+                let configuration = storage.watch_start_configuration(root);
+                let mut options = storage.options();
+                options.minimum_recorded_byte_delta = configuration.minimum_recorded_byte_delta;
+                (options, configuration.latency_ms)
+            }
         };
-        match Session::start_configured(root, storage, options, latency_ms, notify::post) {
+        match Session::start_configured(root, storage.clone(), options, latency_ms, notify::post) {
             Ok(session) => {
+                if let Some(configuration) = configuration {
+                    let configuration = WatchStartConfiguration {
+                        minimum_recorded_byte_delta: configuration.minimum_recorded_byte_delta,
+                        latency_ms: configuration.latency_ms,
+                    };
+                    if let Err(error) = storage.set_watch_start_configuration(root, configuration) {
+                        self.notice = Some(format!("Could not save monitoring settings: {error}"));
+                        return false;
+                    }
+                }
                 self.sessions.insert(root.to_owned(), session);
                 true
             }
@@ -1785,6 +1800,52 @@ mod tests {
         next.watches = Storage::at(storage_dir.path()).watches();
         next.resume();
         assert!(next.sessions.is_empty(), "a stopped watch came back");
+    }
+
+    #[test]
+    fn a_watch_reopens_with_its_confirmed_reporting_interval() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+
+        harness.get_by_label("Watch").click();
+        harness.run();
+        harness
+            .get_by_label("Report changes every (milliseconds)")
+            .focus();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_by_label("Report changes every (milliseconds)")
+            .type_text("750");
+        harness.run();
+        harness.get_by_label("Start monitoring").click();
+        harness.step();
+        drop(harness);
+
+        let storage = Storage::at(storage_dir.path());
+        let mut next = app(
+            storage_dir.path(),
+            storage
+                .watches()
+                .into_iter()
+                .map(|watch| watch.path)
+                .collect(),
+        );
+        next.watches = storage.watches();
+        next.resume();
+        let last_open = storage
+            .log_tail(20)
+            .lines()
+            .rev()
+            .find(|line| line.contains("watch opened"))
+            .unwrap_or_default()
+            .to_owned();
+
+        assert!(
+            last_open.contains("flushing every 750 ms"),
+            "the resumed watch lost its startup interval: {last_open}"
+        );
     }
 
     /// The promise the tray exists to keep: putting the window away must not

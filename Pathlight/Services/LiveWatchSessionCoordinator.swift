@@ -48,7 +48,9 @@ struct LiveWatchSessionCoordinator: Sendable {
                         break
                     }
                     session.clearLatestChanges()
-                    if case .requiresRescan = streamEvent {
+                    if case let .startFailed(message) = streamEvent {
+                        session.recordStartFailure(message)
+                    } else if case .requiresRescan = streamEvent {
                         session.recordStreamEvent(isGap: true)
                     } else {
                         session.recordStreamEvent(isGap: false)
@@ -91,6 +93,8 @@ struct LiveWatchSessionCoordinator: Sendable {
                     case let .requiresRescan(eventID):
                         session.record(eventID: eventID)
                         session.setHistoryState(.gapDetected)
+                    case .startFailed:
+                        break
                     }
                     continuation.yield(session)
                 }

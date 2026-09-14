@@ -8,7 +8,7 @@ use std::time::Duration;
 use pathlight_core::history::Query;
 use pathlight_core::store::{Storage, BACKGROUND_LATENCY_MS, HISTORY_ROWS, INTERACTIVE_LATENCY_MS};
 use pathlight_core::text::{alert_body, alert_title, human_bytes, kind_label};
-use pathlight_core::{paths, ActivityEvent, AggregationOptions};
+use pathlight_core::{bounded_monitor_latency_ms, paths, ActivityEvent, AggregationOptions};
 
 /// Whether the reading commands answer a program instead of a person.
 ///
@@ -453,12 +453,14 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             "nothing to watch: name a folder, or switch one on with `watches enable FOLDER`",
         ));
     }
-    let mut options = storage.options();
-    if let Some(minimum) = request.minimum_recorded_byte_delta {
-        options.minimum_recorded_byte_delta = minimum;
-    }
-    let latency_ms = request.latency_ms.unwrap_or_else(|| storage.latency_ms());
-    let mut sessions = open_watch_sessions(&roots, &storage, options, latency_ms)?;
+    let options = storage.options();
+    let mut sessions = open_watch_sessions(
+        &roots,
+        &storage,
+        options,
+        request.minimum_recorded_byte_delta,
+        request.latency_ms,
+    )?;
     println!(
         "Recording to {}. Press Ctrl-C to stop.",
         storage.journal().display()
@@ -472,7 +474,13 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
                 sessions.clear();
                 println!("Monitoring paused.");
             } else {
-                sessions = open_watch_sessions(&roots, &storage, options, latency_ms)?;
+                sessions = open_watch_sessions(
+                    &roots,
+                    &storage,
+                    options,
+                    request.minimum_recorded_byte_delta,
+                    request.latency_ms,
+                )?;
                 println!("Monitoring resumed.");
             }
             was_paused = paused;
@@ -514,7 +522,7 @@ fn watch_request(rest: &[OsString]) -> io::Result<WatchRequest> {
     let minimum_recorded_byte_delta = take_bytes(&mut roots, "--min-delta-bytes")?;
     let latency_ms = match take_value(&mut roots, "--interval-ms")? {
         None => None,
-        Some(value) => Some(
+        Some(value) => Some(bounded_monitor_latency_ms(
             value
                 .parse::<u64>()
                 .ok()
@@ -525,7 +533,7 @@ fn watch_request(rest: &[OsString]) -> io::Result<WatchRequest> {
                         "--interval-ms needs a positive whole number",
                     )
                 })?,
-        ),
+        )),
     };
     Ok(WatchRequest {
         roots,
@@ -537,8 +545,9 @@ fn watch_request(rest: &[OsString]) -> io::Result<WatchRequest> {
 fn open_watch_sessions(
     roots: &[String],
     storage: &Storage,
-    options: AggregationOptions,
-    latency_ms: u64,
+    base_options: AggregationOptions,
+    minimum_recorded_byte_delta: Option<i64>,
+    latency_ms: Option<u64>,
 ) -> io::Result<Vec<WatchedSession>> {
     let mut sessions = Vec::new();
     for root in roots {
@@ -551,6 +560,11 @@ fn open_watch_sessions(
                 format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
             ));
         }
+        let stored = storage.watch_start_configuration(root);
+        let mut options = base_options;
+        options.minimum_recorded_byte_delta =
+            minimum_recorded_byte_delta.unwrap_or(stored.minimum_recorded_byte_delta);
+        let latency_ms = latency_ms.unwrap_or(stored.latency_ms);
         let session = pathlight_core::watch::Session::start_configured(
             root,
             storage.clone(),
@@ -1253,5 +1267,24 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("positive"));
+    }
+
+    #[test]
+    fn watch_bounds_intervals_to_the_supported_range() {
+        let fast = watch_request(&[
+            OsString::from("--interval-ms"),
+            OsString::from("1"),
+            OsString::from("/watched"),
+        ])
+        .unwrap();
+        assert_eq!(fast.latency_ms, Some(250));
+
+        let slow = watch_request(&[
+            OsString::from("--interval-ms"),
+            OsString::from(u64::MAX.to_string()),
+            OsString::from("/watched"),
+        ])
+        .unwrap();
+        assert_eq!(slow.latency_ms, Some(300_000));
     }
 }

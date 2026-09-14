@@ -11,6 +11,13 @@ use std::time::{Duration, SystemTime};
 
 use crate::CoreError;
 
+pub const MIN_MONITOR_LATENCY_MS: u64 = 250;
+pub const MAX_MONITOR_LATENCY_MS: u64 = 300_000;
+
+pub fn bounded_monitor_latency_ms(latency_ms: u64) -> u64 {
+    latency_ms.clamp(MIN_MONITOR_LATENCY_MS, MAX_MONITOR_LATENCY_MS)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum ChangeKind {
     Created,
@@ -140,7 +147,7 @@ impl Watcher {
     ) -> Result<Arc<Self>, CoreError> {
         let root = crate::paths::normalize(&root_path);
         let emitter = Arc::new(Emitter { root, listener });
-        let latency = Duration::from_millis(latency_ms.max(1));
+        let latency = Duration::from_millis(bounded_monitor_latency_ms(latency_ms));
         let backend = platform::start(emitter, since_event_id, latency)?;
         Ok(Arc::new(Self {
             inner: Mutex::new(Some(backend)),

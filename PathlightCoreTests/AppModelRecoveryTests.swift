@@ -149,6 +149,38 @@ final class AppModelRecoveryTests: XCTestCase {
         }
     }
 
+    func testJournalSuccessDoesNotClearWatcherFailure() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "durable.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 43
+        ))
+        try await eventually("journal append started") { store.appendStarted }
+        monitor.failStart(root: root)
+        try await eventually("watcher failure reported") {
+            model.monitoringStatusMessage?.contains("not being watched") == true
+        }
+
+        store.release()
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(model.monitoringStatusMessage?.contains("not being watched") == true)
+    }
+
     func testUnavailableEncryptionKeyIsReportedAtLaunch() async throws {
         let monitor = RecoveryTestMonitor()
         let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
@@ -507,6 +539,12 @@ private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Send
 
     func finish() {
         let current = lock.withLock { continuation }
+        current?.finish()
+    }
+
+    func failStart(root: URL) {
+        let current = lock.withLock { continuation }
+        current?.yield(.startFailed(message: "injected start failure"))
         current?.finish()
     }
 }

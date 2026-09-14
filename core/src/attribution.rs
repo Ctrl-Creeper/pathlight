@@ -480,27 +480,18 @@ impl<'a> Attributor<'a> {
         let events: Vec<AttributedEvent> = changes
             .iter()
             .filter_map(|change| self.event_for(change))
-            .map(|event| {
-                let threshold_exempt = matches!(event.kind, EventKind::Deleted | EventKind::Moved);
-                AttributedEvent {
-                    event,
-                    threshold_exempt,
-                }
-            })
+            .map(|event| AttributedEvent { event })
             .collect();
         let mut events = self.aggregate(events);
-        events.retain(|event| self.is_recordable(&event.event, event.threshold_exempt));
+        events.retain(|event| self.is_recordable(&event.event));
         events.into_iter().map(|event| event.event).collect()
     }
 
     /// The size filter runs *after* aggregation so a folder's worth of small
-    /// changes is judged as one change. Removals and moves skip it entirely:
-    /// wiping tiny files or renaming one without changing its size are both
-    /// filesystem changes the byte threshold must not hide.
-    fn is_recordable(&self, event: &ActivityEvent, threshold_exempt: bool) -> bool {
-        if threshold_exempt {
-            return true;
-        }
+    /// changes is judged as one change. A known deletion or move follows the
+    /// same byte-delta rule; unknown changes remain visible because there is
+    /// no reliable value to compare with the threshold.
+    fn is_recordable(&self, event: &ActivityEvent) -> bool {
         match event.byte_delta {
             Some(delta) => delta.saturating_abs() >= self.options.minimum_recorded_byte_delta,
             None => true,
@@ -619,7 +610,6 @@ impl<'a> Attributor<'a> {
 /// "do not record file names" means.
 struct AttributedEvent {
     event: ActivityEvent,
-    threshold_exempt: bool,
 }
 
 fn aggregate_group(mut events: Vec<AttributedEvent>) -> AttributedEvent {
@@ -667,10 +657,7 @@ fn aggregate_group(mut events: Vec<AttributedEvent>) -> AttributedEvent {
                 .all(|event| event.event.process_name.as_deref() == Some(name.as_str()))
         }),
     };
-    AttributedEvent {
-        event,
-        threshold_exempt: events.iter().any(|event| event.threshold_exempt),
-    }
+    AttributedEvent { event }
 }
 
 pub(crate) fn parent_of(path: &str) -> String {

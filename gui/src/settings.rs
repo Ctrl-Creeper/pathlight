@@ -6,6 +6,7 @@
 //! values.
 
 use eframe::egui;
+use pathlight_core::bounded_monitor_latency_ms;
 use pathlight_core::exclusion::DEFAULT_PATTERNS;
 use pathlight_core::store::{Storage, DEFAULT_AGGREGATION_WINDOW_SECS};
 use pathlight_core::text::human_bytes;
@@ -135,14 +136,15 @@ pub struct StartConfiguration {
 }
 
 impl StartDraft {
-    pub fn read(storage: &Storage) -> Self {
-        let least_bytes = storage.options().minimum_recorded_byte_delta;
+    pub fn read(storage: &Storage, root: &str) -> Self {
+        let configuration = storage.watch_start_configuration(root);
+        let least_bytes = configuration.minimum_recorded_byte_delta;
         let least_kb = display_kilobytes(least_bytes);
         Self {
             least_kb: least_kb.clone(),
             least_bytes,
             initial_least_kb: least_kb,
-            latency_ms: storage.latency_ms().to_string(),
+            latency_ms: configuration.latency_ms.to_string(),
             message: None,
         }
     }
@@ -203,7 +205,7 @@ impl StartDraft {
             } else {
                 least
             },
-            latency_ms,
+            latency_ms: bounded_monitor_latency_ms(latency_ms),
         })
     }
 }
@@ -731,7 +733,7 @@ mod tests {
         draft.save(&storage).unwrap();
         assert_eq!(storage.options().minimum_recorded_byte_delta, 4_000);
 
-        let draft = StartDraft::read(&storage);
+        let draft = StartDraft::read(&storage, "/watched");
         assert_eq!(draft.least_kb, "4");
         let configuration = draft.save().unwrap();
         assert_eq!(configuration.minimum_recorded_byte_delta, 4_000);

@@ -1753,8 +1753,9 @@ open class Watcher: WatcherProtocol, @unchecked Sendable {
      *
      * `since_event_id` resumes from a previous cursor where the platform supports
      * it (FSEvents); elsewhere a `RequiresRescan` is emitted so the host
-     * re-baselines. `latency_ms` is the FSEvents coalescing window; inotify
-     * delivers immediately and waits up to 250 ms only for unmatched renames.
+     * re-baselines. `latency_ms` is the native coalescing window where the
+     * backend supports one; the shared watch worker also uses it to batch
+     * immediate inotify, fanotify and USN notifications before recording.
      */
 public static func start(rootPath: String, sinceEventId: UInt64?, latencyMs: UInt64, listener: ActivityListener)throws  -> Watcher  {
     return try  FfiConverterTypeWatcher_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
@@ -3447,7 +3448,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_constructor_journal_new() != 12772) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 44487) {
+    if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 7813) {
         return InitializationResult.apiChecksumMismatch
     }
 
