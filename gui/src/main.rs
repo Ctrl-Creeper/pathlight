@@ -1787,6 +1787,52 @@ mod tests {
         assert!(next.sessions.is_empty(), "a stopped watch came back");
     }
 
+    #[test]
+    fn a_watch_reopens_with_its_confirmed_reporting_interval() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
+
+        harness.get_by_label("Watch").click();
+        harness.run();
+        harness
+            .get_by_label("Report changes every (milliseconds)")
+            .focus();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_by_label("Report changes every (milliseconds)")
+            .type_text("750");
+        harness.run();
+        harness.get_by_label("Start monitoring").click();
+        harness.step();
+        drop(harness);
+
+        let storage = Storage::at(storage_dir.path());
+        let mut next = app(
+            storage_dir.path(),
+            storage
+                .watches()
+                .into_iter()
+                .map(|watch| watch.path)
+                .collect(),
+        );
+        next.watches = storage.watches();
+        next.resume();
+        let last_open = storage
+            .log_tail(20)
+            .lines()
+            .rev()
+            .find(|line| line.contains("watch opened"))
+            .unwrap_or_default()
+            .to_owned();
+
+        assert!(
+            last_open.contains("flushing every 750 ms"),
+            "the resumed watch lost its startup interval: {last_open}"
+        );
+    }
+
     /// The promise the tray exists to keep: putting the window away must not
     /// put the watches away. Driven through the methods the close request and
     /// the menu drive, because a real tray icon needs the platform's event

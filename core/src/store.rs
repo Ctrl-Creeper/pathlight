@@ -1122,6 +1122,18 @@ mod tests {
         assert_eq!(Storage::at(dir.path()).retention(), (30, 2_000_000));
     }
 
+    #[test]
+    fn watcher_latency_is_bounded_before_it_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+
+        storage.set_latency_ms(1).unwrap();
+        assert_eq!(storage.latency_ms(), 250);
+
+        storage.set_latency_ms(u64::MAX).unwrap();
+        assert_eq!(storage.latency_ms(), 300_000);
+    }
+
     /// The diary answers "what happened while nobody was looking", so what it
     /// must never do is grow without a bound or lose the newest line to the
     /// trim that bounds it.

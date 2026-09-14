@@ -125,6 +125,18 @@ final class AppModelDependencyTests: XCTestCase {
         XCTAssertNotEqual(model.longTermWatchRuntimeStatuses[rootPath.path]?.state, .paused)
     }
 
+    func testFinishedLiveMonitorIsNotLeftActive() async throws {
+        let model = AppModel(dependencies: makeDependencies())
+        defer { model.cleanup() }
+
+        model.startShortTermWatch(
+            rootPath: URL(filePath: "/tmp/pathlight-tests/finished", directoryHint: .isDirectory)
+        )
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertNil(model.liveWatchSession)
+    }
+
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "AppModelDependencyTests.\(UUID().uuidString)")!
     }

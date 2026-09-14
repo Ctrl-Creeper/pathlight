@@ -1254,4 +1254,23 @@ mod tests {
 
         assert!(error.to_string().contains("positive"));
     }
+
+    #[test]
+    fn watch_bounds_intervals_to_the_supported_range() {
+        let fast = watch_request(&[
+            OsString::from("--interval-ms"),
+            OsString::from("1"),
+            OsString::from("/watched"),
+        ])
+        .unwrap();
+        assert_eq!(fast.latency_ms, Some(250));
+
+        let slow = watch_request(&[
+            OsString::from("--interval-ms"),
+            OsString::from(u64::MAX.to_string()),
+            OsString::from("/watched"),
+        ])
+        .unwrap();
+        assert_eq!(slow.latency_ms, Some(300_000));
+    }
 }

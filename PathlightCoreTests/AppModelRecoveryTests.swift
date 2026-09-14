@@ -149,6 +149,38 @@ final class AppModelRecoveryTests: XCTestCase {
         }
     }
 
+    func testJournalSuccessDoesNotClearWatcherFailure() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let store = BlockingRecoveryEventStore()
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, eventStore: store)
+        defer { store.release(); model.cleanup() }
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("watcher ready") {
+            model.longTermWatchTargets.first?.checkpoint?.eventID == 1
+        }
+
+        monitor.send(.change(
+            DiskActivityChange(
+                kind: .created,
+                path: root.appending(path: "durable.bin"),
+                rootPath: root,
+                timestamp: Date()
+            ),
+            eventID: 43
+        ))
+        try await eventually("journal append started") { store.appendStarted }
+        monitor.failStart(root: root)
+        try await eventually("watcher failure reported") {
+            model.monitoringStatusMessage?.contains("not being watched") == true
+        }
+
+        store.release()
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(model.monitoringStatusMessage?.contains("not being watched") == true)
+    }
+
     func testUnavailableEncryptionKeyIsReportedAtLaunch() async throws {
         let monitor = RecoveryTestMonitor()
         let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
@@ -472,12 +504,18 @@ final class AppModelRecoveryTests: XCTestCase {
     }
 }
 
-private enum RecoveryTestError: Error { case timedOut }
+private enum RecoveryTestError: Error { case timedOut, startFailed }
 
 private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<DiskActivityStreamEvent>.Continuation?
     private var sinceEventIDs: [UInt64?] = []
+    private var startFailure: (@Sendable (Error, URL) -> Void)?
+
+    var onStartFailure: (@Sendable (Error, URL) -> Void)? {
+        get { lock.withLock { startFailure } }
+        set { lock.withLock { startFailure = newValue } }
+    }
 
     var isSubscribed: Bool {
         lock.lock()
@@ -508,6 +546,11 @@ private final class RecoveryTestMonitor: DiskActivityMonitoring, @unchecked Send
     func finish() {
         let current = lock.withLock { continuation }
         current?.finish()
+    }
+
+    func failStart(root: URL) {
+        let callback = lock.withLock { startFailure }
+        callback?(RecoveryTestError.startFailed, root)
     }
 }
 

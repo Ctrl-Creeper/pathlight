@@ -187,9 +187,7 @@ fn modifications_report_growth_and_moves_inside_root_net_out() {
 }
 
 #[test]
-fn small_deletions_survive_the_size_threshold() {
-    // A long-term watch filters small *writes* as noise, but a hundred tiny
-    // files vanishing is the exact event the threshold exists to surface.
+fn small_deletions_respect_the_size_threshold() {
     let prior = |_: &str| Some(4_096);
     let none = |_: &str| None;
     let attributor = Attributor::new(
@@ -205,12 +203,11 @@ fn small_deletions_survive_the_size_threshold() {
         change(ChangeKind::Deleted, "a.txt", 1),
         change(ChangeKind::Deleted, "b.txt", 2),
     ]);
-    assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|e| e.byte_delta == Some(-4_096)));
+    assert!(events.is_empty());
 }
 
 #[test]
-fn renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
+fn zero_growth_renames_respect_the_size_threshold() {
     let current = |_: &str| Some(4_096);
     let prior = |_: &str| Some(4_096);
     let none = |_: &str| None;
@@ -232,13 +229,11 @@ fn renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
         1,
     )]);
 
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, EventKind::Moved);
-    assert_eq!(events[0].byte_delta, Some(0));
+    assert!(events.is_empty());
 }
 
 #[test]
-fn aggregated_renames_survive_the_size_threshold_when_their_net_growth_is_zero() {
+fn aggregated_zero_growth_renames_respect_the_size_threshold() {
     let current = |_: &str| Some(4_096);
     let prior = |_: &str| Some(4_096);
     let none = |_: &str| None;
@@ -263,14 +258,11 @@ fn aggregated_renames_survive_the_size_threshold_when_their_net_growth_is_zero()
         1,
     )]);
 
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, EventKind::Aggregate);
-    assert_eq!(events[0].path, ROOT);
-    assert_eq!(events[0].byte_delta, Some(0));
+    assert!(events.is_empty());
 }
 
 #[test]
-fn an_aggregated_removal_survives_when_arrivals_make_the_net_change_small() {
+fn an_aggregated_removal_is_filtered_when_the_net_change_is_small() {
     let current = |path: &str| path.ends_with("arrived.txt").then_some(4_000);
     let prior = |path: &str| path.ends_with("gone.txt").then_some(4_096);
     let none = |_: &str| None;
@@ -292,10 +284,7 @@ fn an_aggregated_removal_survives_when_arrivals_make_the_net_change_small() {
         change(ChangeKind::Created, "arrived.txt", 2),
     ]);
 
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, EventKind::Aggregate);
-    assert_eq!(events[0].byte_delta, Some(-96));
-    assert_eq!(events[0].affected_item_count, 2);
+    assert!(events.is_empty());
 }
 
 #[test]
