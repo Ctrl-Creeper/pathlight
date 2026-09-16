@@ -1042,8 +1042,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Everything that decides what this watch records, applied in one edit so
-    /// changing two of them restarts the stream once.
+    /// Everything that decides what this watch records and how soon it says
+    /// so, applied in one edit so changing two of them restarts the stream
+    /// once.
     ///
     /// A byte bound of nil is no bound. Zero would read as one — "at least 0
     /// bytes" excludes nothing but claims to be a limit — so the editor sends
@@ -1051,6 +1052,7 @@ final class AppModel: ObservableObject {
     func setRecordingFilters(
         patterns: [String],
         minimumRecordedByteDelta: Int64,
+        monitorLatency: TimeInterval,
         minimumFileBytes: Int64?,
         maximumFileBytes: Int64?,
         rootPath: URL
@@ -1058,6 +1060,8 @@ final class AppModel: ObservableObject {
         editOptions(rootPath: rootPath) { options in
             options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
             options.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
+            options.monitorLatency = MonitoringStartConfiguration
+                .boundedMonitorLatency(monitorLatency)
             options.minimumFileBytes = minimumFileBytes
             options.maximumFileBytes = maximumFileBytes
         }

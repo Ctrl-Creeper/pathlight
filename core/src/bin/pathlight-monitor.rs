@@ -1071,9 +1071,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
             "{} ms  ({})",
             storage.latency_ms(),
             match storage.latency_ms() {
-                INTERACTIVE_LATENCY_MS => "immediate",
-                value if value >= BACKGROUND_LATENCY_MS => "power-saving",
-                _ => "custom",
+                INTERACTIVE_LATENCY_MS => "immediate; wakes this machine most often",
+                value if value >= BACKGROUND_LATENCY_MS =>
+                    "power-saving; a burst of edits arrives as fewer rows",
+                _ => "custom; nothing is lost either way, only when you hear about it",
             }
         ),
     );

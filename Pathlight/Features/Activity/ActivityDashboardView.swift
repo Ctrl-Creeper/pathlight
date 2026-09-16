@@ -10,7 +10,7 @@ struct ActivityDashboardActions {
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
-    let setRecordingFilters: ([String], Int64, Int64?, Int64?, URL) -> Void
+    let setRecordingFilters: ([String], Int64, TimeInterval, Int64?, Int64?, URL) -> Void
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
     let addFolder: (MonitoringStartConfiguration) -> Void
@@ -242,9 +242,10 @@ struct ActivityDashboardView: View {
                         onSetGrowthAlertThreshold: {
                             actions.setGrowthAlertThreshold($0, row.rootPath)
                         },
-                        onSetRecordingFilters: { patterns, minimumDelta, minimumBytes, maximumBytes in
+                        onSetRecordingFilters: { patterns, minimumDelta, latency, minimumBytes, maximumBytes in
                             actions.setRecordingFilters(
-                                patterns, minimumDelta, minimumBytes, maximumBytes, row.rootPath
+                                patterns, minimumDelta, latency, minimumBytes, maximumBytes,
+                                row.rootPath
                             )
                         }
                     )
@@ -423,6 +424,11 @@ private struct MonitoringStartConfigurationView: View {
                         }
                     }
                 }
+
+                Text("A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it. Both of these stay editable while the watch runs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .formStyle(.grouped)
 
@@ -458,7 +464,7 @@ private struct ActivityDashboardTargetRow: View {
     let onRemove: () -> Void
     let onClearHistoryGap: () -> Void
     let onSetGrowthAlertThreshold: (Int64?) -> Void
-    let onSetRecordingFilters: ([String], Int64, Int64?, Int64?) -> Void
+    let onSetRecordingFilters: ([String], Int64, TimeInterval, Int64?, Int64?) -> Void
 
     @State private var showsExclusionEditor = false
 
@@ -576,6 +582,7 @@ private struct ActivityDashboardTargetRow: View {
                     ActivityRecordingFilterEditor(
                         patterns: row.exclusionPatterns,
                         minimumRecordedByteDelta: row.minimumRecordedByteDelta,
+                        monitorLatency: row.monitorLatency,
                         minimumFileBytes: row.minimumFileBytes,
                         maximumFileBytes: row.maximumFileBytes,
                         onApply: onSetRecordingFilters
@@ -683,10 +690,11 @@ private struct ActivityLaunchAtLoginNudge: View {
 }
 
 private struct ActivityRecordingFilterEditor: View {
-    let onApply: ([String], Int64, Int64?, Int64?) -> Void
+    let onApply: ([String], Int64, TimeInterval, Int64?, Int64?) -> Void
 
     @State private var text: String
     @State private var deltaText: String
+    @State private var latencyText: String
     @State private var minimumText: String
     @State private var maximumText: String
     @Environment(\.dismiss) private var dismiss
@@ -707,16 +715,35 @@ private struct ActivityRecordingFilterEditor: View {
         return value
     }
 
+    /// The typed wait, or nil when the box is not a number inside the range the
+    /// watcher accepts. Out of range is nil rather than clamped: a box that
+    /// silently becomes a different number is how a person stops trusting it.
+    private var latencySeconds: TimeInterval? {
+        let trimmed = latencyText.trimmingCharacters(in: .whitespaces)
+        guard let value = Double(trimmed),
+              value >= MonitoringStartConfiguration.minimumMonitorLatency,
+              value <= MonitoringStartConfiguration.maximumMonitorLatency else {
+            return nil
+        }
+        return value
+    }
+
+    private static func latencyText(for seconds: TimeInterval) -> String {
+        seconds == seconds.rounded() ? String(Int(seconds)) : String(format: "%.2f", seconds)
+    }
+
     init(
         patterns: [String],
         minimumFileBytes: Int64?,
         maximumFileBytes: Int64?,
         minimumRecordedByteDelta: Int64,
-        onApply: @escaping ([String], Int64, Int64?, Int64?) -> Void
+        monitorLatency: TimeInterval,
+        onApply: @escaping ([String], Int64, TimeInterval, Int64?, Int64?) -> Void
     ) {
         self.onApply = onApply
         _text = State(initialValue: patterns.joined(separator: "\n"))
         _deltaText = State(initialValue: String(max(minimumRecordedByteDelta, 0)))
+        _latencyText = State(initialValue: Self.latencyText(for: monitorLatency))
         _minimumText = State(initialValue: Self.unitText(for: minimumFileBytes))
         _maximumText = State(initialValue: Self.unitText(for: maximumFileBytes))
     }
@@ -738,6 +765,22 @@ private struct ActivityRecordingFilterEditor: View {
                         .frame(width: 90)
                         .multilineTextAlignment(.trailing)
                     Text("bytes")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("How long the watcher gathers changes before reporting them. A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Report changes every") {
+                HStack(spacing: 6) {
+                    TextField("5", text: $latencyText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                    Text("seconds")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -791,6 +834,7 @@ private struct ActivityRecordingFilterEditor: View {
                 Button("Restore Defaults") {
                     text = ActivityExclusionPatterns.defaults.joined(separator: "\n")
                     deltaText = String(LongTermWatchTargetOptions.defaultMinimumRecordedByteDelta)
+                    latencyText = Self.latencyText(for: MonitoringStartConfiguration.default.monitorLatency)
                     minimumText = ""
                     maximumText = ""
                 }
@@ -801,13 +845,14 @@ private struct ActivityRecordingFilterEditor: View {
                     onApply(
                         patternLines,
                         deltaBytes ?? LongTermWatchTargetOptions.defaultMinimumRecordedByteDelta,
+                        latencySeconds ?? MonitoringStartConfiguration.default.monitorLatency,
                         bytes(from: minimumText),
                         bytes(from: maximumText)
                     )
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(boundsNote != nil || deltaBytes == nil)
+                .disabled(boundsNote != nil || deltaBytes == nil || latencySeconds == nil)
             }
         }
         .padding(16)

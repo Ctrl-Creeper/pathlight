@@ -66,28 +66,33 @@ final class AppModelDependencyTests: XCTestCase {
         model.setRecordingFilters(
             patterns: [],
             minimumRecordedByteDelta: 0,
+            monitorLatency: 30,
             minimumFileBytes: nil,
             maximumFileBytes: nil,
             rootPath: rootPath
         )
 
         XCTAssertEqual(model.longTermWatchTargets.first?.options.minimumRecordedByteDelta, 0)
+        XCTAssertEqual(model.longTermWatchTargets.first?.options.monitorLatency, 30)
         // Saved, not only held: the next launch has to open on it.
-        XCTAssertEqual(
-            LongTermWatchTargetStore(persistence: persistence).loadTargets().first?
-                .options.minimumRecordedByteDelta,
-            0
-        )
+        let reloaded = LongTermWatchTargetStore(persistence: persistence).loadTargets().first
+        XCTAssertEqual(reloaded?.options.minimumRecordedByteDelta, 0)
+        XCTAssertEqual(reloaded?.options.monitorLatency, 30)
         // A negative threshold is not a smaller one; it is nonsense that would
         // read as "record everything" by accident.
         model.setRecordingFilters(
             patterns: [],
             minimumRecordedByteDelta: -5,
+            monitorLatency: 10_000,
             minimumFileBytes: nil,
             maximumFileBytes: nil,
             rootPath: rootPath
         )
         XCTAssertEqual(model.longTermWatchTargets.first?.options.minimumRecordedByteDelta, 0)
+        XCTAssertEqual(
+            model.longTermWatchTargets.first?.options.monitorLatency,
+            MonitoringStartConfiguration.maximumMonitorLatency
+        )
     }
 
     func testRemovingTargetPersistsAndClearsRuntimeStatus() {
