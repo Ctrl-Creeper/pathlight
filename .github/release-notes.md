@@ -1,14 +1,26 @@
 A pre-release. Nothing here is signed or notarized, so both desktop platforms
 will warn before running it:
 
-## Changes in v1.5.0-rc.6
+## Changes in v1.8.0
 
-- Remembers each folder's confirmed minimum change and reporting interval.
-- Applies the minimum byte-delta threshold consistently to known deletions,
-  moves, and aggregated changes; `0 KB` records every measurable change.
-- Uses the same supported reporting range (250 ms to 5 minutes) in every host.
-- Reports macOS watcher startup failures without leaving a finished live
-  monitor active or hiding the failure after a successful journal write.
+- Recovers what changed while Pathlight was closed: each watch keeps its last
+  known state on disk and compares against it on the next start (Windows,
+  Linux and the terminal; macOS already replayed from its FSEvents cursor).
+  That state now lives on disk rather than in memory, so a background watch
+  on a whole disk holds roughly none of it.
+- Gap recovery on a whole disk works: a folder that cannot be read sets aside
+  only what is under it instead of cancelling the whole comparison, files
+  that grew under the same name are recovered, nothing already recorded is
+  counted twice, and the walk never blocks the watch.
+- The recording threshold and the reporting interval are editable while a
+  watch runs, in every host, with the interface saying what each one drops.
+  The default threshold stays at 1 KB; `0` records every change there is.
+- Storage on macOS no longer deletes history it cannot judge: an unreadable
+  budget or an undecodable row is kept, not treated as zero.
+- "Last activity" reports the folder's newest change, not the newest row on
+  the filtered page.
+- Less memory for the same monitoring: journals are read a line at a time on
+  macOS and each baseline path is stored in an allocation its own size.
 
 - **macOS**: right-click `Pathlight.app` and choose Open, or
   `xattr -dr com.apple.quarantine Pathlight.app`.
