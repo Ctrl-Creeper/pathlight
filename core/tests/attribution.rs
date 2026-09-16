@@ -545,3 +545,31 @@ fn baselines_are_sealed_when_the_records_are() {
     // And this machine still reads its own back.
     assert_eq!(storage.size_index().peek(SCOPE, "/a/private.bin"), Some(9));
 }
+
+/// A file that is still there but cannot be measured — no permission, a
+/// filesystem that will not answer — is a change that happened. Dropping it
+/// leaves the folder looking untouched because one stat failed; a path that is
+/// simply gone is the deletion's to report, not this one's.
+#[test]
+fn a_file_that_cannot_be_measured_is_still_recorded_but_one_that_is_gone_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_string_lossy().into_owned();
+    let present = dir.path().join("unreadable.bin");
+    std::fs::write(&present, b"x").unwrap();
+
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &none, &none, &none);
+    let modified = |path: std::path::PathBuf| Change {
+        kind: ChangeKind::Modified,
+        path: path.to_string_lossy().into_owned(),
+        root_path: root.clone(),
+        timestamp: UNIX_EPOCH + Duration::from_secs(1),
+        process_name: None,
+    };
+    let events = attributor.process(&[modified(present), modified(dir.path().join("gone.bin"))]);
+
+    assert_eq!(events.len(), 1, "events: {events:#?}");
+    assert!(events[0].path.ends_with("unreadable.bin"));
+    assert_eq!(events[0].byte_delta, None);
+    assert_eq!(events[0].confidence, Confidence::Unknown);
+}
