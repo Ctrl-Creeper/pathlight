@@ -231,7 +231,14 @@ fn scan_with(
                     if measurement.kind == FileKind::Directory {
                         directories.push((path.clone(), measurement.identity));
                     }
-                    snapshot.entries.push((path.into_boxed_path(), measurement));
+                    // An exact copy, not the buffer the path was built in:
+                    // `join` grows by doubling and the shrink that
+                    // `into_boxed_path` does hands nothing back to the
+                    // allocator, so the slack would stay resident for the life
+                    // of the watch — about a third of the baseline.
+                    snapshot
+                        .entries
+                        .push((Box::<Path>::from(path.as_path()), measurement));
                 }
                 Err(error) => snapshot.record_error(path, error),
             }
