@@ -19,14 +19,46 @@ pub enum IdentityPlatform {
 }
 
 /// A native object identifier scoped to a volume and its observed lifetime.
-/// Unix IDs contain the inode as eight little-endian bytes; Windows IDs retain
-/// all 128 native bits. `volume_id` is a device ID or volume serial number, not
-/// a globally unique or permanent filesystem identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// Unix IDs carry the inode in the low 64 bits; Windows IDs retain all 128
+/// native bits. `volume_id` is a device ID or volume serial number, not a
+/// globally unique or permanent filesystem identity.
+///
+/// The id is one integer rather than the bytes it arrives as: a baseline holds
+/// one of these per file in the folder, and a heap allocation apiece is a
+/// megabyte of allocator per four thousand files for eight bytes of inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectIdentity {
     pub platform: IdentityPlatform,
     pub volume_id: u64,
-    pub file_id: Vec<u8>,
+    #[serde(with = "file_id_bytes")]
+    pub file_id: u128,
+}
+
+/// On the wire the id keeps the shape it arrived in — the little-endian bytes
+/// the platform reported — so a recording written before it became one integer
+/// still reads back, and one written here still names the same object on the
+/// host that wrote it.
+mod file_id_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes = value.to_le_bytes();
+        // The width an inode took before, or the full native id when it needs
+        // more than an inode ever does.
+        let width = match u64::try_from(*value) {
+            Ok(_) => 8,
+            Err(_) => 16,
+        };
+        serializer.collect_seq(&bytes[..width])
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let mut value = [0u8; 16];
+        let width = bytes.len().min(value.len());
+        value[..width].copy_from_slice(&bytes[..width]);
+        Ok(u128::from_le_bytes(value))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +119,7 @@ mod platform {
             identity: Some(ObjectIdentity {
                 platform: IdentityPlatform::Unix,
                 volume_id: metadata.dev(),
-                file_id: metadata.ino().to_le_bytes().to_vec(),
+                file_id: u128::from(metadata.ino()),
             }),
             kind,
             logical_bytes: if is_directory { 0 } else { metadata.len() },
@@ -135,7 +167,7 @@ mod platform {
         let identity = query_info::<FILE_ID_INFO>(&file, FileIdInfo)?.map(|info| ObjectIdentity {
             platform: IdentityPlatform::Windows,
             volume_id: info.VolumeSerialNumber,
-            file_id: info.FileId.Identifier.to_vec(),
+            file_id: u128::from_le_bytes(info.FileId.Identifier),
         });
         let is_directory = kind == FileKind::Directory;
 
