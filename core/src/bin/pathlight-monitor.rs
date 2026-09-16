@@ -454,18 +454,32 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
         ));
     }
     let options = storage.options();
-    let mut sessions = open_watch_sessions(
-        &roots,
-        &storage,
-        options,
-        request.minimum_recorded_byte_delta,
-        request.latency_ms,
-    )?;
+    // Before anything opens, and whether or not monitoring is paused: a folder
+    // that can never be watched is a mistake in the command, not something to
+    // discover at the moment somebody resumes.
+    refuse_own_storage(&roots, &storage)?;
+    // A watch started while monitoring is paused waits for the resume rather
+    // than exiting. The login item runs this command, so a machine that was
+    // paused at sign-in would otherwise never record again — the resume would
+    // have nothing left running to hear it.
+    let mut was_paused = storage.paused();
+    let mut sessions = match was_paused {
+        true => Vec::new(),
+        false => open_watch_sessions(
+            &roots,
+            &storage,
+            options,
+            request.minimum_recorded_byte_delta,
+            request.latency_ms,
+        )?,
+    };
     println!(
         "Recording to {}. Press Ctrl-C to stop.",
         storage.journal().display()
     );
-    let mut was_paused = false;
+    if was_paused {
+        println!("Monitoring is paused. These folders start when you resume.");
+    }
     loop {
         std::thread::sleep(Duration::from_millis(500));
         let paused = storage.paused();
@@ -542,6 +556,19 @@ fn watch_request(rest: &[OsString]) -> io::Result<WatchRequest> {
     })
 }
 
+/// Watching the journal's own folder is a feedback loop; the store refuses to
+/// record it either way, and saying so beats a watch that silently reports
+/// nothing.
+fn refuse_own_storage(roots: &[String], storage: &Storage) -> io::Result<()> {
+    match roots.iter().find(|root| storage.is_own(root)) {
+        None => Ok(()),
+        Some(root) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
+        )),
+    }
+}
+
 fn open_watch_sessions(
     roots: &[String],
     storage: &Storage,
@@ -549,17 +576,9 @@ fn open_watch_sessions(
     minimum_recorded_byte_delta: Option<i64>,
     latency_ms: Option<u64>,
 ) -> io::Result<Vec<WatchedSession>> {
+    refuse_own_storage(roots, storage)?;
     let mut sessions = Vec::new();
     for root in roots {
-        // Watching the journal's own folder is a feedback loop; the store
-        // refuses to record it either way, and saying so beats a watch that
-        // silently reports nothing.
-        if storage.is_own(root) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{root} is where Pathlight keeps its own records, so it cannot be watched"),
-            ));
-        }
         let stored = storage.watch_start_configuration(root);
         let mut options = base_options;
         options.minimum_recorded_byte_delta =
