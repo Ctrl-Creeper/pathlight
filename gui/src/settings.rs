@@ -319,7 +319,12 @@ impl Draft {
 
         ui.add_space(12.0);
         ui.label(egui::RichText::new("How soon changes are reported").strong());
-        number(ui, "Report every (milliseconds)", &mut self.latency_ms);
+        number(ui, "Report every (milliseconds)", &mut self.latency_ms).on_hover_text(
+            "How long a watch gathers changes before reporting them. A shorter wait shows a \
+             change sooner and wakes this machine more often; a longer one is cheaper and \
+             groups a burst of edits into fewer rows. Nothing is lost either way — only when \
+             you hear about it.",
+        );
 
         ui.add_space(12.0);
         ui.label(egui::RichText::new("Tell me when a folder grows").strong());
@@ -579,12 +584,13 @@ impl Draft {
     }
 }
 
-fn number(ui: &mut egui::Ui, title: &str, value: &mut String) {
+fn number(ui: &mut egui::Ui, title: &str, value: &mut String) -> egui::Response {
     ui.horizontal(|ui| {
         let label = ui.label(title);
         ui.add(egui::TextEdit::singleline(value).desired_width(70.0))
             .labelled_by(label.id);
-    });
+    })
+    .response
 }
 
 /// Keep an older decimal-KB value stable when a user opens and confirms the

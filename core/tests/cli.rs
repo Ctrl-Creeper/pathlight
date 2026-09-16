@@ -156,7 +156,7 @@ fn immediate_latency_keeps_its_legacy_fast_value() {
     assert!(output.status.success(), "{}", text(&output));
     let shown = text(&run(home.path(), &["settings"]));
     assert!(
-        shown.contains("latency                   250 ms  (immediate)"),
+        shown.contains("latency                   250 ms  (immediate;"),
         "{shown}"
     );
 }
