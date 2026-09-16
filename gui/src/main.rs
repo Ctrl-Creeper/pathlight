@@ -1222,10 +1222,18 @@ impl App {
                     metric(
                         ui,
                         "Last change",
+                        // The listed rows are one page in the order the user
+                        // asked for, so the first of them is the biggest
+                        // change or the top of page two — not the newest. The
+                        // buckets cover every matched row, which is what the
+                        // two numbers beside this one count.
                         &history
                             .recent_events
-                            .first()
-                            .map(|event| elapsed(event.timestamp))
+                            .iter()
+                            .map(|event| event.timestamp)
+                            .chain(history.buckets.last().map(|bucket| bucket.start))
+                            .max()
+                            .map(elapsed)
                             .unwrap_or_else(|| "—".to_owned()),
                     );
                 });
