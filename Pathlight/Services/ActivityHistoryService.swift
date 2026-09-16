@@ -21,6 +21,9 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
     let recentEvents: [DiskActivityEvent]
     /// True when retained history holds more events than `recentEvents` shows.
     let isTruncated: Bool
+    /// When this folder last changed, across everything retained for it — not
+    /// only what the current filter, sort and page happen to show.
+    let latestEventAt: Date?
 
     init(
         rootPath: URL,
@@ -30,7 +33,8 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
         unknownSizeEventCount: Int,
         buckets: [ActivityHistoryBucket],
         recentEvents: [DiskActivityEvent],
-        isTruncated: Bool = false
+        isTruncated: Bool = false,
+        latestEventAt: Date? = nil
     ) {
         self.rootPath = rootPath
         self.generatedAt = generatedAt
@@ -40,6 +44,7 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
         self.buckets = buckets
         self.recentEvents = recentEvents
         self.isTruncated = isTruncated
+        self.latestEventAt = latestEventAt
     }
 }
 
@@ -99,13 +104,16 @@ nonisolated struct ActivityEventPage: Equatable, Sendable {
     let totalNetByteDelta: Int64
     let unknownSizeEventCount: Int
     let buckets: [ActivityHistoryBucket]
+    /// The newest event for this root, whatever the query asked for.
+    let latestEventAt: Date?
 
     static let empty = ActivityEventPage(
         events: [],
         totalEventCount: 0,
         totalNetByteDelta: 0,
         unknownSizeEventCount: 0,
-        buckets: []
+        buckets: [],
+        latestEventAt: nil
     )
 }
 
@@ -121,6 +129,7 @@ nonisolated struct ActivityEventPageBuilder {
     private var totalNetByteDelta: Int64 = 0
     private var unknownSizeEventCount = 0
     private var bucketTotals: [Date: (byteDelta: Int64, eventCount: Int, unknownSizeEventCount: Int)] = [:]
+    private var latestEventAt: Date?
 
     init(
         limit: Int,
@@ -138,6 +147,12 @@ nonisolated struct ActivityEventPageBuilder {
     private var capacity: Int { limit + skip }
 
     mutating func add(_ event: DiskActivityEvent) {
+        // Before the filter, not after: "last activity" is when the folder
+        // last changed, and a narrowed list or a second page must not make a
+        // folder look quieter than it was.
+        if event.timestamp > latestEventAt ?? .distantPast {
+            latestEventAt = event.timestamp
+        }
         guard query.matches(event) else {
             return
         }
@@ -188,7 +203,8 @@ nonisolated struct ActivityEventPageBuilder {
                         unknownSizeEventCount: totals.unknownSizeEventCount
                     )
                 }
-                .sorted { $0.startDate < $1.startDate }
+                .sorted { $0.startDate < $1.startDate },
+            latestEventAt: latestEventAt
         )
     }
 }
@@ -225,7 +241,8 @@ struct ActivityHistoryService: Sendable {
             unknownSizeEventCount: page.unknownSizeEventCount,
             buckets: page.buckets,
             recentEvents: page.events,
-            isTruncated: page.totalEventCount > max(query.skip, 0) + page.events.count
+            isTruncated: page.totalEventCount > max(query.skip, 0) + page.events.count,
+            latestEventAt: page.latestEventAt
         )
     }
 

@@ -304,7 +304,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         if status.state == .rootMissing {
             return "Folder is missing — nothing can be recorded"
         }
-        guard let lastActivityAt = status.lastActivityAt ?? history?.recentEvents.first?.timestamp else {
+        guard let lastActivityAt = status.lastActivityAt ?? history?.latestEventAt else {
             return status.state == .paused ? "Monitoring paused" : "No activity yet"
         }
         return "Last activity \(PathlightFormatters.date(lastActivityAt))"

@@ -4,6 +4,30 @@ import Testing
 
 @Suite("Activity history service")
 struct ActivityHistoryServiceTests {
+    /// "Last activity" is a fact about the folder, not about the list on
+    /// screen: a filter, a sort or a second page must not age it.
+    @Test("reports the newest event whatever the query narrowed to")
+    func reportsTheNewestEventWhateverTheQueryNarrowedTo() async throws {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let events = [
+            event(.created, root: root, name: "old.dmg", timestamp: 1_000, byteDelta: 2_000),
+            event(.modified, root: root, name: "newest.log", timestamp: 9_000, byteDelta: 10)
+        ]
+        let service = ActivityHistoryService(store: StaticActivityEventStore(events: events))
+        var query = ActivityHistoryQuery.everything
+        query.text = "old"
+
+        let history = try await service.loadHistory(
+            rootPath: root,
+            eventLimit: 10,
+            bucketInterval: 3_600,
+            query: query
+        )
+
+        #expect(history.recentEvents.count == 1)
+        #expect(history.latestEventAt == Date(timeIntervalSince1970: 9_000))
+    }
+
     @Test("aggregates events into time buckets")
     func aggregatesEventsIntoTimeBuckets() async throws {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
