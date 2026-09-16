@@ -1,11 +1,14 @@
 import Foundation
 
 nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
-    let minimumRecordedByteDelta: Int64
+    /// Changes smaller than this are not recorded. Editable while a watch
+    /// runs: it is the one setting that decides how close to the filesystem
+    /// this watch reports, so it is never only a creation-time choice.
+    var minimumRecordedByteDelta: Int64
     let aggregationWindow: TimeInterval
     let recordsFileNames: Bool
     /// How long the native watcher coalesces changes before reporting them.
-    let monitorLatency: TimeInterval
+    var monitorLatency: TimeInterval
     /// Daily net growth that triggers a notification; nil means alerts are off.
     var growthAlertThresholdBytes: Int64?
     /// Gitignore-style patterns filtered out of this target's event stream.
@@ -14,6 +17,12 @@ nonisolated struct LongTermWatchTargetOptions: Codable, Equatable, Sendable {
     /// Bounds on the size of the files this watch records; nil is no bound.
     var minimumFileBytes: Int64?
     var maximumFileBytes: Int64?
+
+    /// A kilobyte: enough to leave out lock files, editor autosaves and log
+    /// lines without anybody having to say so. It is a default and not a
+    /// floor — every host lets it go to zero, which records every change
+    /// there is.
+    static let defaultMinimumRecordedByteDelta: Int64 = 1_024
 
     init(
         minimumRecordedByteDelta: Int64,

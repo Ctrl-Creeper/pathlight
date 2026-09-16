@@ -1044,7 +1044,10 @@ fn show_settings(storage: &Storage) -> io::Result<()> {
     say("journal-limit-mb", (cap / 1_000_000).to_string());
     say(
         "min-delta-bytes",
-        options.minimum_recorded_byte_delta.to_string(),
+        match options.minimum_recorded_byte_delta {
+            0 => "0  (every change, down to one byte)".to_owned(),
+            bytes => format!("{bytes}  (changes under this are not recorded; 0 records all)"),
+        },
     );
     say(
         "growth-alert-mb",

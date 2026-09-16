@@ -55,9 +55,10 @@ struct ContentView: View {
             revealInFinder: { appModel.revealURLInFinder($0) },
             clearHistoryGap: { appModel.clearLongTermWatchHistoryGap(rootPath: $0) },
             setGrowthAlertThreshold: { appModel.setGrowthAlertThreshold($0, rootPath: $1) },
-            setRecordingFilters: { patterns, minimumBytes, maximumBytes, rootPath in
+            setRecordingFilters: { patterns, minimumDelta, minimumBytes, maximumBytes, rootPath in
                 appModel.setRecordingFilters(
                     patterns: patterns,
+                    minimumRecordedByteDelta: minimumDelta,
                     minimumFileBytes: minimumBytes,
                     maximumFileBytes: maximumBytes,
                     rootPath: rootPath
