@@ -28,6 +28,40 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .expect("the binary under test is built by cargo test")
 }
 
+/// The same command left running: `watch` ends on a signal, not on its own.
+fn spawn(home: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_pathlight-monitor"))
+        .args(args)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("APPDATA")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the binary under test is built by cargo test")
+}
+
+/// Waits for a file name to reach the journal, because a watch records on its
+/// own thread and a test that reads once reads too early.
+fn wait_for_row(home: &Path, name: &str) {
+    let journal = pathlight_core::uninstall::data_dir(home, |_| None).join("activity-events.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = std::fs::read_to_string(&journal).unwrap_or_default();
+        if rows.contains(name) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name} never reached the journal: {rows}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn text(output: &Output) -> String {
     format!(
         "{}{}",
@@ -347,13 +381,14 @@ fn a_pause_holds_every_watch_off_until_it_is_lifted() {
         text(&run(home.path(), &["settings"]))
     );
 
-    // The watch does not open, and says why rather than watching nothing.
-    let watched = run(home.path(), &["watch", &path]);
-    assert!(!watched.status.success(), "{}", text(&watched));
+    // The watch waits for the resume rather than exiting. The login item runs
+    // this command, so a machine paused at sign-in would otherwise have
+    // nothing left running to hear the resume.
+    let mut watched = spawn(home.path(), &["watch", "--interval-ms", "250", &path]);
+    std::thread::sleep(Duration::from_secs(1));
     assert!(
-        text(&watched).contains("monitoring is paused"),
-        "{}",
-        text(&watched)
+        watched.try_wait().unwrap().is_none(),
+        "the watch exited instead of waiting for the resume"
     );
 
     let resumed = run(home.path(), &["resume"]);
@@ -362,6 +397,11 @@ fn a_pause_holds_every_watch_off_until_it_is_lifted() {
         "{}",
         text(&resumed)
     );
+    std::thread::sleep(Duration::from_millis(750));
+    std::fs::write(folder.path().join("after-resume.txt"), vec![b'r'; 2 * 1024]).unwrap();
+    wait_for_row(home.path(), "after-resume.txt");
+    let _ = watched.kill();
+    let _ = watched.wait();
 }
 
 #[test]
@@ -369,18 +409,7 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
     let home = tempfile::tempdir().unwrap();
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().to_string_lossy().replace('\\', "/");
-    let mut watched = Command::new(env!("CARGO_BIN_EXE_pathlight-monitor"))
-        .args(["watch", "--interval-ms", "250", &path])
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env_remove("APPDATA")
-        .env_remove("LOCALAPPDATA")
-        .env_remove("XDG_DATA_HOME")
-        .env_remove("XDG_CONFIG_HOME")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut watched = spawn(home.path(), &["watch", "--interval-ms", "250", &path]);
     std::thread::sleep(Duration::from_secs(1));
 
     assert!(run(home.path(), &["pause"]).status.success());
@@ -398,19 +427,7 @@ fn a_running_terminal_watch_observes_pause_and_resume_from_another_process() {
     assert!(run(home.path(), &["resume"]).status.success());
     std::thread::sleep(Duration::from_millis(750));
     std::fs::write(folder.path().join("after-resume.txt"), vec![b'r'; 2 * 1024]).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let journal =
-            std::fs::read_to_string(storage.join("activity-events.jsonl")).unwrap_or_default();
-        if journal.contains("after-resume.txt") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the watch did not reopen after resume: {journal}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_for_row(home.path(), "after-resume.txt");
     let _ = watched.kill();
     let _ = watched.wait();
 }
