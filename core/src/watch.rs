@@ -10,13 +10,14 @@
 //! mutex. Nothing on the paint path touches the disk.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::attribution::{allocated_size, AggregationOptions, Attributor, SizeIndex};
+use crate::baseline;
 use crate::exclusion::ExclusionFilter;
 use crate::monitor::{bounded_monitor_latency_ms, ActivityListener, Change, StreamEvent, Watcher};
 use crate::snapshot::{self, BindingChange, BindingChangeKind, IdentityContinuity, ScanSnapshot};
@@ -218,7 +219,50 @@ impl ActivityListener for QueueListener {
 
 /// The last known state of the watched folder, shared with the thread that
 /// takes it.
-type Baseline = Arc<Mutex<Option<ScanSnapshot>>>;
+///
+/// On disk rather than resident: a whole-disk baseline is the largest thing a
+/// background watch would hold, and it is read at exactly two moments — a gap,
+/// and the first flush after a restart, when the folder is compared against
+/// what the last run left behind.
+#[derive(Default)]
+struct BaselineState {
+    /// Where the last known state is, when there is one.
+    kept: Option<PathBuf>,
+    /// A fresh scan taken while an earlier run's baseline was still on disk.
+    /// The comparison is owed to the worker rather than done on the thread
+    /// that scanned, because only the worker writes rows.
+    catching_up: Option<ScanSnapshot>,
+}
+
+type Baseline = Arc<Mutex<BaselineState>>;
+
+/// What the folder holds now, written where the next gap will look for it.
+fn kept_baseline(scope: &str, live: &Arc<Mutex<Live>>, storage: &Storage) -> Option<PathBuf> {
+    keep(baseline_of(scope, live, storage)?, scope, live, storage)
+}
+
+fn keep(
+    snapshot: ScanSnapshot,
+    scope: &str,
+    live: &Arc<Mutex<Live>>,
+    storage: &Storage,
+) -> Option<PathBuf> {
+    let path = baseline::file(storage.dir(), scope);
+    match baseline::write(&path, &snapshot) {
+        Ok(()) => Some(path),
+        Err(error) => {
+            trouble(
+                live,
+                storage,
+                format!(
+                    "Could not remember what {scope} holds, so a dropped event cannot be \
+                     recovered here: {error}"
+                ),
+            );
+            None
+        }
+    }
+}
 
 /// What the folder holds now. A folder that cannot be read has no baseline,
 /// which is said out loud: silently having none would turn every later gap
@@ -314,7 +358,15 @@ impl Worker {
         // the queue — the events that would drop while it walked are exactly
         // the ones the baseline exists to recover. A gap that arrives before
         // it lands finds nothing to compare against, and says so.
-        let baseline: Baseline = Arc::new(Mutex::new(None));
+        //
+        // A baseline the last run left behind is not thrown away: the folder
+        // changed while Pathlight was closed, and that is a gap like any
+        // other. The scan below is what it gets compared against.
+        let earlier = baseline::file(self.storage.dir(), &self.scope);
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: earlier.exists().then_some(earlier),
+            catching_up: None,
+        }));
         {
             let slot = baseline.clone();
             let scope = self.scope.clone();
@@ -323,8 +375,14 @@ impl Worker {
             let spawned = std::thread::Builder::new()
                 .name("pathlight-baseline".into())
                 .spawn(move || {
-                    let taken = baseline_of(&scope, &live, &storage);
-                    *slot.lock().unwrap_or_else(PoisonError::into_inner) = taken;
+                    let Some(taken) = baseline_of(&scope, &live, &storage) else {
+                        return;
+                    };
+                    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                    match slot.kept.is_some() {
+                        true => slot.catching_up = Some(taken),
+                        false => slot.kept = keep(taken, &scope, &live, &storage),
+                    }
                 });
             if let Err(error) = spawned {
                 self.trouble(format!("Could not take a baseline: {error}"));
@@ -349,6 +407,7 @@ impl Worker {
             }
             let now = Instant::now();
             if now >= due {
+                self.catch_up(&baseline);
                 self.flush(&attributor, &mut pending, &index, &baseline);
                 due = now + self.flush_interval;
             }
@@ -381,13 +440,45 @@ impl Worker {
     fn reconcile(&self, baseline: &Baseline) {
         self.live().gaps += 1;
         let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(previous) = slot.take() else {
+        let Some(path) = slot.kept.clone() else {
             return;
         };
         let Some(current) = baseline_of(&self.scope, &self.live, &self.storage) else {
             // Keep the old baseline: it is still the last thing known, and a
             // watch with no baseline can never reconcile again.
-            *slot = Some(previous);
+            return;
+        };
+        self.caught_up(&mut slot, baseline::read(&path, &current.root), current);
+    }
+
+    /// The scan the baseline thread finished, against the baseline an earlier
+    /// run left behind: what changed while Pathlight was not running.
+    fn catch_up(&self, baseline: &Baseline) {
+        let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(current) = slot.catching_up.take() else {
+            return;
+        };
+        let previous = slot
+            .kept
+            .clone()
+            .and_then(|path| baseline::read(&path, &current.root));
+        if previous.is_some() {
+            self.live().gaps += 1;
+        }
+        self.caught_up(&mut slot, previous, current);
+    }
+
+    /// Record the difference, then keep `current` as the thing the next gap is
+    /// compared against. Rows first: a baseline nobody can compare against is
+    /// worth less than a row nobody has a baseline for.
+    fn caught_up(
+        &self,
+        slot: &mut BaselineState,
+        previous: Option<ScanSnapshot>,
+        current: ScanSnapshot,
+    ) {
+        let Some(previous) = previous else {
+            slot.kept = keep(current, &self.scope, &self.live, &self.storage);
             return;
         };
         let comparison = snapshot::reconcile(&previous, &current, IdentityContinuity::Unknown);
@@ -397,8 +488,8 @@ impl Worker {
             .filter_map(|binding| self.recovered_row(binding, &previous, &current))
             .collect();
         let incomplete = !previous.is_complete() || !current.is_complete();
-        *slot = Some(current);
-        drop(slot);
+        drop(previous);
+        slot.kept = keep(current, &self.scope, &self.live, &self.storage);
 
         let recovered = events.len() as u64;
         self.publish(events, 0);
@@ -508,16 +599,16 @@ impl Worker {
             pending.retain(|change| change.timestamp >= reset_at);
             dropped = 0;
             index.reset();
-            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
-                baseline_of(&self.scope, &self.live, &self.storage);
+            baseline.lock().unwrap_or_else(PoisonError::into_inner).kept =
+                kept_baseline(&self.scope, &self.live, &self.storage);
             self.records_epoch = records_epoch;
         }
         let events = attributor.process(pending);
         pending.clear();
         if !self.publish(events, dropped) {
             index.reset();
-            *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
-                baseline_of(&self.scope, &self.live, &self.storage);
+            baseline.lock().unwrap_or_else(PoisonError::into_inner).kept =
+                kept_baseline(&self.scope, &self.live, &self.storage);
             self.records_epoch = self.storage.records_epoch();
             return;
         }
@@ -537,8 +628,8 @@ impl Worker {
             Ok(true) => {}
             Ok(false) => {
                 index.reset();
-                *baseline.lock().unwrap_or_else(PoisonError::into_inner) =
-                    baseline_of(&self.scope, &self.live, &self.storage);
+                baseline.lock().unwrap_or_else(PoisonError::into_inner).kept =
+                    kept_baseline(&self.scope, &self.live, &self.storage);
                 self.records_epoch = self.storage.records_epoch();
             }
             Err(error) => self.trouble(format!("Sizes could not be remembered: {error}")),
@@ -997,13 +1088,12 @@ mod tests {
             flush_interval: MACOS_WORKER_FLUSH,
         };
 
-        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(
-            &worker.scope,
-            &worker.live,
-            &worker.storage,
-        )));
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: kept_baseline(&worker.scope, &worker.live, &worker.storage),
+            catching_up: None,
+        }));
         assert!(
-            baseline.lock().unwrap().is_some(),
+            baseline.lock().unwrap().kept.is_some(),
             "no baseline: {:?}",
             worker.live().error
         );
@@ -1090,7 +1180,7 @@ mod tests {
         let attributor = Attributor::new(worker.options, &size, &prior, &known);
 
         storage.forget_records().unwrap();
-        let baseline: Baseline = Arc::new(Mutex::new(None));
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState::default()));
         worker.flush(&attributor, &mut pending, &index, &baseline);
 
         let journal = fs::read_to_string(storage.journal()).unwrap_or_default();
@@ -1119,7 +1209,10 @@ mod tests {
             announce: Box::new(|_, _| {}),
             flush_interval: MACOS_WORKER_FLUSH,
         };
-        let baseline: Baseline = Arc::new(Mutex::new(baseline_of(&scope, &worker.live, &storage)));
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: kept_baseline(&scope, &worker.live, &storage),
+            catching_up: None,
+        }));
         fs::write(root.join("missed.txt"), b"reconcile me").unwrap();
         let index = SizeIndex::default();
         let size = |path: &str| allocated_size(Path::new(path));
@@ -1138,6 +1231,63 @@ mod tests {
         assert!(live.rows.iter().any(|row| row.path.ends_with("missed.txt")));
         drop(live);
         assert!(storage.log_tail(20).contains("queue overflow"));
+    }
+
+    /// The gap nobody watches: the app was closed, files moved, the app came
+    /// back. Without a baseline that outlives the process this is silence.
+    #[test]
+    fn what_changed_while_pathlight_was_closed_is_recovered_on_the_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let scope = paths::normalize(&root.to_string_lossy());
+        fs::write(root.join("kept.txt"), b"here before").unwrap();
+        let worker = Worker {
+            exclusions: None,
+            scope: scope.clone(),
+            storage: storage.clone(),
+            options: AggregationOptions::SHORT_TERM,
+            live: Arc::new(Mutex::new(Live::default())),
+            dropped: Arc::new(AtomicU64::new(0)),
+            records_epoch: storage.records_epoch(),
+            alerts: Mutex::new(Alerts::default()),
+            announce: Box::new(|_, _| {}),
+            flush_interval: MACOS_WORKER_FLUSH,
+        };
+
+        // The run that ends: a baseline is left on disk.
+        assert!(kept_baseline(&scope, &worker.live, &storage).is_some());
+        // Nothing is watching now.
+        fs::write(root.join("arrived.txt"), b"while it was closed").unwrap();
+        fs::remove_file(root.join("kept.txt")).unwrap();
+        // The run that starts: the thread scans, the worker compares.
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: Some(baseline::file(storage.dir(), &scope)),
+            catching_up: baseline_of(&scope, &worker.live, &storage),
+        }));
+
+        worker.catch_up(&baseline);
+
+        let live = worker.live();
+        assert_eq!(live.gaps, 1, "a closed app is a gap like any other");
+        assert!(
+            live.rows
+                .iter()
+                .any(|row| row.path.ends_with("arrived.txt")),
+            "a file that appeared while it was closed went unrecorded: {:?}",
+            live.rows
+        );
+        assert!(
+            live.rows.iter().any(|row| row.path.ends_with("kept.txt")),
+            "a file that went missing while it was closed went unrecorded: {:?}",
+            live.rows
+        );
+        drop(live);
+        // And the folder as it is now is what the next gap compares against.
+        let now = baseline::read(&baseline::file(storage.dir(), &scope), &root).unwrap();
+        assert!(now.get(&root.join("arrived.txt")).is_some());
+        assert!(now.get(&root.join("kept.txt")).is_none());
     }
 
     fn row(kind: EventKind, delta: i64, items: u32, at: SystemTime) -> ActivityEvent {

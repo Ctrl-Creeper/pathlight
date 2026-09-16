@@ -229,6 +229,22 @@ impl Storage {
         (bytes, rows)
     }
 
+    /// What the baselines on disk cost, in bytes.
+    ///
+    /// Reported next to the rows because it is the other thing a watch writes
+    /// and the only one nobody asked for: a folder's last known state, kept so
+    /// the changes made while Pathlight was closed are not lost.
+    pub fn remembered(&self) -> u64 {
+        let Ok(entries) = std::fs::read_dir(crate::baseline::directory(self.dir())) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum()
+    }
+
     /// The file every host writes its diary of watch starts, gaps and
     /// failures to. It lives beside the journal, so the macOS app's own
     /// writer lands in the same file on a mac that also runs the terminal.
@@ -301,6 +317,7 @@ impl Storage {
         // either behind would be a lie about what is kept.
         let _ = std::fs::remove_file(self.dir().join(SIZE_INDEX_FILE));
         let _ = std::fs::remove_file(self.log_file());
+        let _ = std::fs::remove_dir_all(crate::baseline::directory(self.dir()));
         match std::fs::remove_file(self.journal()) {
             // Nothing recorded yet is already the state this asks for.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
