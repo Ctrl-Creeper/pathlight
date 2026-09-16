@@ -86,56 +86,134 @@ fn contains_ignoring_case(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
-/// `events` are the rows already filtered to `root_path` (see `Journal::load`).
+/// Accumulates a snapshot one row at a time, holding the page being asked for
+/// rather than every row that matched.
 ///
-/// Totals and buckets cover every row `query` matched, and only
-/// `recent_events` is cut to the page `query` asked for: totalling just the rows a caller can display understates
-/// the answer by the ratio between the journal and the page.
+/// Mirrors Swift's `ActivityEventPageBuilder`: matched rows go into a window
+/// twice the size of the page and are cut back to the page whenever it fills,
+/// so a journal of any length costs the page plus one bucket per interval.
+pub struct Builder<'a> {
+    root_path: &'a str,
+    query: &'a Query,
+    generated_at: SystemTime,
+    interval: u64,
+    /// Rows to hold: the page plus everything a caller is paging past.
+    wanted: usize,
+    buckets: BTreeMap<u64, HistoryBucket>,
+    page: Vec<ActivityEvent>,
+    matched: usize,
+    total_net_byte_delta: i64,
+    unknown: usize,
+}
+
+impl<'a> Builder<'a> {
+    pub fn new(
+        root_path: &'a str,
+        bucket_interval_secs: u64,
+        recent_limit: u32,
+        query: &'a Query,
+        generated_at: SystemTime,
+    ) -> Self {
+        let wanted = query.skip as usize + recent_limit as usize;
+        Self {
+            root_path,
+            query,
+            generated_at,
+            interval: bucket_interval_secs.max(1),
+            wanted,
+            buckets: BTreeMap::new(),
+            page: Vec::with_capacity(wanted.saturating_mul(2).min(4_096)),
+            matched: 0,
+            total_net_byte_delta: 0,
+            unknown: 0,
+        }
+    }
+
+    /// One row of the journal, already filtered to this root.
+    pub fn push(&mut self, event: ActivityEvent) {
+        if !self.query.matches(&event) {
+            return;
+        }
+        self.matched += 1;
+        let start = unix_seconds(event.timestamp) / self.interval * self.interval;
+        let bucket = self.buckets.entry(start).or_insert_with(|| HistoryBucket {
+            start: UNIX_EPOCH + Duration::from_secs(start),
+            end: UNIX_EPOCH + Duration::from_secs(start + self.interval),
+            byte_delta: 0,
+            event_count: 0,
+            unknown_size_event_count: 0,
+        });
+        bucket.event_count += 1;
+        match event.byte_delta {
+            Some(delta) => {
+                self.total_net_byte_delta += delta;
+                bucket.byte_delta += delta;
+            }
+            None => {
+                self.unknown += 1;
+                bucket.unknown_size_event_count += 1;
+            }
+        }
+
+        if self.wanted == 0 {
+            return;
+        }
+        self.page.push(event);
+        if self.page.len() >= self.wanted * 2 {
+            self.cut();
+        }
+    }
+
+    /// Back down to the rows being asked for. The sort is stable and the rows
+    /// arrive in journal order, so cutting early picks the same rows a sort of
+    /// the whole journal would have.
+    fn cut(&mut self) {
+        let query = self.query;
+        self.page.sort_by(|lhs, rhs| query.order(lhs, rhs));
+        self.page.truncate(self.wanted);
+    }
+
+    /// Totals and buckets cover every row `query` matched, and only
+    /// `recent_events` is cut to the page: totalling just the rows a caller can
+    /// display understates the answer by the ratio between the journal and the
+    /// page.
+    pub fn finish(mut self) -> HistorySnapshot {
+        self.cut();
+        HistorySnapshot {
+            root_path: crate::paths::normalize(self.root_path),
+            generated_at: self.generated_at,
+            total_net_byte_delta: self.total_net_byte_delta,
+            event_count: self.matched as u32,
+            unknown_size_event_count: self.unknown as u32,
+            buckets: self.buckets.into_values().collect(),
+            is_truncated: self.matched > self.wanted,
+            recent_events: self
+                .page
+                .into_iter()
+                .skip(self.query.skip as usize)
+                .collect(),
+        }
+    }
+}
+
+/// `events` are the rows already filtered to `root_path` (see `Journal::load`).
 pub fn build_history(
     root_path: &str,
-    mut events: Vec<ActivityEvent>,
+    events: Vec<ActivityEvent>,
     bucket_interval_secs: u64,
     recent_limit: u32,
     query: &Query,
     generated_at: SystemTime,
 ) -> HistorySnapshot {
-    let interval = bucket_interval_secs.max(1);
-    events.retain(|event| query.matches(event));
-    events.sort_by(|lhs, rhs| query.order(lhs, rhs));
-
-    let mut groups: BTreeMap<u64, Vec<&ActivityEvent>> = BTreeMap::new();
-    for event in &events {
-        let start = unix_seconds(event.timestamp) / interval * interval;
-        groups.entry(start).or_default().push(event);
-    }
-    let buckets = groups
-        .into_iter()
-        .map(|(start, bucket_events)| HistoryBucket {
-            start: UNIX_EPOCH + Duration::from_secs(start),
-            end: UNIX_EPOCH + Duration::from_secs(start + interval),
-            byte_delta: bucket_events.iter().filter_map(|e| e.byte_delta).sum(),
-            event_count: bucket_events.len() as u32,
-            unknown_size_event_count: bucket_events
-                .iter()
-                .filter(|e| e.byte_delta.is_none())
-                .count() as u32,
-        })
-        .collect();
-
-    let skip = query.skip as usize;
-    let matched = events.len();
-    HistorySnapshot {
-        root_path: crate::paths::normalize(root_path),
+    let mut builder = Builder::new(
+        root_path,
+        bucket_interval_secs,
+        recent_limit,
+        query,
         generated_at,
-        total_net_byte_delta: events.iter().filter_map(|e| e.byte_delta).sum(),
-        event_count: matched as u32,
-        unknown_size_event_count: events.iter().filter(|e| e.byte_delta.is_none()).count() as u32,
-        buckets,
-        is_truncated: matched > skip + recent_limit as usize,
-        recent_events: events
-            .into_iter()
-            .skip(skip)
-            .take(recent_limit as usize)
-            .collect(),
+    );
+    for event in events {
+        builder.push(event);
     }
+    builder.finish()
 }

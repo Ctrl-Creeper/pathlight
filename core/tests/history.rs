@@ -235,3 +235,57 @@ fn one_kind_of_change_can_be_asked_for_on_its_own() {
     assert_eq!(history.total_net_byte_delta, -4_000);
     assert_eq!(history.recent_events[0].path, format!("{ROOT}/gone.psd"));
 }
+
+/// The page is built in a window twice its size rather than by sorting the
+/// journal, so the rows that fall out of the window along the way have to be
+/// exactly the rows a sort of everything would have dropped — including the
+/// page a caller reached by paging past the first ones.
+#[test]
+fn a_page_far_inside_a_long_journal_is_the_page_a_full_sort_would_give() {
+    // Shuffled by construction: arrival order is not size order or time order.
+    let events: Vec<ActivityEvent> = (0..200u64)
+        .map(|n| {
+            event(
+                &format!("f{n}"),
+                n * 7 % 200,
+                Some((n as i64 * 13 % 200) - 100),
+            )
+        })
+        .collect();
+    let query = Query {
+        largest_first: true,
+        skip: 5,
+        ..Query::default()
+    };
+
+    let history = build_history(
+        &format!("{ROOT}/"),
+        events.clone(),
+        3_600,
+        4,
+        &query,
+        UNIX_EPOCH,
+    );
+
+    let mut sorted = events;
+    sorted.sort_by(|lhs, rhs| {
+        rhs.byte_delta
+            .unwrap_or(0)
+            .abs()
+            .cmp(&lhs.byte_delta.unwrap_or(0).abs())
+            .then_with(|| rhs.timestamp.cmp(&lhs.timestamp))
+            .then_with(|| rhs.path.cmp(&lhs.path))
+    });
+    let expected: Vec<String> = sorted[5..9].iter().map(|row| row.path.clone()).collect();
+    let listed: Vec<String> = history
+        .recent_events
+        .iter()
+        .map(|row| row.path.clone())
+        .collect();
+    assert_eq!(listed, expected);
+    assert_eq!(
+        history.event_count, 200,
+        "the totals stopped covering the journal"
+    );
+    assert!(history.is_truncated);
+}
