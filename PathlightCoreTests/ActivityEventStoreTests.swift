@@ -340,6 +340,37 @@ struct ActivityEventStoreTests {
         let rewrittenContents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
         #expect(!rewrittenContents.contains("not-json"))
     }
+
+    /// The journal is read a chunk at a time, so a row that straddles a chunk
+    /// boundary is the row that would go missing if the leftover were dropped.
+    @Test("reads a journal larger than one read of it")
+    func readsAJournalLargerThanOneChunk() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        let padding = String(repeating: "x", count: 400)
+        let events = (0..<500).map { index in
+            makeEvent(
+                root: root,
+                name: "\(padding)-\(index).bin",
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                byteDelta: 1
+            )
+        }
+        try await store.append(events)
+        let size = try #require(
+            try FileManager.default.attributesOfItem(atPath: journalURL.path)[.size] as? NSNumber
+        )
+        #expect(size.intValue > 1 << 16, "the journal has to outgrow one read to test one")
+
+        let loaded = try await store.loadEvents(rootPath: root, limit: 1_000)
+        #expect(loaded.count == events.count)
+        let page = try await store.loadEventPage(rootPath: root, limit: 5, bucketInterval: 3_600)
+        #expect(page.totalEventCount == events.count)
+        #expect(page.totalNetByteDelta == Int64(events.count))
+    }
+
 }
 
 private func storagePreferences(
