@@ -16,17 +16,26 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let compactionEntryThreshold: Int
+    /// How long a baseline nobody has touched is worth keeping. Zero is
+    /// forever, as it is everywhere else. Without it this is the one thing
+    /// here that only grows: one entry per file ever changed, reloaded at
+    /// every launch, for the life of the machine. A dropped baseline costs
+    /// one over-reported delta the next time that file changes, which is what
+    /// a file first seen after a restart already costs.
+    private let keepDays: Int
     private var sizesByPath: [String: Int64]
     private var journalEntryCount: Int
 
     init(
         journalURL: URL? = nil,
         lineCodec: ActivityStorageLineCodec = .plaintext,
-        compactionEntryThreshold: Int = 10_000
+        compactionEntryThreshold: Int = 10_000,
+        keepDays: Int = ActivityStoragePreferences.defaults.detailedRetentionDays
     ) {
         self.journalURL = journalURL
         self.lineCodec = lineCodec
         self.compactionEntryThreshold = max(compactionEntryThreshold, 1)
+        self.keepDays = keepDays
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -35,15 +44,29 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
-        let loadedState = Self.loadState(from: journalURL, lineCodec: lineCodec, decoder: decoder)
-        sizesByPath = loadedState.sizes
+        let loadedState = Self.loadState(
+            from: journalURL,
+            lineCodec: lineCodec,
+            decoder: decoder,
+            cutoff: Self.cutoff(keepDays: keepDays)
+        )
+        sizesByPath = loadedState.baselines.mapValues(\.size)
         journalEntryCount = loadedState.entryCount
     }
 
     static func live(
-        lineCodec: ActivityStorageLineCodec = .plaintext
+        lineCodec: ActivityStorageLineCodec = .plaintext,
+        keepDays: Int = ActivityStoragePreferences.defaults.detailedRetentionDays
     ) -> ActivitySizeIndex {
-        ActivitySizeIndex(journalURL: defaultJournalURL(), lineCodec: lineCodec)
+        ActivitySizeIndex(journalURL: defaultJournalURL(), lineCodec: lineCodec, keepDays: keepDays)
+    }
+
+    /// When a baseline stops being worth its memory. `nil` is forever.
+    private static func cutoff(keepDays: Int) -> Date? {
+        guard keepDays > 0 else {
+            return nil
+        }
+        return Date(timeIntervalSinceNow: -Double(keepDays) * 86_400)
     }
 
     nonisolated static func defaultJournalURL() -> URL {
@@ -210,17 +233,21 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
             let snapshot = Self.loadState(
                 from: journalURL,
                 lineCodec: lineCodec,
-                decoder: decoder
-            ).sizes
+                decoder: decoder,
+                cutoff: Self.cutoff(keepDays: keepDays)
+            ).baselines
 
             let entries = snapshot
                 .sorted { lhs, rhs in lhs.key < rhs.key }
-                .map { path, size in
+                .map { path, baseline in
                     JournalEntry(
                         kind: .record,
                         path: path,
-                        size: size,
-                        recordedAt: Date()
+                        size: baseline.size,
+                        // The stamp this rewrite found, not the time of the
+                        // rewrite: restamping would make every survivor look
+                        // new and nothing would ever age out.
+                        recordedAt: baseline.recordedAt
                     )
                 }
             let payload = try entries
@@ -237,6 +264,12 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
             }
             try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
             journalEntryCount = 0
+            // The rewrite is where what aged out goes, from memory as well as
+            // from the file. ioQueue has already drained this instance's
+            // writes, so anything missing from the snapshot is gone for good.
+            lock.lock()
+            sizesByPath = sizesByPath.filter { path, _ in snapshot[path] != nil }
+            lock.unlock()
         } catch {
             // Keep appending to the journal; a later compaction can try again.
         }
@@ -256,19 +289,20 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
     private nonisolated static func loadState(
         from journalURL: URL?,
         lineCodec: ActivityStorageLineCodec,
-        decoder: JSONDecoder
+        decoder: JSONDecoder,
+        cutoff: Date?
     ) -> LoadedState {
         guard let journalURL,
               FileManager.default.fileExists(atPath: journalURL.path),
               let data = try? Data(contentsOf: journalURL) else {
-            return LoadedState(sizes: [:], entryCount: 0)
+            return LoadedState(baselines: [:], entryCount: 0)
         }
 
         let contents = String(decoding: data, as: UTF8.self)
         var entryCount = 0
-        let sizes = contents
+        let baselines = contents
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .reduce(into: [String: Int64]()) { sizes, line in
+            .reduce(into: [String: Baseline]()) { baselines, line in
                 guard let data = try? lineCodec.decode(line),
                       let entry = try? decoder.decode(JournalEntry.self, from: data) else {
                     return
@@ -277,19 +311,31 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
 
                 switch entry.kind {
                 case .record:
-                    if let size = entry.size {
-                        sizes[entry.path] = size
+                    guard let size = entry.size else {
+                        return
+                    }
+                    if let cutoff, entry.recordedAt < cutoff {
+                        baselines.removeValue(forKey: entry.path)
+                    } else {
+                        baselines[entry.path] = Baseline(size: size, recordedAt: entry.recordedAt)
                     }
                 case .remove:
-                    sizes.removeValue(forKey: entry.path)
+                    baselines.removeValue(forKey: entry.path)
                 }
             }
 
-        return LoadedState(sizes: sizes, entryCount: entryCount)
+        return LoadedState(baselines: baselines, entryCount: entryCount)
+    }
+
+    /// A baseline as the file holds it. Only the size is kept in memory between
+    /// compactions; the stamp is what the rewrite has to carry forward.
+    private nonisolated struct Baseline {
+        let size: Int64
+        let recordedAt: Date
     }
 
     private nonisolated struct LoadedState {
-        let sizes: [String: Int64]
+        let baselines: [String: Baseline]
         let entryCount: Int
     }
 

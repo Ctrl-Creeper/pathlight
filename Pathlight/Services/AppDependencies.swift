@@ -106,7 +106,11 @@ struct AppDependencies {
             preferencesStore: activityStoragePreferences,
             cryptor: activityStorageCryptor
         )
-        let activitySizeIndex = activitySizeIndex ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec)
+        // The journal's own window: a baseline for a file whose last change is
+        // no longer in the history is not measuring anything a person can see.
+        let sizeIndexKeepDays = activityStoragePreferences.loadPreferences().detailedRetentionDays
+        let activitySizeIndex = activitySizeIndex
+            ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec, keepDays: sizeIndexKeepDays)
         let activityEventStore = JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec)
         return AppDependencies(
             systemActions: .live,
@@ -132,7 +136,10 @@ struct AppDependencies {
             // cannot consume an increment or overwrite a newer event measurement.
             activityBaselineService: ActivityBaselineService(),
             activityStoragePreferences: activityStoragePreferences,
-            activityStorageUsageService: ActivityStorageUsageService(lineCodec: activityStorageLineCodec),
+            activityStorageUsageService: ActivityStorageUsageService(
+                lineCodec: activityStorageLineCodec,
+                sizeIndexKeepDays: sizeIndexKeepDays
+            ),
             activityStorageReset: {
                 activitySizeIndex.reset()
                 try await activityEventStore.reset(

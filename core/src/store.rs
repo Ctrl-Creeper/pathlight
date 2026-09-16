@@ -150,6 +150,10 @@ impl Storage {
         crate::attribution::SizeIndex::at(
             self.dir().join(SIZE_INDEX_FILE),
             self.encrypting().then(|| self.journal()),
+            // The journal's own window: a baseline for a file whose last change
+            // is no longer in the history is not measuring anything a person
+            // can still see.
+            self.retention().0,
         )
     }
 
