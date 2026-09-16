@@ -237,17 +237,32 @@ impl Journal {
         bucket_interval_secs: u64,
         query: crate::history::Query,
     ) -> Result<crate::HistorySnapshot, CoreError> {
-        // Every retained row, not just the page: `limit` cuts the listed rows
-        // inside `build_history`, after the totals are known.
-        let events = self.load(root_path.clone(), u32::MAX)?;
-        Ok(crate::history::build_history(
+        // Streamed, not loaded: the totals have to cover every retained row,
+        // but only the page has to be held, and the journal is capped in
+        // gigabytes while the page is a screenful.
+        let mut history = crate::history::Builder::new(
             &root_path,
-            events,
             bucket_interval_secs,
             limit,
             &query,
-            std::time::SystemTime::now(),
-        ))
+            SystemTime::now(),
+        );
+        if self.path.exists() {
+            let root = crate::paths::normalize(&root_path);
+            let key = crate::crypt::key(&self.path);
+            for line in self.lines()? {
+                let line = line?;
+                let Some(event) = readable(&line, key.as_ref())
+                    .and_then(|json| ActivityEvent::from_json_line(&json).ok())
+                else {
+                    continue;
+                };
+                if crate::paths::normalize(&event.root_path) == root {
+                    history.push(event);
+                }
+            }
+        }
+        Ok(history.finish())
     }
 }
 
@@ -299,7 +314,8 @@ fn judge(
     if !ages {
         return Verdict::Keep;
     }
-    let Some(event) = readable(line, key).and_then(|json| ActivityEvent::from_json_line(&json).ok())
+    let Some(event) =
+        readable(line, key).and_then(|json| ActivityEvent::from_json_line(&json).ok())
     else {
         // A row this build cannot read is not aged out on a guess.
         return Verdict::Keep;
