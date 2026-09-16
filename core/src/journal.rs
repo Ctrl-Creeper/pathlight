@@ -123,7 +123,13 @@ impl Journal {
                     .flatten()
             };
             let detailed = cutoff(retention_days);
-            let aggregate = cutoff(aggregate_days.max(retention_days));
+            // Grouped rows outlive the detailed rows they were made of, but
+            // zero still means forever: taking the larger of the two would
+            // turn "keep every group" into the detailed retention.
+            let aggregate = match aggregate_days {
+                0 => None,
+                days => cutoff(days.max(retention_days)),
+            };
             let mut rollups: HashMap<(String, u64), (usize, ActivityEvent)> = HashMap::new();
             for (position, line) in original.iter().enumerate() {
                 let Some(event) = readable(line, key.as_ref())

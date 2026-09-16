@@ -247,3 +247,21 @@ fn old_file_rows_roll_up_by_root_and_utc_day_before_detail_expires() {
     assert_eq!(rollup.confidence, Confidence::Unknown);
     assert_eq!(rollup.affected_item_count, 5);
 }
+
+/// Zero days is forever for grouped rows too. Taking the larger of the two
+/// windows would read "keep every total" as the detailed retention and drop
+/// the very rows the setting asks to keep.
+#[test]
+fn zero_aggregate_days_keeps_grouped_rows_forever() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    let mut grouped = event("", 4_000);
+    grouped.kind = EventKind::Aggregate;
+    grouped.path = format!("{ROOT}/");
+    journal
+        .append(vec![grouped, event("recent.bin", 3)])
+        .unwrap();
+
+    assert_eq!(journal.trim(180, 0, 0).unwrap(), 0);
+    assert_eq!(journal.load(ROOT.to_owned(), 100).unwrap().len(), 2);
+}
