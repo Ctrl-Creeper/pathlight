@@ -581,10 +581,10 @@ private struct ActivityDashboardTargetRow: View {
                 .popover(isPresented: $showsExclusionEditor, arrowEdge: .bottom) {
                     ActivityRecordingFilterEditor(
                         patterns: row.exclusionPatterns,
-                        minimumRecordedByteDelta: row.minimumRecordedByteDelta,
-                        monitorLatency: row.monitorLatency,
                         minimumFileBytes: row.minimumFileBytes,
                         maximumFileBytes: row.maximumFileBytes,
+                        minimumRecordedByteDelta: row.minimumRecordedByteDelta,
+                        monitorLatency: row.monitorLatency,
                         onApply: onSetRecordingFilters
                     )
                 }
