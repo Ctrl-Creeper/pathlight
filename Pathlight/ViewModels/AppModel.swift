@@ -1050,12 +1050,14 @@ final class AppModel: ObservableObject {
     /// nil for an empty field.
     func setRecordingFilters(
         patterns: [String],
+        minimumRecordedByteDelta: Int64,
         minimumFileBytes: Int64?,
         maximumFileBytes: Int64?,
         rootPath: URL
     ) {
         editOptions(rootPath: rootPath) { options in
             options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
             options.minimumFileBytes = minimumFileBytes
             options.maximumFileBytes = maximumFileBytes
         }

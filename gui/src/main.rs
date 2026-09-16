@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use eframe::egui;
+use pathlight_core::attribution::AggregationOptions;
 use pathlight_core::history::Query;
 use pathlight_core::monitor::watcher_capabilities;
 use pathlight_core::store::{Storage, WatchStartConfiguration, WatchTarget, HISTORY_ROWS};
@@ -111,6 +112,9 @@ struct App {
     /// half-typed one must not be read as a bound the user did not finish.
     min_mb: String,
     max_mb: String,
+    /// The smallest change recorded, in bytes. Text, not a number: it is a
+    /// box a person types in, and an unreadable box must not save anything.
+    min_delta: String,
     /// The tray icon, once the first frame has had a chance to make one, and
     /// `None` on a desktop that would not give us one.
     tray: Option<Tray>,
@@ -148,6 +152,10 @@ impl App {
             .as_ref()
             .map(Storage::size_bounds)
             .unwrap_or_default();
+        let min_delta = storage
+            .as_ref()
+            .map(|storage| storage.options().minimum_recorded_byte_delta)
+            .unwrap_or(AggregationOptions::LONG_TERM.minimum_recorded_byte_delta);
         Self {
             encrypt,
             paused,
@@ -155,6 +163,7 @@ impl App {
             shared_pause_stop: None,
             min_mb: mb_text(min_bytes),
             max_mb: mb_text(max_bytes),
+            min_delta: min_delta.to_string(),
             selected: watches.first().map(|watch| watch.path.clone()),
             storage,
             watches,
@@ -918,6 +927,60 @@ impl App {
         }
     }
 
+    /// How close to the filesystem the watches report. The default drops the
+    /// churn nobody asked about; zero records every change there is.
+    fn minimum_delta(&mut self, ui: &mut egui::Ui) {
+        let weak = ui.visuals().weak_text_color();
+        let mut edited = false;
+        ui.horizontal(|ui| {
+            let label = ui.label(
+                egui::RichText::new("Record changes of at least (bytes)")
+                    .small()
+                    .color(weak),
+            );
+            edited = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.min_delta)
+                        .desired_width(64.0)
+                        .hint_text("0"),
+                )
+                .labelled_by(label.id)
+                .lost_focus();
+        })
+        .response
+        .on_hover_text(
+            "A change that moves fewer bytes than this is not recorded at all, for every \
+             folder here. The default of 1024 leaves out the churn nobody asked about — \
+             lock files, editor autosaves, log lines. Type 0 to record every change there \
+             is, down to a single byte: the most detail these watches can give, and the \
+             most rows, which the journal cap then ages out sooner. A change whose size \
+             cannot be read is always recorded. Changing this restarts the watches that \
+             are running.",
+        );
+        if edited {
+            self.apply_minimum_delta();
+        }
+    }
+
+    fn apply_minimum_delta(&mut self) {
+        let Ok(bytes) = self.min_delta.trim().parse::<i64>() else {
+            self.notice = Some("The smallest change is in bytes, digits only.".to_owned());
+            return;
+        };
+        let Some(storage) = self.storage() else {
+            return;
+        };
+        if storage.options().minimum_recorded_byte_delta == bytes.max(0) {
+            return;
+        }
+        if let Err(error) = storage.set_minimum_byte_delta(bytes) {
+            self.notice = Some(format!("Could not save the setting: {error}"));
+            return;
+        }
+        // Read when a watch opens, like the size bounds beside it.
+        self.restart_watches();
+    }
+
     fn watch_list(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -944,6 +1007,8 @@ impl App {
         });
         ui.add_space(6.0);
         self.size_bounds(ui);
+        ui.add_space(6.0);
+        self.minimum_delta(ui);
         ui.add_space(6.0);
 
         if self.watches.is_empty() {
@@ -1609,6 +1674,9 @@ mod tests {
             shared_pause_stop: None,
             min_mb: String::new(),
             max_mb: String::new(),
+            min_delta: AggregationOptions::LONG_TERM
+                .minimum_recorded_byte_delta
+                .to_string(),
             tray: None,
             // Never in a test: a tray icon needs the platform's event loop,
             // and a test that made one would leave it in the tester's tray.
@@ -2105,6 +2173,35 @@ mod tests {
             harness.state().notice.is_some(),
             "nothing said what was wrong"
         );
+    }
+
+    /// The setting a person turns down to see more. Zero has to reach the file
+    /// as zero, and a box that is not a number has to change nothing.
+    #[test]
+    fn a_smallest_change_of_zero_is_saved_and_a_typo_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let mut app = app(dir.path(), Vec::new());
+        assert_eq!(
+            app.min_delta,
+            AggregationOptions::LONG_TERM
+                .minimum_recorded_byte_delta
+                .to_string(),
+            "the box did not open on the setting in force"
+        );
+
+        app.min_delta = "0".to_owned();
+        app.apply_minimum_delta();
+        assert_eq!(storage.options().minimum_recorded_byte_delta, 0);
+
+        app.min_delta = "half".to_owned();
+        app.apply_minimum_delta();
+        assert_eq!(
+            storage.options().minimum_recorded_byte_delta,
+            0,
+            "a typo was read as a threshold"
+        );
+        assert!(app.notice.is_some(), "nothing said what was wrong");
     }
 
     #[test]

@@ -30,6 +30,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         let isEnabled: Bool
         let growthAlertThresholdBytes: Int64?
         let exclusionPatterns: [String]
+        let minimumRecordedByteDelta: Int64
         let minimumFileBytes: Int64?
         let maximumFileBytes: Int64?
         let rootPath: URL
@@ -242,6 +243,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             isEnabled: target.isEnabled,
             growthAlertThresholdBytes: target.options.growthAlertThresholdBytes,
             exclusionPatterns: target.options.exclusionPatterns,
+            minimumRecordedByteDelta: target.options.minimumRecordedByteDelta,
             minimumFileBytes: target.options.minimumFileBytes,
             maximumFileBytes: target.options.maximumFileBytes,
             rootPath: target.rootPath

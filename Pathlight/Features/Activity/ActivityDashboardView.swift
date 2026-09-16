@@ -10,7 +10,7 @@ struct ActivityDashboardActions {
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
-    let setRecordingFilters: ([String], Int64?, Int64?, URL) -> Void
+    let setRecordingFilters: ([String], Int64, Int64?, Int64?, URL) -> Void
     let enableLaunchAtLogin: () -> Void
     let dismissLaunchAtLoginNudge: () -> Void
     let addFolder: (MonitoringStartConfiguration) -> Void
@@ -242,8 +242,10 @@ struct ActivityDashboardView: View {
                         onSetGrowthAlertThreshold: {
                             actions.setGrowthAlertThreshold($0, row.rootPath)
                         },
-                        onSetRecordingFilters: { patterns, minimumBytes, maximumBytes in
-                            actions.setRecordingFilters(patterns, minimumBytes, maximumBytes, row.rootPath)
+                        onSetRecordingFilters: { patterns, minimumDelta, minimumBytes, maximumBytes in
+                            actions.setRecordingFilters(
+                                patterns, minimumDelta, minimumBytes, maximumBytes, row.rootPath
+                            )
                         }
                     )
                     .transition(.opacity)
@@ -456,7 +458,7 @@ private struct ActivityDashboardTargetRow: View {
     let onRemove: () -> Void
     let onClearHistoryGap: () -> Void
     let onSetGrowthAlertThreshold: (Int64?) -> Void
-    let onSetRecordingFilters: ([String], Int64?, Int64?) -> Void
+    let onSetRecordingFilters: ([String], Int64, Int64?, Int64?) -> Void
 
     @State private var showsExclusionEditor = false
 
@@ -573,6 +575,7 @@ private struct ActivityDashboardTargetRow: View {
                 .popover(isPresented: $showsExclusionEditor, arrowEdge: .bottom) {
                     ActivityRecordingFilterEditor(
                         patterns: row.exclusionPatterns,
+                        minimumRecordedByteDelta: row.minimumRecordedByteDelta,
                         minimumFileBytes: row.minimumFileBytes,
                         maximumFileBytes: row.maximumFileBytes,
                         onApply: onSetRecordingFilters
@@ -680,9 +683,10 @@ private struct ActivityLaunchAtLoginNudge: View {
 }
 
 private struct ActivityRecordingFilterEditor: View {
-    let onApply: ([String], Int64?, Int64?) -> Void
+    let onApply: ([String], Int64, Int64?, Int64?) -> Void
 
     @State private var text: String
+    @State private var deltaText: String
     @State private var minimumText: String
     @State private var maximumText: String
     @Environment(\.dismiss) private var dismiss
@@ -692,14 +696,27 @@ private struct ActivityRecordingFilterEditor: View {
     /// dashboard counts in.
     private static let bytesPerUnit: Double = 1_000_000
 
+    /// The typed threshold, or nil when the box cannot be read — which keeps
+    /// Apply off rather than silently recording more than the user asked for.
+    /// In bytes, unlike the bounds above: this is the setting people take to
+    /// zero, and "0.001 MB" is not how anybody says one kilobyte.
+    private var deltaBytes: Int64? {
+        let trimmed = deltaText.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return 0 }
+        guard let value = Int64(trimmed), value >= 0 else { return nil }
+        return value
+    }
+
     init(
         patterns: [String],
         minimumFileBytes: Int64?,
         maximumFileBytes: Int64?,
-        onApply: @escaping ([String], Int64?, Int64?) -> Void
+        minimumRecordedByteDelta: Int64,
+        onApply: @escaping ([String], Int64, Int64?, Int64?) -> Void
     ) {
         self.onApply = onApply
         _text = State(initialValue: patterns.joined(separator: "\n"))
+        _deltaText = State(initialValue: String(max(minimumRecordedByteDelta, 0)))
         _minimumText = State(initialValue: Self.unitText(for: minimumFileBytes))
         _maximumText = State(initialValue: Self.unitText(for: maximumFileBytes))
     }
@@ -708,6 +725,24 @@ private struct ActivityRecordingFilterEditor: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("What This Watch Records")
                 .font(.headline)
+
+            Text("A change that moves fewer bytes than this is not recorded at all. The default of 1,024 leaves out the churn nobody asked about — lock files, editor autosaves, log lines. Type 0 to record every change there is, down to a single byte: the most detail this watch can give, and the most rows, which the storage cap then ages out sooner.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Smallest change") {
+                HStack(spacing: 6) {
+                    TextField("0", text: $deltaText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                    Text("bytes")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
 
             Text("File size, in MB. Leave a field empty for no limit. A file whose size cannot be read — a deletion, usually — is always recorded.")
                 .font(.caption)
@@ -755,6 +790,7 @@ private struct ActivityRecordingFilterEditor: View {
             HStack {
                 Button("Restore Defaults") {
                     text = ActivityExclusionPatterns.defaults.joined(separator: "\n")
+                    deltaText = String(LongTermWatchTargetOptions.defaultMinimumRecordedByteDelta)
                     minimumText = ""
                     maximumText = ""
                 }
@@ -762,11 +798,16 @@ private struct ActivityRecordingFilterEditor: View {
                 Spacer()
 
                 Button("Apply") {
-                    onApply(patternLines, bytes(from: minimumText), bytes(from: maximumText))
+                    onApply(
+                        patternLines,
+                        deltaBytes ?? LongTermWatchTargetOptions.defaultMinimumRecordedByteDelta,
+                        bytes(from: minimumText),
+                        bytes(from: maximumText)
+                    )
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(boundsNote != nil)
+                .disabled(boundsNote != nil || deltaBytes == nil)
             }
         }
         .padding(16)

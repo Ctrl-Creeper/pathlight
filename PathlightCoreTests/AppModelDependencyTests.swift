@@ -50,6 +50,46 @@ final class AppModelDependencyTests: XCTestCase {
         XCTAssertFalse(model.shouldShowLaunchAtLoginNudge)
     }
 
+    /// The threshold is the setting that decides how close to the filesystem a
+    /// watch reports, so it has to be editable while the watch runs — not only
+    /// at the sheet that started it.
+    func testEditingRecordingFiltersChangesTheThresholdOnARunningTarget() {
+        let persistence = UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
+        let store = LongTermWatchTargetStore(persistence: persistence)
+        let rootPath = URL(filePath: "/tmp/pathlight-tests/threshold", directoryHint: .isDirectory)
+        _ = store.upsert(LongTermWatchTarget(rootPath: rootPath, isEnabled: false), currentTargets: [])
+        let model = AppModel(dependencies: makeDependencies(longTermWatchTargets: store))
+        defer { model.cleanup() }
+        let before = model.longTermWatchTargets.first?.options.minimumRecordedByteDelta
+        XCTAssertEqual(before, LongTermWatchTargetOptions.defaultMinimumRecordedByteDelta)
+
+        model.setRecordingFilters(
+            patterns: [],
+            minimumRecordedByteDelta: 0,
+            minimumFileBytes: nil,
+            maximumFileBytes: nil,
+            rootPath: rootPath
+        )
+
+        XCTAssertEqual(model.longTermWatchTargets.first?.options.minimumRecordedByteDelta, 0)
+        // Saved, not only held: the next launch has to open on it.
+        XCTAssertEqual(
+            LongTermWatchTargetStore(persistence: persistence).loadTargets().first?
+                .options.minimumRecordedByteDelta,
+            0
+        )
+        // A negative threshold is not a smaller one; it is nonsense that would
+        // read as "record everything" by accident.
+        model.setRecordingFilters(
+            patterns: [],
+            minimumRecordedByteDelta: -5,
+            minimumFileBytes: nil,
+            maximumFileBytes: nil,
+            rootPath: rootPath
+        )
+        XCTAssertEqual(model.longTermWatchTargets.first?.options.minimumRecordedByteDelta, 0)
+    }
+
     func testRemovingTargetPersistsAndClearsRuntimeStatus() {
         let persistence = UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
         let store = LongTermWatchTargetStore(persistence: persistence)
