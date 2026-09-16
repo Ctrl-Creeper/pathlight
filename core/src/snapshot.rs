@@ -56,6 +56,9 @@ pub enum BindingChangeKind {
     Renamed,
     HardLinkAdded,
     HardLinkRemoved,
+    /// The same name, a different size. Not a binding change at all, but the
+    /// one difference a gap most often hides: a file that kept growing.
+    Modified,
 }
 
 /// Whether native object IDs can be compared across these two observations.
@@ -106,6 +109,67 @@ impl ScanSnapshot {
             .ok()
     }
 
+    /// Fold what was seen live since this snapshot into it: `Some` is the
+    /// path's allocated size now, `None` a path that is gone. One merge of two
+    /// sorted sequences rather than an insert per change, because the
+    /// snapshot is millions of entries and the changes can be thousands.
+    pub fn amend(&mut self, changes: BTreeMap<PathBuf, Option<u64>>) {
+        if changes.is_empty() {
+            return;
+        }
+        let now = SystemTime::now();
+        let entries = std::mem::take(&mut self.entries);
+        let mut merged = Vec::with_capacity(entries.len());
+        let mut changes = changes.into_iter().peekable();
+        for (path, mut measurement) in entries {
+            while let Some((changed, _)) = changes.peek() {
+                match changed.as_path().cmp(path.as_ref()) {
+                    std::cmp::Ordering::Less => {
+                        let (changed, size) = changes.next().unwrap();
+                        if let Some(size) = size {
+                            merged.push((changed.into_boxed_path(), amended(None, size, now)));
+                        }
+                    }
+                    std::cmp::Ordering::Equal => break,
+                    std::cmp::Ordering::Greater => break,
+                }
+            }
+            match changes.next_if(|(changed, _)| changed.as_path() == path.as_ref()) {
+                Some((_, None)) => {}
+                Some((_, Some(size))) => {
+                    measurement = amended(Some(measurement), size, now);
+                    merged.push((path, measurement));
+                }
+                None => merged.push((path, measurement)),
+            }
+        }
+        for (changed, size) in changes {
+            if let Some(size) = size {
+                merged.push((changed.into_boxed_path(), amended(None, size, now)));
+            }
+        }
+        self.entries = merged;
+    }
+
+    /// Whether `path` is under a directory this scan could not read, which
+    /// makes its absence from the scan mean nothing.
+    fn unreadable(&self, errors: &[&Path], path: &Path) -> bool {
+        !errors.is_empty()
+            && path
+                .ancestors()
+                .any(|ancestor| errors.binary_search(&ancestor).is_ok())
+    }
+
+    fn error_paths(&self) -> Vec<&Path> {
+        let mut paths: Vec<&Path> = self
+            .errors
+            .iter()
+            .map(|error| error.path.as_path())
+            .collect();
+        paths.sort_unstable();
+        paths
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &FileMeasurement)> {
         self.entries
             .iter()
@@ -152,6 +216,19 @@ impl ScanSnapshot {
         }
         totals.measured_objects = totals.measured_objects.map(|_| observed.len() as u64);
         totals
+    }
+}
+
+/// A measurement made from a live size rather than a stat: the identity is
+/// kept when there was one, because the size is all the live path knows.
+fn amended(previous: Option<FileMeasurement>, size: u64, now: SystemTime) -> FileMeasurement {
+    FileMeasurement {
+        identity: previous.as_ref().and_then(|entry| entry.identity),
+        kind: previous.as_ref().map_or(FileKind::File, |entry| entry.kind),
+        logical_bytes: previous.as_ref().map_or(size, |entry| entry.logical_bytes),
+        allocated_bytes: Some(size),
+        link_count: previous.as_ref().and_then(|entry| entry.link_count),
+        measured_at: now,
     }
 }
 
@@ -282,23 +359,37 @@ pub fn reconcile(
         historical_complete: false,
     };
     if previous.root != current.root
-        || !previous.is_complete()
-        || !current.is_complete()
         || previous.get(&previous.root).and_then(|at| at.identity)
             != current.get(&current.root).and_then(|at| at.identity)
     {
         return result;
     }
-    let before = previous.totals();
-    let after = current.totals();
-    result.logical_delta = before
-        .logical_bytes
-        .zip(after.logical_bytes)
-        .map(|(a, b)| i128::from(b) - i128::from(a));
-    result.allocated_delta = before
-        .allocated_bytes
-        .zip(after.allocated_bytes)
-        .map(|(a, b)| i128::from(b) - i128::from(a));
+    // A directory one side could not read is a directory whose contents that
+    // side knows nothing about, not a directory that was emptied. Only what
+    // is under such a directory is set aside; a whole-disk scan always has a
+    // few, and refusing the whole comparison over them would mean a gap on a
+    // whole disk is never recovered.
+    let previous_errors = previous.error_paths();
+    let current_errors = current.error_paths();
+    let unreadable = |path: &Path| {
+        previous.unreadable(&previous_errors, path) || current.unreadable(&current_errors, path)
+    };
+    // Totals only when both walks were whole: a folder one side could not
+    // read makes the difference in totals a difference in what was readable.
+    // The per-path list below does not have that problem, because it sets
+    // aside exactly what was under such folders.
+    if previous.is_complete() && current.is_complete() {
+        let before = previous.totals();
+        let after = current.totals();
+        result.logical_delta = before
+            .logical_bytes
+            .zip(after.logical_bytes)
+            .map(|(a, b)| i128::from(b) - i128::from(a));
+        result.allocated_delta = before
+            .allocated_bytes
+            .zip(after.allocated_bytes)
+            .map(|(a, b)| i128::from(b) - i128::from(a));
+    }
 
     let old_ids = identity_names(previous);
     let new_ids = identity_names(current);
@@ -306,12 +397,30 @@ pub fn reconcile(
     // runs after a gap, not on the event path; merge them if that changes.
     let removed: BTreeMap<&Path, _> = previous
         .iter()
-        .filter(|(path, _)| current.get(path).is_none())
+        .filter(|(path, _)| current.get(path).is_none() && !unreadable(path))
         .collect();
     let added: BTreeMap<&Path, _> = current
         .iter()
-        .filter(|(path, _)| previous.get(path).is_none())
+        .filter(|(path, _)| previous.get(path).is_none() && !unreadable(path))
         .collect();
+    for (path, measurement) in current.iter() {
+        let Some(old) = previous.get(path) else {
+            continue;
+        };
+        // Sizes on both sides, or nothing to say: a side that could not
+        // measure is not a side that measured zero.
+        if let (Some(before), Some(after)) = (old.allocated_bytes, measurement.allocated_bytes) {
+            if before != after && !unreadable(path) {
+                result.bindings.push(BindingChange {
+                    kind: BindingChangeKind::Modified,
+                    path: path.to_path_buf(),
+                    previous_path: Some(path.to_path_buf()),
+                    identity: measurement.identity,
+                    previous_identity: old.identity,
+                });
+            }
+        }
+    }
     let mut paired_old = BTreeSet::new();
     let mut paired_new = BTreeSet::new();
     if identity_continuity == IdentityContinuity::ObservedWithoutGap {
