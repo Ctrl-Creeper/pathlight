@@ -430,7 +430,6 @@ impl Worker {
         }
         let allocated = |snapshot: &ScanSnapshot, at: &Path| {
             snapshot
-                .entries
                 .get(at)
                 .and_then(|entry| entry.allocated_bytes)
                 .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))

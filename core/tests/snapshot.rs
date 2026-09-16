@@ -60,8 +60,8 @@ fn hard_links_keep_both_names_without_double_counting_size() {
     fs::hard_link(&original, &alias).unwrap();
     let after = scan(directory.path()).unwrap();
 
-    assert!(after.entries.contains_key(&original));
-    assert!(after.entries.contains_key(&alias));
+    assert!(after.get(&original).is_some());
+    assert!(after.get(&alias).is_some());
     assert_eq!(after.totals().logical_bytes, Some(15));
     assert_eq!(
         after.totals().allocated_bytes,
@@ -189,7 +189,6 @@ fn unknown_identity_or_allocation_cannot_be_presented_as_unique_space() {
 
     let mut unsupported_allocation = snapshot.clone();
     unsupported_allocation
-        .entries
         .get_mut(&path)
         .unwrap()
         .allocated_bytes = None;
@@ -197,11 +196,7 @@ fn unknown_identity_or_allocation_cannot_be_presented_as_unique_space() {
     assert_eq!(unsupported_allocation.totals().allocated_bytes, None);
 
     let mut unsupported_identity = snapshot.clone();
-    unsupported_identity
-        .entries
-        .get_mut(&path)
-        .unwrap()
-        .identity = None;
+    unsupported_identity.get_mut(&path).unwrap().identity = None;
     assert_eq!(unsupported_identity.totals().logical_bytes, None);
     assert_eq!(unsupported_identity.totals().allocated_bytes, None);
     assert_eq!(
@@ -240,7 +235,7 @@ fn symlink_cycles_and_links_outside_the_root_are_not_traversed() {
     assert!(snapshot.is_complete());
     assert_eq!(snapshot.entries.len(), 3); // root and two links, no targets
     assert_eq!(
-        snapshot.entries[&directory.path().join("cycle")].kind,
+        snapshot.get(&directory.path().join("cycle")).unwrap().kind,
         FileKind::Symlink
     );
     assert!(scan(&directory.path().join("outside")).is_err());
@@ -262,8 +257,8 @@ fn distinct_non_utf8_names_remain_distinct_native_bindings() {
     fs::write(&first, b"first").unwrap();
     fs::write(&second, b"second").unwrap();
     let snapshot = scan(directory.path()).unwrap();
-    assert!(snapshot.entries.contains_key(&first));
-    assert!(snapshot.entries.contains_key(&second));
+    assert!(snapshot.get(&first).is_some());
+    assert!(snapshot.get(&second).is_some());
     assert_eq!(snapshot.totals().logical_bytes, Some(11));
     assert_ne!(
         measure_file(&first).unwrap().identity,
