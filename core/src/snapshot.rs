@@ -28,7 +28,13 @@ pub struct ScanSnapshot {
     pub started_at: SystemTime,
     pub finished_at: SystemTime,
     pub consistency: ScanConsistency,
-    pub entries: BTreeMap<PathBuf, FileMeasurement>,
+    /// Sorted by path, one entry per name observed.
+    ///
+    /// A list rather than a map: a whole-disk baseline is millions of these and
+    /// stays resident for the life of the watch, where a B-tree spends about
+    /// half again the size of an entry on the slack in its nodes. Reads go
+    /// through [`ScanSnapshot::get`], which is a binary search.
+    pub entries: Vec<(Box<Path>, FileMeasurement)>,
     pub errors: Vec<ScanError>,
 }
 
@@ -85,6 +91,27 @@ impl ScanSnapshot {
         self.errors.is_empty()
     }
 
+    /// The measurement recorded for `path`.
+    pub fn get(&self, path: &Path) -> Option<&FileMeasurement> {
+        self.at(path).map(|at| &self.entries[at].1)
+    }
+
+    pub fn get_mut(&mut self, path: &Path) -> Option<&mut FileMeasurement> {
+        self.at(path).map(|at| &mut self.entries[at].1)
+    }
+
+    fn at(&self, path: &Path) -> Option<usize> {
+        self.entries
+            .binary_search_by(|(held, _)| held.as_ref().cmp(path))
+            .ok()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &FileMeasurement)> {
+        self.entries
+            .iter()
+            .map(|(path, measurement)| (path.as_ref(), measurement))
+    }
+
     pub fn totals(&self) -> SnapshotTotals {
         let mut totals = SnapshotTotals {
             logical_bytes: Some(0),
@@ -94,7 +121,7 @@ impl ScanSnapshot {
             partial: !self.is_complete(),
         };
         let mut observed: BTreeMap<&ObjectIdentity, &FileMeasurement> = BTreeMap::new();
-        for measurement in self.entries.values() {
+        for (_, measurement) in &self.entries {
             let Some(identity) = &measurement.identity else {
                 totals.logical_bytes = None;
                 totals.allocated_bytes = None;
@@ -157,18 +184,18 @@ fn scan_with(
         started_at,
         finished_at: started_at,
         consistency: ScanConsistency::ObservedInterval,
-        entries: BTreeMap::from([(root.clone(), root_measurement)]),
+        entries: vec![(root.clone().into_boxed_path(), root_measurement.clone())],
         errors: Vec::new(),
     };
-    let mut directories = vec![root];
-    while let Some(directory) = directories.pop() {
+    // Each directory carries the identity it had when it was queued, which is
+    // what the check below compares against.
+    let mut directories = vec![(root, root_measurement.identity)];
+    while let Some((directory, queued)) = directories.pop() {
         // A directory may have been replaced since its name was queued. Never
         // knowingly descend through a replacement or a newly installed symlink.
         // This narrows that race; it cannot close the later path lookup window.
         match measure(&directory) {
-            Ok(current)
-                if current.kind == FileKind::Directory
-                    && current.identity == snapshot.entries[&directory].identity => {}
+            Ok(current) if current.kind == FileKind::Directory && current.identity == queued => {}
             Ok(_) => {
                 snapshot.record_error(
                     directory,
@@ -202,14 +229,22 @@ fn scan_with(
             match measure(&path) {
                 Ok(measurement) => {
                     if measurement.kind == FileKind::Directory {
-                        directories.push(path.clone());
+                        directories.push((path.clone(), measurement.identity));
                     }
-                    snapshot.entries.insert(path, measurement);
+                    snapshot.entries.push((path.into_boxed_path(), measurement));
                 }
                 Err(error) => snapshot.record_error(path, error),
             }
         }
     }
+    snapshot
+        .entries
+        .sort_by(|(left, _), (right, _)| left.cmp(right));
+    // One name is one object: a traversal that saw a name twice recorded two
+    // observations of it, and the reads below expect one.
+    snapshot
+        .entries
+        .dedup_by(|(later, _), (earlier, _)| later == earlier);
     snapshot.finished_at = SystemTime::now();
     Ok(snapshot)
 }
@@ -242,14 +277,8 @@ pub fn reconcile(
     if previous.root != current.root
         || !previous.is_complete()
         || !current.is_complete()
-        || previous
-            .entries
-            .get(&previous.root)
-            .and_then(|entry| entry.identity.as_ref())
-            != current
-                .entries
-                .get(&current.root)
-                .and_then(|entry| entry.identity.as_ref())
+        || previous.get(&previous.root).and_then(|at| at.identity)
+            != current.get(&current.root).and_then(|at| at.identity)
     {
         return result;
     }
@@ -266,15 +295,15 @@ pub fn reconcile(
 
     let old_ids = identity_names(previous);
     let new_ids = identity_names(current);
-    let removed: BTreeMap<_, _> = previous
-        .entries
+    // ponytail: a lookup per entry rather than a merge of the two lists. This
+    // runs after a gap, not on the event path; merge them if that changes.
+    let removed: BTreeMap<&Path, _> = previous
         .iter()
-        .filter(|(path, _)| !current.entries.contains_key(*path))
+        .filter(|(path, _)| current.get(path).is_none())
         .collect();
-    let added: BTreeMap<_, _> = current
-        .entries
+    let added: BTreeMap<&Path, _> = current
         .iter()
-        .filter(|(path, _)| !previous.entries.contains_key(*path))
+        .filter(|(path, _)| previous.get(path).is_none())
         .collect();
     let mut paired_old = BTreeSet::new();
     let mut paired_new = BTreeSet::new();
@@ -296,10 +325,10 @@ pub fn reconcile(
             if let ([old_path], [new_path]) = (lost.as_slice(), gained.as_slice()) {
                 result.bindings.push(BindingChange {
                     kind: BindingChangeKind::Renamed,
-                    path: (**new_path).clone(),
-                    previous_path: Some((**old_path).clone()),
-                    identity: Some((*identity).clone()),
-                    previous_identity: Some((*identity).clone()),
+                    path: new_path.to_path_buf(),
+                    previous_path: Some(old_path.to_path_buf()),
+                    identity: Some(**identity),
+                    previous_identity: Some(**identity),
                 });
                 paired_old.insert(*old_path);
                 paired_new.insert(*new_path);
@@ -321,10 +350,10 @@ pub fn reconcile(
             } else {
                 BindingChangeKind::Removed
             },
-            path: path.clone(),
+            path: path.to_path_buf(),
             previous_path: None,
-            identity: measurement.identity.clone(),
-            previous_identity: measurement.identity.clone(),
+            identity: measurement.identity,
+            previous_identity: measurement.identity,
         });
     }
     for (path, measurement) in added {
@@ -342,15 +371,15 @@ pub fn reconcile(
             } else {
                 BindingChangeKind::Created
             },
-            path: path.clone(),
+            path: path.to_path_buf(),
             previous_path: None,
-            identity: measurement.identity.clone(),
+            identity: measurement.identity,
             previous_identity: None,
         });
     }
     if identity_continuity == IdentityContinuity::ObservedWithoutGap {
-        for (path, measurement) in &current.entries {
-            let Some(old) = previous.entries.get(path) else {
+        for (path, measurement) in current.iter() {
+            let Some(old) = previous.get(path) else {
                 continue;
             };
             if old.identity.is_some()
@@ -359,10 +388,10 @@ pub fn reconcile(
             {
                 result.bindings.push(BindingChange {
                     kind: BindingChangeKind::Replaced,
-                    path: path.clone(),
-                    previous_path: Some(path.clone()),
-                    identity: measurement.identity.clone(),
-                    previous_identity: old.identity.clone(),
+                    path: path.to_path_buf(),
+                    previous_path: Some(path.to_path_buf()),
+                    identity: measurement.identity,
+                    previous_identity: old.identity,
                 });
             }
         }
@@ -370,9 +399,9 @@ pub fn reconcile(
     result
 }
 
-fn identity_names(snapshot: &ScanSnapshot) -> BTreeMap<&ObjectIdentity, Vec<&PathBuf>> {
+fn identity_names(snapshot: &ScanSnapshot) -> BTreeMap<&ObjectIdentity, Vec<&Path>> {
     let mut names: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    for (path, measurement) in &snapshot.entries {
+    for (path, measurement) in snapshot.iter() {
         if let Some(identity) = &measurement.identity {
             names.entry(identity).or_default().push(path);
         }
@@ -407,7 +436,7 @@ mod tests {
         })
         .unwrap();
 
-        assert!(!snapshot.entries.contains_key(&queued.join("outside-file")));
+        assert!(snapshot.get(&queued.join("outside-file")).is_none());
         assert!(!snapshot.is_complete());
         assert_eq!(snapshot.errors[0].path, queued);
         assert!(snapshot.totals().partial);
@@ -447,8 +476,8 @@ mod tests {
         std::fs::write(&first, b"shared bytes").unwrap();
         std::fs::hard_link(&first, &alias).unwrap();
         let mut snapshot = scan(directory.path()).unwrap();
-        snapshot.entries.get_mut(&alias).unwrap().logical_bytes += 100;
-        snapshot.entries.get_mut(&alias).unwrap().allocated_bytes = Some(9000);
+        snapshot.get_mut(&alias).unwrap().logical_bytes += 100;
+        snapshot.get_mut(&alias).unwrap().allocated_bytes = Some(9000);
 
         assert!(snapshot.totals().partial);
         assert_eq!(snapshot.totals().logical_bytes, None);
