@@ -122,14 +122,21 @@ impl Session {
         let storage_threshold = storage.growth_alert_bytes();
         let now = SystemTime::now();
         let day_start = utc_day_start(now);
-        let initial_growth = storage
-            .positive_growth_since(root, day_start)
-            .unwrap_or_else(|error| {
-                storage.note(&format!(
-                    "Could not restore today's growth total for {root}: {error}"
-                ));
-                0
-            });
+        // Only when the user asked to be told: this reads, decrypts and parses
+        // the whole journal, which the cap allows to be a gigabyte. Paying that
+        // on every watch open for an alert nobody switched on is the opposite
+        // of a monitor that stays cheap.
+        let initial_growth = match storage_threshold > 0 {
+            false => 0,
+            true => storage
+                .positive_growth_since(root, day_start)
+                .unwrap_or_else(|error| {
+                    storage.note(&format!(
+                        "Could not restore today's growth total for {root}: {error}"
+                    ));
+                    0
+                }),
+        };
         let records_epoch = storage.records_epoch();
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
