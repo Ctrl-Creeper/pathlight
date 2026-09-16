@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +114,8 @@ const COMPACT_AT: usize = 10_000;
 struct Persisted {
     path: PathBuf,
     lock_dir: PathBuf,
+    /// How long a baseline nobody has touched is kept. Zero is forever.
+    keep_days: u32,
     /// The journal whose key seals these lines, when the user asked for
     /// encrypted records: one key for everything Pathlight keeps, so turning
     /// encryption on does not leave every path readable over here.
@@ -137,8 +139,19 @@ impl SizeIndex {
     /// `key_source` is the journal whose key the lines are sealed under, or
     /// `None` to keep them as plain json — the same choice the journal itself
     /// offers, because these lines name the same files.
-    pub fn at(path: PathBuf, key_source: Option<PathBuf>) -> Self {
-        let (sizes, written) = load(&path, key_source.as_deref());
+    ///
+    /// `keep_days` is how long a baseline nobody has touched is worth keeping,
+    /// zero being forever as everywhere else. Without it this is the one thing
+    /// here that only grows: one entry per file ever changed, reloaded at every
+    /// start, for the life of the machine. A dropped baseline costs one
+    /// over-reported delta the next time that file changes, which is what a
+    /// file first seen after a restart already costs.
+    pub fn at(path: PathBuf, key_source: Option<PathBuf>, keep_days: u32) -> Self {
+        let (loaded, written) = load(&path, key_source.as_deref(), cutoff(keep_days));
+        let sizes = loaded
+            .into_iter()
+            .map(|(path, baseline)| (path, baseline.size))
+            .collect();
         let lock_dir = path
             .parent()
             .map(Path::to_path_buf)
@@ -148,6 +161,7 @@ impl SizeIndex {
             file: Some(Persisted {
                 path,
                 lock_dir,
+                keep_days,
                 key_source,
                 state: Mutex::new(Pending {
                     lines: Vec::new(),
@@ -237,11 +251,26 @@ impl SizeIndex {
                 // Another host may have appended since this instance loaded.
                 // Rebase local pending operations onto the locked on-disk
                 // state instead of publishing a stale in-memory snapshot.
-                let (mut merged, _) = load(&file.path, file.key_source.as_deref());
+                let (mut merged, _) = load(
+                    &file.path,
+                    file.key_source.as_deref(),
+                    cutoff(file.keep_days),
+                );
                 apply(&mut merged, &lines);
+                // The rewrite is where what aged out actually goes, from the
+                // file and from memory alike. Compaction happens on writes, so
+                // an index that is growing is an index that gets pruned.
+                // ponytail: a baseline recorded between the take above and this
+                // line is forgotten in memory while its line survives on disk —
+                // one delta, the same cost as a line that never reached the
+                // file. Hold both locks at once if that ever shows up.
+                self.sizes
+                    .lock()
+                    .unwrap()
+                    .retain(|key, _| merged.contains_key(key));
                 let mut lines: Vec<String> = merged
                     .into_iter()
-                    .filter_map(|(path, size)| line(path, Some(size)))
+                    .filter_map(|(path, held)| line(path, Some(held.size), held.recorded_at))
                     .collect();
                 lines.sort();
                 lines
@@ -261,7 +290,7 @@ impl SizeIndex {
         let Some(file) = &self.file else {
             return;
         };
-        if let Some(line) = line(key, size) {
+        if let Some(line) = line(key, size, crate::event::swift_date::text(SystemTime::now())) {
             file.state.lock().unwrap().lines.push(line);
         }
     }
@@ -282,8 +311,8 @@ struct Entry {
     /// The namespaced key, which is what the app stores here too.
     path: String,
     size: Option<i64>,
-    /// Written because the app's decoder requires it. Nothing here reads it
-    /// back: for one path the last line wins either way.
+    /// Written because the app's decoder requires it, and read back to decide
+    /// what has gone stale. For one path the last line wins either way.
     recorded_at: Option<String>,
 }
 
@@ -296,7 +325,11 @@ enum Kind {
 
 /// The json for one baseline, or `None` when it cannot be spelled — a line
 /// that would not parse back is worse than a line that was never written.
-fn line(path: String, size: Option<i64>) -> Option<String> {
+///
+/// The stamp is passed in rather than taken here because compaction rewrites
+/// lines it did not measure: stamping those with the time of the rewrite would
+/// make every surviving baseline look new and nothing would ever age out.
+fn line(path: String, size: Option<i64>, recorded_at: Option<String>) -> Option<String> {
     serde_json::to_string(&Entry {
         kind: match size {
             Some(_) => Kind::Record,
@@ -304,14 +337,32 @@ fn line(path: String, size: Option<i64>) -> Option<String> {
         },
         path,
         size,
-        recorded_at: crate::event::swift_date::text(SystemTime::now()),
+        recorded_at,
     })
     .ok()
 }
 
+/// A baseline as the file holds it. Only the size is kept in memory between
+/// compactions; the stamp is what the rewrite has to carry forward.
+struct Baseline {
+    size: i64,
+    recorded_at: Option<String>,
+}
+
+/// When a baseline stops being worth its memory. `None` is forever.
+fn cutoff(keep_days: u32) -> Option<SystemTime> {
+    (keep_days > 0)
+        .then(|| SystemTime::now().checked_sub(Duration::from_secs(u64::from(keep_days) * 86_400)))
+        .flatten()
+}
+
 /// The baselines in `path`, and how many lines they took, or nothing when
 /// there is no file yet.
-fn load(path: &Path, key_source: Option<&Path>) -> (HashMap<String, i64>, usize) {
+fn load(
+    path: &Path,
+    key_source: Option<&Path>,
+    cutoff: Option<SystemTime>,
+) -> (HashMap<String, Baseline>, usize) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return (HashMap::new(), 0);
     };
@@ -332,22 +383,41 @@ fn load(path: &Path, key_source: Option<&Path>) -> (HashMap<String, i64>, usize)
             continue;
         };
         written += 1;
-        match entry.size.filter(|_| entry.kind == Kind::Record) {
-            Some(size) => sizes.insert(entry.path, size),
-            None => sizes.remove(&entry.path),
+        let Some(size) = entry.size.filter(|_| entry.kind == Kind::Record) else {
+            sizes.remove(&entry.path);
+            continue;
+        };
+        // A baseline whose stamp this build cannot read is kept rather than
+        // aged out on a guess, the same rule the journal trims by.
+        let stale = match (cutoff, entry.recorded_at.as_deref()) {
+            (Some(cutoff), Some(stamp)) => {
+                crate::event::swift_date::time(stamp).is_some_and(|at| at < cutoff)
+            }
+            _ => false,
+        };
+        match stale {
+            true => sizes.remove(&entry.path),
+            false => sizes.insert(
+                entry.path,
+                Baseline {
+                    size,
+                    recorded_at: entry.recorded_at,
+                },
+            ),
         };
     }
     (sizes, written)
 }
 
-fn apply(sizes: &mut HashMap<String, i64>, lines: &[String]) {
+fn apply(sizes: &mut HashMap<String, Baseline>, lines: &[String]) {
     for line in lines {
         let Ok(entry) = serde_json::from_str::<Entry>(line) else {
             continue;
         };
         match entry.size.filter(|_| entry.kind == Kind::Record) {
             Some(size) => {
-                sizes.insert(entry.path, size);
+                let recorded_at = entry.recorded_at;
+                sizes.insert(entry.path, Baseline { size, recorded_at });
             }
             None => {
                 sizes.remove(&entry.path);
@@ -364,8 +434,8 @@ mod persistence_tests {
     fn compaction_rebases_onto_entries_written_by_another_process() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activity-size-index.jsonl");
-        let first = SizeIndex::at(path.clone(), None);
-        let second = SizeIndex::at(path.clone(), None);
+        let first = SizeIndex::at(path.clone(), None, 0);
+        let second = SizeIndex::at(path.clone(), None, 0);
 
         first.record("first", "/first.bin", Some(1));
         first.persist().unwrap();
@@ -373,9 +443,45 @@ mod persistence_tests {
         second.file.as_ref().unwrap().state.lock().unwrap().written = COMPACT_AT;
         second.persist().unwrap();
 
-        let reopened = SizeIndex::at(path, None);
+        let reopened = SizeIndex::at(path, None, 0);
         assert_eq!(reopened.peek("first", "/first.bin"), Some(1));
         assert_eq!(reopened.peek("second", "/second.bin"), Some(2));
+    }
+
+    /// A baseline nobody has touched inside the window goes, and a compaction
+    /// carries the stamp it found rather than restamping what it rewrites.
+    /// Restamping would make every survivor look new, and the index would grow
+    /// for the life of the machine — one entry per file ever changed.
+    #[test]
+    fn baselines_age_out_and_a_compaction_does_not_reset_their_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity-size-index.jsonl");
+        let days_ago = |days: u64| {
+            crate::event::swift_date::text(SystemTime::now() - Duration::from_secs(days * 86_400))
+        };
+        let lines = vec![
+            line(key("watch", "/ancient.bin"), Some(1), days_ago(400)).unwrap(),
+            line(key("watch", "/older.bin"), Some(2), days_ago(100)).unwrap(),
+        ];
+        write(&path, &lines, None, false).unwrap();
+
+        let index = SizeIndex::at(path.clone(), None, 180);
+        assert_eq!(index.peek("watch", "/ancient.bin"), None);
+        assert_eq!(index.peek("watch", "/older.bin"), Some(2));
+
+        // Force the rewrite, then reopen with a window the survivor is outside
+        // of: it can only still be there if the rewrite restamped it.
+        index.record("watch", "/fresh.bin", Some(3));
+        index.file.as_ref().unwrap().state.lock().unwrap().written = COMPACT_AT;
+        index.persist().unwrap();
+
+        let reopened = SizeIndex::at(path, None, 50);
+        assert_eq!(
+            reopened.peek("watch", "/older.bin"),
+            None,
+            "the compaction stamped a rewrite it did not measure"
+        );
+        assert_eq!(reopened.peek("watch", "/fresh.bin"), Some(3));
     }
 }
 

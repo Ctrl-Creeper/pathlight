@@ -156,6 +156,53 @@ struct ActivitySizeIndexTests {
             #expect(reloaded.knownSize(for: file) == expected)
         }
     }
+
+    /// A baseline nobody has touched inside the window goes, and a compaction
+    /// carries the stamp it found rather than restamping what it rewrites.
+    /// Restamping would make every survivor look new, and the index would grow
+    /// for the life of the machine — one entry per file ever changed.
+    @Test("ages out untouched baselines, and a compaction does not reset their age")
+    func agesOutUntouchedBaselines() throws {
+        let journalURL = makeTemporaryJournalURL()
+        let ancient = URL(filePath: "/Users/example/Downloads/ancient.bin")
+        let older = URL(filePath: "/Users/example/Downloads/older.bin")
+        let index = ActivitySizeIndex(journalURL: journalURL)
+        index.recordKnownSize(1, for: ancient)
+        index.recordKnownSize(2, for: older)
+        index.flushPendingJournalWrites()
+        try backdate(journalURL, byDays: [0: 400, 1: 100])
+
+        let loaded = ActivitySizeIndex(journalURL: journalURL, keepDays: 180)
+        #expect(loaded.knownSize(for: ancient) == nil)
+        #expect(loaded.knownSize(for: older) == 2)
+
+        // Rewrite, then reopen with a window the survivor is outside of: it can
+        // only still be there if the rewrite restamped it.
+        loaded.compactNow()
+        let reopened = ActivitySizeIndex(journalURL: journalURL, keepDays: 50)
+        #expect(
+            reopened.knownSize(for: older) == nil,
+            "the compaction stamped a rewrite it did not measure"
+        )
+    }
+}
+
+/// Backdates lines in place: the age of a baseline is the one thing a test
+/// cannot produce by waiting.
+private func backdate(_ journalURL: URL, byDays: [Int: Double]) throws {
+    let formatter = ISO8601DateFormatter()
+    let lines = try String(contentsOf: journalURL, encoding: .utf8)
+        .split(separator: "\n", omittingEmptySubsequences: true)
+    let rewritten = try lines.enumerated().map { position, line -> String in
+        guard let days = byDays[position],
+              var object = try JSONSerialization.jsonObject(with: Data(line.utf8))
+                  as? [String: Any] else {
+            return String(line)
+        }
+        object["recordedAt"] = formatter.string(from: Date(timeIntervalSinceNow: -days * 86_400))
+        return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+    try Data((rewritten.joined(separator: "\n") + "\n").utf8).write(to: journalURL)
 }
 
 private func makeTemporaryJournalURL() -> URL {

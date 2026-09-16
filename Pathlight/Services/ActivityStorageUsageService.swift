@@ -22,15 +22,18 @@ nonisolated struct ActivityStorageUsageService: Sendable {
     private let eventJournalURL: URL
     private let sizeIndexJournalURL: URL
     private let lineCodec: ActivityStorageLineCodec
+    private let sizeIndexKeepDays: Int
 
     init(
         eventJournalURL: URL = JSONLActivityEventStore.defaultJournalURL(),
         sizeIndexJournalURL: URL = ActivitySizeIndex.defaultJournalURL(),
-        lineCodec: ActivityStorageLineCodec = .plaintext
+        lineCodec: ActivityStorageLineCodec = .plaintext,
+        sizeIndexKeepDays: Int = ActivityStoragePreferences.defaults.detailedRetentionDays
     ) {
         self.eventJournalURL = eventJournalURL
         self.sizeIndexJournalURL = sizeIndexJournalURL
         self.lineCodec = lineCodec
+        self.sizeIndexKeepDays = sizeIndexKeepDays
     }
 
     func loadUsage() async -> ActivityStorageUsageSnapshot {
@@ -60,7 +63,11 @@ nonisolated struct ActivityStorageUsageService: Sendable {
     }
 
     func compactSizeIndex() async {
-        ActivitySizeIndex(journalURL: sizeIndexJournalURL, lineCodec: lineCodec).compactNow()
+        ActivitySizeIndex(
+            journalURL: sizeIndexJournalURL,
+            lineCodec: lineCodec,
+            keepDays: sizeIndexKeepDays
+        ).compactNow()
     }
 
     func availableEventJournalBytes(storageLimitBytes: Int64) async -> Int64 {

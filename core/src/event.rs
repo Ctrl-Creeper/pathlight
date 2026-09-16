@@ -192,6 +192,13 @@ pub(crate) mod swift_date {
             .ok()
     }
 
+    /// The time a stamp spells, or `None` for one this build cannot read.
+    pub fn time(value: &str) -> Option<SystemTime> {
+        OffsetDateTime::parse(value, &Rfc3339)
+            .map(SystemTime::from)
+            .ok()
+    }
+
     pub fn serialize<S: Serializer>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
         let text = text(*value).ok_or_else(|| S::Error::custom("timestamp out of range"))?;
         serializer.serialize_str(&text)
