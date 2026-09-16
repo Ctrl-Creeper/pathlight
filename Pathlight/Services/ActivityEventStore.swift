@@ -214,6 +214,32 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         return 0
     }
 
+    /// The journal a line at a time. Reading it whole costs the file twice —
+    /// the `Data` and the `String` decoded from it — and the cap the journal
+    /// is kept under is a gigabyte by default. Mirrors `Journal::lines`.
+    private func forEachLine(_ body: (String) throws -> Void) throws {
+        let handle = try FileHandle(forReadingFrom: journalURL)
+        defer { try? handle.close() }
+        let newline = UInt8(ascii: "\n")
+        var pending = Data()
+        while let chunk = try handle.read(upToCount: 1 << 16), !chunk.isEmpty {
+            pending.append(chunk)
+            var start = pending.startIndex
+            while let end = pending[start...].firstIndex(of: newline) {
+                if end > start {
+                    try body(String(decoding: pending[start..<end], as: UTF8.self))
+                }
+                start = pending.index(after: end)
+            }
+            // One compaction per chunk rather than one per line: dropping the
+            // front of a `Data` moves everything behind it.
+            pending = Data(pending[start...])
+        }
+        if !pending.isEmpty {
+            try body(String(decoding: pending, as: UTF8.self))
+        }
+    }
+
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
         let fileManager = FileManager.default
         guard limit > 0, fileManager.fileExists(atPath: journalURL.path) else {
@@ -221,19 +247,17 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         }
 
         let root = rootPath.standardizedFileURL.path
-        let data = try Data(contentsOf: journalURL)
-        let contents = String(decoding: data, as: UTF8.self)
-
-        return contents
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line -> DiskActivityEvent? in
-                guard let data = try? lineCodec.decode(line),
-                      let event = try? decoder.decode(DiskActivityEvent.self, from: data),
-                      event.rootPath.standardizedFileURL.path == root else {
-                    return nil
-                }
-                return event
+        var events: [DiskActivityEvent] = []
+        try forEachLine { line in
+            guard let data = try? lineCodec.decode(line),
+                  let event = try? decoder.decode(DiskActivityEvent.self, from: data),
+                  event.rootPath.standardizedFileURL.path == root else {
+                return
             }
+            events.append(event)
+        }
+
+        return events
             .sorted { lhs, rhs in
                 if lhs.timestamp == rhs.timestamp {
                     return lhs.path.path > rhs.path.path
@@ -257,19 +281,16 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         }
 
         let root = rootPath.standardizedFileURL.path
-        let data = try Data(contentsOf: journalURL)
-        let contents = String(decoding: data, as: UTF8.self)
-
         var builder = ActivityEventPageBuilder(
             limit: limit,
             bucketInterval: bucketInterval,
             query: query
         )
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
+        try forEachLine { line in
             guard let lineData = try? lineCodec.decode(line),
                   let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),
                   event.rootPath.standardizedFileURL.path == root else {
-                continue
+                return
             }
             builder.add(event)
         }
@@ -361,17 +382,15 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     }
 
     private func readAllEvents() throws -> [DiskActivityEvent] {
-        let data = try Data(contentsOf: journalURL)
-        let contents = String(decoding: data, as: UTF8.self)
-
-        return contents
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                guard let data = try? lineCodec.decode(line) else {
-                    return nil
-                }
-                return try? decoder.decode(DiskActivityEvent.self, from: data)
+        var events: [DiskActivityEvent] = []
+        try forEachLine { line in
+            guard let data = try? lineCodec.decode(line),
+                  let event = try? decoder.decode(DiskActivityEvent.self, from: data) else {
+                return
             }
+            events.append(event)
+        }
+        return events
     }
 
     private func retainedEvents(
