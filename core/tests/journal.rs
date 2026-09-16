@@ -265,3 +265,38 @@ fn zero_aggregate_days_keeps_grouped_rows_forever() {
     assert_eq!(journal.trim(180, 0, 0).unwrap(), 0);
     assert_eq!(journal.load(ROOT.to_owned(), 100).unwrap().len(), 2);
 }
+
+/// The cap and the rollup meet in one trim: the group is written after the
+/// rows it replaced, so the cap spends the detail it can still be rebuilt
+/// from before it spends the summary. The file has to end up inside the cap
+/// either way, which is what the two passes have to agree about.
+#[test]
+fn a_cap_that_bites_after_a_rollup_still_fits_and_keeps_the_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    journal
+        .append(
+            (0..10)
+                .map(|n| event(&format!("old{n}.bin"), 400))
+                .chain((0..5).map(|n| event(&format!("new{n}.bin"), 5 - n)))
+                .collect(),
+        )
+        .unwrap();
+    let cap = (lines(dir.path())[0].len() as u64 + 1) * 3;
+
+    journal.trim(180, 3_650, cap).unwrap();
+
+    let size = fs::metadata(dir.path().join("activity-events.jsonl"))
+        .unwrap()
+        .len();
+    assert!(size <= cap, "{size} bytes left over a {cap} byte cap");
+    let kept = journal.load(ROOT.to_owned(), 100).unwrap();
+    assert_eq!(
+        kept.iter()
+            .filter(|row| row.kind == EventKind::Aggregate)
+            .count(),
+        1,
+        "the grouped row went before the detail it summarised: {kept:?}"
+    );
+    assert!(kept.iter().any(|row| row.path.ends_with("new4.bin")));
+}
