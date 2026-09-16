@@ -191,6 +191,12 @@ impl App {
     }
 
     fn resume(&mut self) {
+        // Paused is a state, not a failure: opening the watches here would
+        // fail every one of them and report the switch the user set as an
+        // error they have to dismiss.
+        if self.paused {
+            return;
+        }
         let enabled: Vec<String> = self
             .watches
             .iter()
@@ -2188,5 +2194,23 @@ mod tests {
         // A recorded writer is shown; nothing invents one where the platform
         // could not tell.
         harness.get_by_label_contains("by rsync");
+    }
+
+    /// Launching while monitoring is paused is not a failure: opening the
+    /// watches here would fail every one of them and hand the user their own
+    /// switch back as a notice to dismiss.
+    #[test]
+    fn a_launch_while_paused_opens_nothing_and_reports_nothing() {
+        let folder = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let mut app = app(storage_dir.path(), vec![root]);
+        app.watches[0].enabled = true;
+        app.paused = true;
+
+        app.resume();
+
+        assert!(app.sessions.is_empty(), "a paused launch opened a watch");
+        assert_eq!(app.notice, None, "notice: {:?}", app.notice);
     }
 }
