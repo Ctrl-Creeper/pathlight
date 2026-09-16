@@ -512,20 +512,31 @@ impl<'a> Attributor<'a> {
         };
         let sized = |kind, previous_path: Option<String>| {
             let known = (self.known_size)(&change.path);
+            let Some(size) = (self.size)(&change.path) else {
+                // Nothing to test a bound against, so the two reasons a
+                // measurement fails have to be told apart. A path that is
+                // simply gone is the deletion's to report. One that is still
+                // there and could not be read — no permission, an unsupported
+                // filesystem — is a change that happened, and dropping it
+                // would leave a folder looking untouched because of a stat
+                // that failed. See `size_in_bounds`.
+                return std::fs::symlink_metadata(&change.path)
+                    .is_ok()
+                    .then(|| base(kind, None, Confidence::Unknown, previous_path));
+            };
             // The bound is on the file, so it is asked before the event is
             // built and before aggregation: a file this watch does not record
             // contributes nothing, not even to a directory row.
-            (self.size)(&change.path)
-                .filter(|size| self.options.watches_file(Some(*size)))
-                .map(|size| {
-                    let (byte_delta, confidence) = match (kind, known) {
-                        (EventKind::Modified, None) => (None, Confidence::Unknown),
-                        (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
-                        (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
-                        (_, None) => (None, Confidence::Unknown),
-                    };
-                    base(kind, byte_delta, confidence, previous_path)
-                })
+            if !self.options.watches_file(Some(size)) {
+                return None;
+            }
+            let (byte_delta, confidence) = match (kind, known) {
+                (EventKind::Modified, None) => (None, Confidence::Unknown),
+                (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
+                (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
+                (_, None) => (None, Confidence::Unknown),
+            };
+            Some(base(kind, byte_delta, confidence, previous_path))
         };
         let vanished = |kind, previous_path: Option<String>| match (self.prior_size)(&change.path) {
             Some(prior) => self
