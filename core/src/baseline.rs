@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::measurement::{FileKind, FileMeasurement, IdentityPlatform, ObjectIdentity};
 use crate::snapshot::{ScanConsistency, ScanError, ScanSnapshot};
 
-const MAGIC: &[u8; 8] = b"PLBASE\x01\n";
+const MAGIC: &[u8; 8] = b"PLBASE\x02\n";
 
 /// Where the baseline for `scope` lives under `dir`.
 ///
@@ -59,10 +59,12 @@ pub fn write(path: &Path, snapshot: &ScanSnapshot) -> io::Result<()> {
         put_bytes(&mut out, &path_bytes(&snapshot.root))?;
         put_time(&mut out, snapshot.started_at)?;
         put_time(&mut out, snapshot.finished_at)?;
-        // Only whether the scan was whole is kept: the errors themselves are
-        // read once, when they happen, and a list of them is not what the next
-        // run compares against.
-        out.write_all(&[u8::from(snapshot.is_complete())])?;
+        // Which folders could not be read, not why: a comparison sets aside
+        // what is under them, and needs nothing else.
+        out.write_all(&(snapshot.errors.len() as u64).to_le_bytes())?;
+        for error in &snapshot.errors {
+            put_bytes(&mut out, &path_bytes(&error.path))?;
+        }
         out.write_all(&(snapshot.entries.len() as u64).to_le_bytes())?;
         for (entry, measurement) in &snapshot.entries {
             put_bytes(&mut out, &path_bytes(entry))?;
@@ -94,9 +96,17 @@ fn read_whole(path: &Path) -> io::Result<ScanSnapshot> {
     let root = path_from_bytes(take_bytes(&mut input)?);
     let started_at = take_time(&mut input)?;
     let finished_at = take_time(&mut input)?;
-    let complete = take_u8(&mut input)? == 1;
-    let count = usize::try_from(take_u64(&mut input)?)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "more entries than fit"))?;
+    let too_many = || io::Error::new(io::ErrorKind::InvalidData, "more entries than fit");
+    let unread = usize::try_from(take_u64(&mut input)?).map_err(|_| too_many())?;
+    let mut errors = Vec::new();
+    for _ in 0..unread {
+        errors.push(ScanError {
+            path: path_from_bytes(take_bytes(&mut input)?),
+            kind: io::ErrorKind::Other,
+            message: "could not be read when this folder was last scanned".to_owned(),
+        });
+    }
+    let count = usize::try_from(take_u64(&mut input)?).map_err(|_| too_many())?;
     let mut entries = Vec::new();
     // Not `with_capacity(count)`: a corrupt length would ask for the whole of
     // memory before a single entry had been read.
@@ -113,15 +123,7 @@ fn read_whole(path: &Path) -> io::Result<ScanSnapshot> {
         finished_at,
         consistency: ScanConsistency::ObservedInterval,
         entries,
-        errors: match complete {
-            true => Vec::new(),
-            false => vec![ScanError {
-                path: PathBuf::new(),
-                kind: io::ErrorKind::Other,
-                message: "parts of this folder could not be read when it was last scanned"
-                    .to_owned(),
-            }],
-        },
+        errors,
     })
 }
 
