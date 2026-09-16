@@ -871,6 +871,14 @@ fn forget_records(rest: &[OsString]) -> io::Result<()> {
             "{rows} recorded row(s), {size}, in {}",
             storage.dir().display()
         );
+        let remembered = storage.remembered();
+        if remembered > 0 {
+            println!(
+                "Plus {} remembering what the watched folders hold, so a change made while \
+                 Pathlight is closed is still noticed.",
+                human_bytes(remembered as i64).trim_start_matches('+')
+            );
+        }
         println!("Run `pathlight-monitor forget-records --yes` to delete them. Settings stay.");
         return Ok(());
     }
