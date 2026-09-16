@@ -337,9 +337,45 @@ struct ActivityEventStoreTests {
             eventJournalLimitBytes: 1_024 * 1_024,
             now: Date(timeIntervalSince1970: 100).addingTimeInterval(8 * 86_400)
         )
+        // The rewrite did run — the detailed row aged into a daily total — and
+        // the line it could not read came through it. Unreadable is not expired.
         let rewrittenContents = String(decoding: try Data(contentsOf: journalURL), as: UTF8.self)
-        #expect(!rewrittenContents.contains("not-json"))
+        #expect(rewrittenContents.contains("not-json"))
     }
+
+    /// A line this build cannot read is a line it cannot judge. Retention
+    /// rewrites the file, so dropping it on the way in deletes evidence — a
+    /// journal whose key file is gone, or one a newer build wrote.
+    @Test("keeps lines it cannot read through a retention rewrite")
+    func keepsUnreadableLinesThroughRetention() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        try await store.append([
+            makeEvent(root: root, name: "ancient.bin", timestamp: .distantPast, byteDelta: 1),
+            makeEvent(root: root, name: "recent.bin", timestamp: Date(), byteDelta: 1),
+        ])
+        let opaque = "pathlight:v1:aes-gcm:ciphertext"
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((opaque + "\n").utf8))
+        try handle.close()
+
+        try await store.enforceStoragePolicy(
+            ActivityStoragePreferences.defaults,
+            eventJournalLimitBytes: 1 << 20,
+            now: Date()
+        )
+
+        let written = try String(contentsOf: journalURL, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(written.contains(opaque[...]), "the unreadable line was deleted: \(written)")
+        let kept = try await store.loadEvents(rootPath: root, limit: 10)
+        #expect(kept.count == 1, "retention did not run: \(kept)")
+        #expect(kept[0].path.lastPathComponent == "recent.bin")
+    }
+
 
     /// The journal is read a chunk at a time, so a row that straddles a chunk
     /// boundary is the row that would go missing if the leftover were dropped.

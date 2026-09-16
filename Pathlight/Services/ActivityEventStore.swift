@@ -343,14 +343,17 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             return
         }
 
-        let events = try readAllEvents()
+        let (events, unreadable) = try readAllEvents()
+        // Lines that stay cost budget like any other, or the rewrite would
+        // leave a file over the cap it was called to enforce.
+        let preservedBytes = unreadable.reduce(Int64(0)) { $0 + Int64($1.utf8.count + 1) }
         let retainedEvents = retainedEvents(
             from: events,
             preferences: preferences,
-            eventJournalLimitBytes: eventJournalLimitBytes,
+            eventJournalLimitBytes: max(eventJournalLimitBytes - preservedBytes, 0),
             now: now
         )
-        try rewriteJournal(with: retainedEvents)
+        try rewriteJournal(with: retainedEvents, preserving: unreadable)
         hasScannedJournal = true
         oldestKnownEventTimestamp = retainedEvents.first?.timestamp
     }
@@ -381,16 +384,23 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         now.addingTimeInterval(-TimeInterval(preferences.detailedRetentionDays) * 86_400)
     }
 
-    private func readAllEvents() throws -> [DiskActivityEvent] {
+    /// The rows this build can read, and the lines it cannot. Unreadable is not
+    /// invalid: a journal whose key file is missing, or one a newer build
+    /// wrote, reads as nothing here. Retention rewrites the file, so a line
+    /// dropped on the way in is a line deleted — the core keeps them for the
+    /// same reason (`readable` in `journal.rs`).
+    private func readAllEvents() throws -> (events: [DiskActivityEvent], unreadable: [String]) {
         var events: [DiskActivityEvent] = []
+        var unreadable: [String] = []
         try forEachLine { line in
             guard let data = try? lineCodec.decode(line),
                   let event = try? decoder.decode(DiskActivityEvent.self, from: data) else {
+                unreadable.append(line)
                 return
             }
             events.append(event)
         }
-        return events
+        return (events, unreadable)
     }
 
     private func retainedEvents(
@@ -439,12 +449,14 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         return retained.sorted(by: Self.oldestFirst)
     }
 
-    private func rewriteJournal(with events: [DiskActivityEvent]) throws {
+    private func rewriteJournal(
+        with events: [DiskActivityEvent],
+        preserving unreadable: [String] = []
+    ) throws {
         try ActivityStorageFileProtection.createProtectedDirectory(
             at: journalURL.deletingLastPathComponent()
         )
-        let contents = try events
-            .map(encodedLine(for:))
+        let contents = try (unreadable + events.map(encodedLine(for:)))
             .joined(separator: "\n")
         let data = contents.isEmpty ? Data() : Data((contents + "\n").utf8)
         try data.write(to: journalURL, options: .atomic)

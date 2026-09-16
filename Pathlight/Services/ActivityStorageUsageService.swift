@@ -70,7 +70,12 @@ nonisolated struct ActivityStorageUsageService: Sendable {
         ).compactNow()
     }
 
-    func availableEventJournalBytes(storageLimitBytes: Int64) async -> Int64 {
+    /// The bytes the event journal may occupy, or `nil` when that could not be
+    /// worked out. `nil` rather than zero: zero is a real budget that means
+    /// "keep nothing", and a caller handed it deletes every event on record.
+    /// A lock this call could not take is a reason to enforce nothing, not a
+    /// reason to throw the history away.
+    func availableEventJournalBytes(storageLimitBytes: Int64) async -> Int64? {
         await compactSizeIndex()
         let normalizedLimit = max(storageLimitBytes, 0)
         do {
@@ -85,11 +90,11 @@ nonisolated struct ActivityStorageUsageService: Sendable {
                     try FileManager.default.removeItem(at: sizeIndexJournalURL)
                     return normalizedLimit
                 } catch {
-                    return 0
+                    return nil
                 }
             }
         } catch {
-            return 0
+            return nil
         }
     }
 
