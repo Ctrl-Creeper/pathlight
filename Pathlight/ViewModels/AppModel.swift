@@ -1585,6 +1585,13 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, self?.activityStoragePolicyTaskID == taskID else {
                 return
             }
+            // No budget means the budget is unknown. Enforcing one anyway is
+            // how a lock nobody could take becomes an empty history.
+            guard let eventJournalLimitBytes else {
+                self?.activityStoragePolicyTask = nil
+                self?.activityStoragePolicyTaskID = nil
+                return
+            }
             do {
                 try await activityEventStore.enforceStoragePolicy(
                     preferences,
