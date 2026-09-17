@@ -1440,9 +1440,13 @@ mod tests {
         );
         drop(live);
         // And the folder as it is now is what the next gap compares against.
-        let now = read_baseline(&baseline::file(storage.dir(), &scope), &root, &storage).unwrap();
-        assert!(now.get(&root.join("arrived.txt")).is_some());
-        assert!(now.get(&root.join("kept.txt")).is_none());
+        // Spelled as the watch spells it: on Windows `canonicalize` answers
+        // with a `\\?\` prefix that `paths::normalize` takes off again.
+        let scope_path = Path::new(&scope);
+        let now =
+            read_baseline(&baseline::file(storage.dir(), &scope), scope_path, &storage).unwrap();
+        assert!(now.get(&scope_path.join("arrived.txt")).is_some());
+        assert!(now.get(&scope_path.join("kept.txt")).is_none());
     }
 
     /// Wait for the baseline thread, the way the worker's next flush would.
