@@ -1282,7 +1282,7 @@ mod tests {
 
         // The next gap compares against what the last one found, not against
         // a baseline from before it.
-        fs::write(root.join("later.bin"), b"more").unwrap();
+        fs::write(root.join("later.bin"), vec![1u8; 8 * 1024]).unwrap();
         worker.reconcile(&baseline);
         settle(&baseline);
         worker.catch_up(&baseline);
@@ -1363,7 +1363,7 @@ mod tests {
                 .and_then(|taken| keep(taken, &scope, &worker.live, &storage)),
             ..BaselineState::default()
         }));
-        fs::write(root.join("missed.txt"), b"reconcile me").unwrap();
+        fs::write(root.join("missed.txt"), vec![2u8; 8 * 1024]).unwrap();
         let index = SizeIndex::default();
         let size = |path: &str| allocated_size(Path::new(path));
         let prior = |_: &str| None;
@@ -1395,7 +1395,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().unwrap();
         let storage = Storage::at(storage_dir.path());
         let scope = paths::normalize(&root.to_string_lossy());
-        fs::write(root.join("kept.txt"), b"here before").unwrap();
+        fs::write(root.join("kept.txt"), vec![3u8; 8 * 1024]).unwrap();
         let worker = Worker {
             exclusions: None,
             scope: scope.clone(),
@@ -1414,7 +1414,7 @@ mod tests {
             .and_then(|taken| keep(taken, &scope, &worker.live, &storage))
             .is_some());
         // Nothing is watching now.
-        fs::write(root.join("arrived.txt"), b"while it was closed").unwrap();
+        fs::write(root.join("arrived.txt"), vec![4u8; 8 * 1024]).unwrap();
         fs::remove_file(root.join("kept.txt")).unwrap();
         // The run that starts: the thread scans, the worker compares.
         let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
