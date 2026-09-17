@@ -5,7 +5,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://pathlight.app/appcast.xml</string>
+	<string>https://github.com/Ctrl-Creeper/pathlight/releases/download/appcast/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>p8XNK5WipyOCtLH5ETLxpulo1nc2aY7detwrhjxNKIs=</string>
 	<key>SUScheduledCheckInterval</key>

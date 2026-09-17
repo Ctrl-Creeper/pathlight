@@ -125,11 +125,65 @@ jobs:
           # symlinks and resource forks intact.
           ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
           ditto -c -k --sequesterRsrc --keepParent "$cli" "$cli.zip"
+          # The update feed points at an archive holding the app and nothing
+          # else. The staging folders above carry a README and PLATFORMS.md,
+          # which are not part of an update, and the reader that writes the
+          # feed expects one bundle in the archive it reads.
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/Build/Products/Release/Pathlight.app "Pathlight-${TAG}.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos
           path: "*.zip"
           if-no-files-found: error
+      # Sparkle reads a feed, and this repository writes it. A feed on a host
+      # nobody commits to is a feed that stops answering one day with no diff
+      # here to say so, which is what happened to the domain this file used to
+      # name.
+      - name: Write the update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SPARKLE_PRIVATE_KEY:-}" ]; then
+            echo "SPARKLE_PRIVATE_KEY is not set, so no feed is written."
+            echo "The app finds no update until it is, and that is not a build failure."
+            exit 0
+          fi
+          # The tools come from the Sparkle the app already links against
+          # (Package.resolved pins 2.9.4), by version and by checksum, for the
+          # same reason the actions above are pinned to commits.
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-2.9.4.tar.xz"
+          echo "ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9  $RUNNER_TEMP/sparkle.tar.xz" \
+            | shasum -a 256 --check --status
+          tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP"
+          feed="$RUNNER_TEMP/feed"
+          mkdir "$feed"
+          cp "Pathlight-${TAG}.zip" "$feed/"
+          # `--ed-key-file -` is the path Sparkle documents for a key that
+          # lives in a secret: it arrives on standard input and is never
+          # written to a file on the runner.
+          # The archive the feed names is this tag's own release asset, so the
+          # download prefix is that release rather than wherever the feed
+          # itself ends up being served from.
+          printf '%s\n' "$SPARKLE_PRIVATE_KEY" | (
+            cd "$feed"
+            "$RUNNER_TEMP/bin/generate_appcast" \
+              --ed-key-file - \
+              --link "https://github.com/${GITHUB_REPOSITORY}" \
+              --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/" \
+              .
+          )
+          cp "$feed/appcast.xml" appcast.xml
+      # `ignore`, not `error`: with no key there is no feed, and that is the
+      # state this repository is in until one exists. A tag should still ship.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appcast
+          path: appcast.xml
+          if-no-files-found: ignore
 
   publish:
     name: Publish pre-release
@@ -153,3 +207,23 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "Pathlight $TAG" --notes-file .github/release-notes.md \
             artifacts/*
+
+      # The feed the app reads lives under its own tag, so its URL never
+      # moves and only SUFeedURL has to name it. It is republished after the
+      # release it describes, so the archive it points at is already
+      # downloadable by the time anything reads the feed. The release itself
+      # keeps a copy of the feed it published, beside the builds it names.
+      - name: Republish the update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/appcast.xml ]; then
+            echo "No feed in this release: SPARKLE_PRIVATE_KEY is not set, so there is nothing to republish."
+            exit 0
+          fi
+          gh release view appcast --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create appcast --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "Update feed" \
+              --notes "The Sparkle feed the app reads. Rewritten by release.yml on every tag; it carries no build of its own."
+          gh release upload appcast artifacts/appcast.xml --repo "$GITHUB_REPOSITORY" --clobber
