@@ -1,6 +1,18 @@
 A pre-release. Nothing here is signed or notarized, so both desktop platforms
 will warn before running it:
 
+## Changes in v1.8.1
+
+Replaces the v1.8.0 pre-release, which should not be used: on Windows, Linux
+and the terminal, the last-known state each watch keeps on disk listed every
+file name in the clear even when the journal was encrypted, and its folder
+took the process umask rather than owner-only permissions. It is now sealed
+under the journal's key whenever the journal is, and owner-only like the
+journal. Also: a Linux login item quotes its `Exec=` line the way the
+desktop-entry spec says, a gap that arrives during a rescan gets another
+rescan after it, and a replaced file after a gap is one recovered row rather
+than two.
+
 ## Changes in v1.8.0
 
 - Recovers what changed while Pathlight was closed: each watch keeps its last
