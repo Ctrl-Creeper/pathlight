@@ -407,10 +407,17 @@ pub fn reconcile(
         let Some(old) = previous.get(path) else {
             continue;
         };
+        // A different object under the same name is a replacement, reported
+        // below when identities can be trusted; its size difference rides on
+        // that row rather than being a second one.
+        let replaced = identity_continuity == IdentityContinuity::ObservedWithoutGap
+            && old.identity.is_some()
+            && measurement.identity.is_some()
+            && old.identity != measurement.identity;
         // Sizes on both sides, or nothing to say: a side that could not
         // measure is not a side that measured zero.
         if let (Some(before), Some(after)) = (old.allocated_bytes, measurement.allocated_bytes) {
-            if before != after && !unreadable(path) {
+            if before != after && !replaced && !unreadable(path) {
                 result.bindings.push(BindingChange {
                     kind: BindingChangeKind::Modified,
                     path: path.to_path_buf(),
