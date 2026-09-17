@@ -239,9 +239,11 @@ struct BaselineState {
     /// A fresh scan, waiting to be compared. Owed to the worker rather than
     /// done on the thread that scanned, because only the worker writes rows.
     catching_up: Option<ScanSnapshot>,
-    /// The thread walking the folder, while one is. A second gap during a
-    /// walk gets the same walk: the comparison at its end covers both.
+    /// The thread walking the folder, while one is.
     scan: Option<JoinHandle<()>>,
+    /// A gap arrived while a walk was under way. That walk may have passed
+    /// the changed files before they changed, so another follows it.
+    owed: bool,
 }
 
 type Baseline = Arc<Mutex<BaselineState>>;
@@ -260,7 +262,23 @@ fn keep(
     storage: &Storage,
 ) -> Option<PathBuf> {
     let path = baseline::file(storage.dir(), scope);
-    match baseline::write(&path, &snapshot) {
+    // Under the journal's key when the journal is encrypted: the two list
+    // the same names.
+    let key = match storage.encrypting() {
+        true => match crate::crypt::key_or_create(&storage.journal()) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                trouble(
+                    live,
+                    storage,
+                    format!("Could not encrypt what {scope} holds, so it was not kept: {error}"),
+                );
+                return None;
+            }
+        },
+        false => None,
+    };
+    match baseline::write(&path, &snapshot, key) {
         Ok(()) => Some(path),
         Err(error) => {
             trouble(
@@ -274,6 +292,12 @@ fn keep(
             None
         }
     }
+}
+
+/// The last known state at `path`, opened with the journal's key when it was
+/// sealed under one.
+fn read_baseline(path: &Path, root: &Path, storage: &Storage) -> Option<ScanSnapshot> {
+    baseline::read(path, root, crate::crypt::key(&storage.journal()))
 }
 
 /// Pathlight's own last-known state is not an amendment: only the entries
@@ -462,8 +486,10 @@ impl Worker {
     fn rescan(&self, baseline: &Baseline) {
         let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.scan.as_ref().is_some_and(|scan| !scan.is_finished()) {
+            slot.owed = true;
             return;
         }
+        slot.owed = false;
         let shared = baseline.clone();
         let scope = self.scope.clone();
         let live = self.live.clone();
@@ -512,11 +538,16 @@ impl Worker {
         let previous = slot
             .kept
             .as_deref()
-            .and_then(|path| baseline::read(path, &current.root));
+            .and_then(|path| read_baseline(path, &current.root, &self.storage));
+        let owed = slot.owed;
         let Some(mut previous) = previous else {
             current.amend(amendments(&slot.overlay, Some(current.started_at)));
             slot.overlay.clear();
             slot.kept = keep(current, &self.scope, &self.live, &self.storage);
+            drop(slot);
+            if owed {
+                self.rescan(baseline);
+            }
             return;
         };
         // Everything recorded live is already in the journal, so it goes
@@ -536,6 +567,9 @@ impl Worker {
         drop(previous);
         slot.kept = keep(current, &self.scope, &self.live, &self.storage);
         drop(slot);
+        if owed {
+            self.rescan(baseline);
+        }
 
         let recovered = events.len() as u64;
         self.publish(events, 0);
@@ -561,7 +595,7 @@ impl Worker {
         let Some(mut kept) = slot
             .kept
             .as_deref()
-            .and_then(|path| baseline::read(path, Path::new(&self.scope)))
+            .and_then(|path| read_baseline(path, Path::new(&self.scope), &self.storage))
         else {
             return;
         };
@@ -1406,7 +1440,7 @@ mod tests {
         );
         drop(live);
         // And the folder as it is now is what the next gap compares against.
-        let now = baseline::read(&baseline::file(storage.dir(), &scope), &root).unwrap();
+        let now = read_baseline(&baseline::file(storage.dir(), &scope), &root, &storage).unwrap();
         assert!(now.get(&root.join("arrived.txt")).is_some());
         assert!(now.get(&root.join("kept.txt")).is_none());
     }

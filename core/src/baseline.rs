@@ -9,6 +9,11 @@
 //! The format is this crate's own and only this machine reads it: a version
 //! byte guards it, and anything that does not read back is treated as no
 //! baseline at all rather than as a wrong one.
+//!
+//! It lists every file under the watch by name, which is what the journal
+//! lists too — so when the journal is encrypted, this is, under the same key,
+//! in frames small enough that a whole-disk baseline never has to be held
+//! twice to be sealed or opened.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -18,7 +23,102 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::measurement::{FileKind, FileMeasurement, IdentityPlatform, ObjectIdentity};
 use crate::snapshot::{ScanConsistency, ScanError, ScanSnapshot};
 
-const MAGIC: &[u8; 8] = b"PLBASE\x02\n";
+const MAGIC: &[u8; 8] = b"PLBASE\x03\n";
+const PLAIN: u8 = 0;
+const SEALED: u8 = 1;
+/// How much goes into one frame before it is sealed and written.
+const FRAME: usize = 1 << 20;
+/// A frame longer than this is not one this build wrote: the cap is what
+/// stops a corrupt length from asking for the whole of memory. A frame is
+/// at most `FRAME` plus the one write that overflowed it, plus the tag.
+const MAX_FRAME: usize = FRAME + MAX_STRING + 64;
+/// Longer than any path a filesystem here allows; the same guard, per string.
+const MAX_STRING: usize = 1 << 16;
+
+/// The body in frames, each sealed when there is a key. `Write` so the body
+/// is spelled once, whichever way it is stored.
+struct Frames<W: Write> {
+    out: W,
+    key: Option<[u8; 32]>,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> Frames<W> {
+    fn flush_frame(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let frame = match &self.key {
+            Some(key) => crate::crypt::seal_bytes(key, &self.pending)
+                .map_err(|error| io::Error::other(error.to_string()))?,
+            None => std::mem::take(&mut self.pending),
+        };
+        self.pending.clear();
+        self.out.write_all(&(frame.len() as u32).to_le_bytes())?;
+        self.out.write_all(&frame)
+    }
+}
+
+impl<W: Write> Write for Frames<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.pending.len() + bytes.len() > FRAME {
+            self.flush_frame()?;
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_frame()?;
+        self.out.flush()
+    }
+}
+
+/// The frames back into a body. A frame that does not open is the end of a
+/// file that cannot be trusted, which the caller reads as no baseline.
+struct Unframed<R: Read> {
+    input: R,
+    key: Option<[u8; 32]>,
+    buffer: Vec<u8>,
+    at: usize,
+}
+
+impl<R: Read> Unframed<R> {
+    fn refill(&mut self) -> io::Result<bool> {
+        let mut length = [0_u8; 4];
+        match self.input.read_exact(&mut length) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let length = u32::from_le_bytes(length) as usize;
+        if length > MAX_FRAME {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too long"));
+        }
+        let mut frame = vec![0_u8; length];
+        self.input.read_exact(&mut frame)?;
+        self.buffer = match &self.key {
+            Some(key) => crate::crypt::open_bytes(key, &frame).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "a frame did not open")
+            })?,
+            None => frame,
+        };
+        self.at = 0;
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for Unframed<R> {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        if self.at == self.buffer.len() && !self.refill()? {
+            return Ok(0);
+        }
+        let count = into.len().min(self.buffer.len() - self.at);
+        into[..count].copy_from_slice(&self.buffer[self.at..self.at + count]);
+        self.at += count;
+        Ok(count)
+    }
+}
 
 /// Where the baseline for `scope` lives under `dir`.
 ///
@@ -47,15 +147,29 @@ fn fnv1a(text: &str) -> u64 {
 }
 
 /// Write `snapshot` where [`file`] says, through a temporary so an interrupted
-/// write leaves the old baseline rather than half of a new one.
-pub fn write(path: &Path, snapshot: &ScanSnapshot) -> io::Result<()> {
+/// write leaves the old baseline rather than half of a new one. Sealed under
+/// `key` when there is one.
+pub fn write(path: &Path, snapshot: &ScanSnapshot, key: Option<[u8; 32]>) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        // Owner-only, like the journal: this is a list of every file there is.
+        if let Some(storage) = parent.parent() {
+            crate::journal::set_permissions(storage, 0o700)?;
+        }
+        crate::journal::set_permissions(parent, 0o700)?;
     }
     let temporary = path.with_extension("writing");
     {
-        let mut out = BufWriter::new(File::create(&temporary)?);
-        out.write_all(MAGIC)?;
+        let file = File::create(&temporary)?;
+        crate::journal::set_permissions(&temporary, 0o600)?;
+        let mut file = BufWriter::new(file);
+        file.write_all(MAGIC)?;
+        file.write_all(&[if key.is_some() { SEALED } else { PLAIN }])?;
+        let mut out = Frames {
+            out: file,
+            key,
+            pending: Vec::new(),
+        };
         put_bytes(&mut out, &path_bytes(&snapshot.root))?;
         put_time(&mut out, snapshot.started_at)?;
         put_time(&mut out, snapshot.finished_at)?;
@@ -78,21 +192,37 @@ pub fn write(path: &Path, snapshot: &ScanSnapshot) -> io::Result<()> {
 /// The baseline at `path`, or `None` when there is none, it is from another
 /// version, or it does not read back whole. Never a partial snapshot: half a
 /// baseline would report every file it is missing as deleted.
-pub fn read(path: &Path, root: &Path) -> Option<ScanSnapshot> {
-    let snapshot = read_whole(path).ok()?;
+pub fn read(path: &Path, root: &Path, key: Option<[u8; 32]>) -> Option<ScanSnapshot> {
+    let snapshot = read_whole(path, key).ok()?;
     (snapshot.root == root).then_some(snapshot)
 }
 
-fn read_whole(path: &Path) -> io::Result<ScanSnapshot> {
-    let mut input = BufReader::new(File::open(path)?);
+fn read_whole(path: &Path, key: Option<[u8; 32]>) -> io::Result<ScanSnapshot> {
+    let mut file = BufReader::new(File::open(path)?);
     let mut magic = [0_u8; 8];
-    input.read_exact(&mut magic)?;
+    file.read_exact(&mut magic)?;
     if &magic != MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "not a baseline this version wrote",
         ));
     }
+    let key = match (take_u8(&mut file)?, key) {
+        (PLAIN, _) => None,
+        (SEALED, Some(key)) => Some(key),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a sealed baseline and no key to open it",
+            ))
+        }
+    };
+    let mut input = Unframed {
+        input: file,
+        key,
+        buffer: Vec::new(),
+        at: 0,
+    };
     let root = path_from_bytes(take_bytes(&mut input)?);
     let started_at = take_time(&mut input)?;
     let finished_at = take_time(&mut input)?;
@@ -135,7 +265,14 @@ fn put_bytes(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 fn take_bytes(input: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut length = [0_u8; 4];
     input.read_exact(&mut length)?;
-    let mut bytes = vec![0_u8; u32::from_le_bytes(length) as usize];
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_STRING {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "string too long",
+        ));
+    }
+    let mut bytes = vec![0_u8; length];
     input.read_exact(&mut bytes)?;
     Ok(bytes)
 }
@@ -277,8 +414,10 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
     use std::os::windows::ffi::OsStringExt;
     let wide: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     PathBuf::from(std::ffi::OsString::from_wide(&wide))
 }
@@ -301,8 +440,8 @@ mod tests {
         let taken = snapshot::scan(&root).unwrap();
         let path = file(dir.path(), &root.to_string_lossy());
 
-        write(&path, &taken).unwrap();
-        let back = read(&path, &root).unwrap();
+        write(&path, &taken, None).unwrap();
+        let back = read(&path, &root, None).unwrap();
 
         assert_eq!(back.entries.len(), taken.entries.len());
         assert_eq!(back.root, taken.root);
@@ -326,17 +465,59 @@ mod tests {
         std::fs::write(root.join("a.txt"), b"hello").unwrap();
         let taken = snapshot::scan(&root).unwrap();
         let path = file(dir.path(), "scope");
-        write(&path, &taken).unwrap();
+        write(&path, &taken, None).unwrap();
 
         let whole = std::fs::read(&path).unwrap();
         std::fs::write(&path, &whole[..whole.len() - 4]).unwrap();
-        assert!(read(&path, &root).is_none(), "half a baseline was accepted");
+        assert!(
+            read(&path, &root, None).is_none(),
+            "half a baseline was accepted"
+        );
 
         std::fs::write(&path, b"something else entirely").unwrap();
-        assert!(read(&path, &root).is_none());
+        assert!(read(&path, &root, None).is_none());
 
         // The right file for the wrong folder is the wrong answer too.
         std::fs::write(&path, &whole).unwrap();
-        assert!(read(&path, Path::new("/somewhere/else")).is_none());
+        assert!(read(&path, Path::new("/somewhere/else"), None).is_none());
+    }
+
+    /// An encrypted journal keeps file names off the disk in the clear. A
+    /// baseline that listed them beside it would undo that.
+    #[test]
+    fn a_sealed_baseline_names_no_file_and_opens_only_with_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("watched");
+        std::fs::create_dir(&root).unwrap();
+        // More than one frame, so the seam between frames is read across too.
+        for index in 0..8000 {
+            std::fs::write(
+                root.join(format!(
+                    "confidential-{index:04}-name-that-must-not-show.txt"
+                )),
+                b"x",
+            )
+            .unwrap();
+        }
+        let taken = snapshot::scan(&root).unwrap();
+        let key = [7_u8; 32];
+        let path = file(dir.path(), "scope");
+
+        write(&path, &taken, Some(key)).unwrap();
+
+        let stored = std::fs::read(&path).unwrap();
+        assert!(stored.len() > FRAME, "one frame does not test the seam");
+        assert!(
+            !stored.windows(12).any(|window| window == b"confidential"),
+            "a file name is on disk in the clear"
+        );
+        assert!(read(&path, &root, None).is_none(), "opened without the key");
+        assert!(
+            read(&path, &root, Some([8_u8; 32])).is_none(),
+            "opened with the wrong key"
+        );
+        let back = read(&path, &root, Some(key)).unwrap();
+        assert_eq!(back.entries.len(), taken.entries.len());
+        assert_eq!(back.entries.last(), taken.entries.last());
     }
 }

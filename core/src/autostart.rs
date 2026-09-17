@@ -137,11 +137,32 @@ fn home() -> PathBuf {
 /// A `.desktop` file, which is what a Linux session reads at login.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn entry_text(exe: &std::path::Path, args: &[&str]) -> String {
+    // Not `command_line`: inside an Exec= quoted argument the spec reserves
+    // `\\ " $ \`` and every `%` is a field code, so a home directory with
+    // any of them in it would start something other than this program.
+    let quoted = |text: &str| {
+        let mut out = String::from('"');
+        for character in text.chars() {
+            match character {
+                '\\' | '"' | '$' | '`' => {
+                    out.push('\\');
+                    out.push(character);
+                }
+                '%' => out.push_str("%%"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
+    };
+    let exec = std::iter::once(quoted(&exe.to_string_lossy()))
+        .chain(args.iter().map(|arg| quoted(arg)))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "[Desktop Entry]\nType=Application\nName=Pathlight\n\
-         Comment=Records what changes in the folders you watch\nExec={}\n\
-         Terminal=false\nX-GNOME-Autostart-enabled=true\n",
-        command_line(exe, args)
+         Comment=Records what changes in the folders you watch\nExec={exec}\n\
+         Terminal=false\nX-GNOME-Autostart-enabled=true\n"
     )
 }
 

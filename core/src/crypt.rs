@@ -48,6 +48,28 @@ pub(crate) fn open(key: &[u8; 32], line: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// One frame of a binary file, encrypted under `key`: nonce then ciphertext,
+/// no text framing. The baseline uses this, in pieces, because a whole-disk
+/// baseline is too big to base64 as one line.
+pub(crate) fn seal_bytes(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let sealed = Aes256Gcm::new(key.into())
+        .encrypt(&nonce, plaintext)
+        .map_err(|_| CoreError::Io {
+            message: "the baseline could not be encrypted".to_owned(),
+        })?;
+    let mut combined = nonce.to_vec();
+    combined.extend(sealed);
+    Ok(combined)
+}
+
+pub(crate) fn open_bytes(key: &[u8; 32], combined: &[u8]) -> Option<Vec<u8>> {
+    let (nonce, sealed) = combined.split_at_checked(NONCE_BYTES)?;
+    Aes256Gcm::new(key.into())
+        .decrypt(Nonce::from_slice(nonce), sealed)
+        .ok()
+}
+
 /// What an encrypted line starts with, for a host that must decide whether a
 /// row is encrypted before it fetches its key: reading a plaintext journal
 /// must not create or read a key unnecessarily.
