@@ -280,6 +280,8 @@ impl Storage {
                 .unwrap_or_else(|| "unknown time".to_owned())
         );
         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            // It names the folders being watched, so it is the journal's peers'.
+            let _ = crate::journal::set_permissions(&path, 0o600);
             let _ = file.write_all(stamped.as_bytes());
         }
     }
