@@ -464,6 +464,7 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.flush(&attributor, &mut pending, &index, &baseline);
+                    self.close(&baseline);
                     self.storage
                         .note(&format!("watch closed on {}", self.scope));
                     return;
@@ -621,6 +622,23 @@ impl Worker {
         if slot.overlay.len() < OVERLAY_FOLD {
             return;
         }
+        self.fold(slot);
+    }
+
+    /// The overlay lives in memory. Written into the kept baseline before the
+    /// watch ends, so the next run does not recover, as a gap, every change
+    /// this run already recorded live.
+    fn close(&self, baseline: &Baseline) {
+        let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(scan) = slot.scan.take() {
+            let _ = scan.join();
+        }
+        if !slot.overlay.is_empty() {
+            self.fold(&mut slot);
+        }
+    }
+
+    fn fold(&self, slot: &mut BaselineState) {
         let Some(mut kept) = slot
             .kept
             .as_deref()
@@ -1533,6 +1551,63 @@ mod tests {
         assert!(
             row.byte_delta.is_some_and(|delta| delta > 1_000_000),
             "{row:?}"
+        );
+    }
+
+    /// What this run recorded live is in the journal. The next run compares
+    /// against the baseline this one leaves behind, so that baseline has to
+    /// know about it too, or the next run recovers it a second time.
+    #[test]
+    fn a_change_recorded_live_is_not_recovered_again_by_the_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        let mut worker = worker_on(&root, &storage);
+        let scope = worker.scope.clone();
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: baseline_of(&scope, &worker.live, &storage)
+                .and_then(|taken| keep(taken, &scope, &worker.live, &storage)),
+            ..BaselineState::default()
+        }));
+        let index = SizeIndex::default();
+        let size = |path: &str| {
+            let size = allocated_size(Path::new(path));
+            index.record(&scope, path, size);
+            size
+        };
+        let prior = |path: &str| index.take(&scope, path);
+        let known = |path: &str| index.peek(&scope, path);
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        // Seen live, then the watch ends.
+        let arrived = root.join("arrived.txt");
+        fs::write(&arrived, vec![b'y'; 8192]).unwrap();
+        let mut pending = vec![Change {
+            kind: ChangeKind::Created,
+            path: paths::normalize(&arrived.to_string_lossy()),
+            root_path: scope.clone(),
+            timestamp: SystemTime::now(),
+            process_name: None,
+        }];
+        worker.flush(&attributor, &mut pending, &index, &baseline);
+        assert_eq!(worker.live().rows.len(), 1);
+        worker.close(&baseline);
+
+        // The next run: the thread scans, the worker compares.
+        let next = worker_on(&root, &storage);
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept: Some(baseline::file(storage.dir(), &scope)),
+            catching_up: baseline_of(&scope, &next.live, &storage),
+            ..BaselineState::default()
+        }));
+        next.catch_up(&baseline);
+
+        let live = next.live();
+        assert!(
+            live.rows.is_empty(),
+            "the next run recovered what the last one recorded: {:?}",
+            live.rows
         );
     }
 
