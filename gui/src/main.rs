@@ -1195,9 +1195,10 @@ impl App {
             warn(
                 ui,
                 &format!(
-                    "The system dropped events {} time(s). Pathlight compared this folder \
-                     against what it last knew and recovered {} change(s) — anything written \
-                     and undone in between is gone, and the times are when they were found.",
+                    "Pathlight was not watching {} time(s) — closed, or the system dropped \
+                     events. It compared this folder against what it last knew and recovered \
+                     {} change(s) — anything written and undone in between is gone, and the \
+                     times are when they were found.",
                     live.gaps, live.recovered
                 ),
             );
