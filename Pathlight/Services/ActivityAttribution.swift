@@ -51,14 +51,10 @@ nonisolated final class ActivityBaselineSizes: @unchecked Sendable {
         sizes[scope] = nil
     }
 
-    /// FSEvents spells a path the way the disk does — `/private/tmp`, not
-    /// `/tmp` — while the walk spells it the way the watch was asked for.
-    /// Resolving both sides makes them meet. The folder is resolved rather
-    /// than the whole path, because a name that is already gone cannot be.
+    /// The core rebases every change onto the root the watch was asked for,
+    /// so the walk and the events already spell a path the same way.
     private static func key(_ url: URL) -> UInt64 {
-        let url = url.standardizedFileURL
-        let folder = url.deletingLastPathComponent().resolvingSymlinksInPath()
-        return hash(folder.appending(path: url.lastPathComponent).path)
+        hash(url.standardizedFileURL.path)
     }
 
     /// FNV-1a, the hash the core's table uses too.

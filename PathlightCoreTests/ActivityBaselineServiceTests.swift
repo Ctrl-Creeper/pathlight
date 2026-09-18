@@ -55,22 +55,6 @@ struct ActivityBaselineServiceTests {
         #expect(sizes.size(for: child, scope: "live:test") == nil)
     }
 
-    @Test("finds a size recorded under a symlinked spelling of the folder")
-    func findsSizesAcrossSymlinkSpellings() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "PathlightSizes-\(UUID().uuidString)", directoryHint: .isDirectory)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let real = directory.appending(path: "real", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
-        let link = directory.appending(path: "link", directoryHint: .isDirectory)
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
-        let sizes = ActivityBaselineSizes()
-
-        sizes.record(4_096, for: link.appending(path: "gone.bin"), scope: "live:x")
-
-        #expect(sizes.size(for: real.appending(path: "gone.bin"), scope: "live:x") == 4_096)
-    }
-
     @Test("captures recursive allocated size baseline")
     func capturesRecursiveAllocatedSizeBaseline() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
