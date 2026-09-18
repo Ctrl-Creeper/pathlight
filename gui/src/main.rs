@@ -662,17 +662,21 @@ impl App {
                             .color(ui.visuals().warn_fg_color),
                     );
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut paused = self.paused;
-                    ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
+                // Nothing to hold off before the first folder; the box stays
+                // while paused so the pause can be released.
+                if !self.watches.is_empty() || self.paused {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut paused = self.paused;
+                        ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
                         "Holds every watch off, for something noisy about to happen — a build, \
                          a restore, a large copy. The folders stay as they are, and resuming \
                          starts the same ones again.",
                     );
-                    if paused != self.paused {
-                        self.set_paused(paused);
-                    }
-                });
+                        if paused != self.paused {
+                            self.set_paused(paused);
+                        }
+                    });
+                }
             });
             ui.add_space(8.0);
         });
