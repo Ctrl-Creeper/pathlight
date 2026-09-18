@@ -151,6 +151,34 @@ fn a_write_reports_an_arrival_scoped_to_the_root() {
     }
 }
 
+/// Finder's "Duplicate" on APFS is a clonefile. FSEvents flags the new name
+/// as cloned, not necessarily created, and a "modified" for a name nobody has
+/// measured would have no size to report.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_clone_reports_a_creation() {
+    let harness = Harness::start(|root| {
+        std::fs::write(root.join("original.bin"), vec![7u8; 8192]).unwrap();
+    });
+    let status = std::process::Command::new("cp")
+        .arg("-c")
+        .arg(harness.root.join("original.bin"))
+        .arg(harness.root.join("original copy.bin"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "cp -c failed; not an APFS volume?");
+
+    let changes = harness.wait_for("the cloned file", |changes| {
+        !named(changes, "original copy.bin").is_empty()
+    });
+    assert!(
+        named(&changes, "original copy.bin")
+            .iter()
+            .any(|change| change.kind == ChangeKind::Created),
+        "a clone must arrive as a creation: {changes:#?}"
+    );
+}
+
 #[test]
 fn a_delete_reports_a_removal() {
     let harness = Harness::start(|root| std::fs::write(root.join("doomed.txt"), b"bye").unwrap());
