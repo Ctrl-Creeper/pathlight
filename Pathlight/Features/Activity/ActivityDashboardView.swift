@@ -73,21 +73,6 @@ struct ActivityDashboardView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
-                // One switch for every watch, for something noisy about to
-                // happen. The folders stay as they are, so resuming starts
-                // the same ones again.
-                Button {
-                    actions.setMonitoringPaused(!isMonitoringPaused)
-                } label: {
-                    Label(
-                        isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
-                        systemImage: isMonitoringPaused ? "play.circle" : "pause.circle"
-                    )
-                }
-                .help(isMonitoringPaused
-                    ? "Start the folders that were being watched again"
-                    : "Hold every watch off without switching the folders off")
-
                 Menu {
                     Button("Choose Folder…") {
                         monitoringSetup = .longTerm
@@ -104,6 +89,25 @@ struct ActivityDashboardView: View {
                     Label("Monitor Folder", systemImage: "folder.badge.plus")
                 }
                 .help("Monitor a Folder Long-Term")
+
+
+                // One switch for every watch, for something noisy about to
+                // happen. The folders stay as they are, so resuming starts
+                // the same ones again. Nothing to hold off before the first
+                // folder; it stays while paused so the pause can be released.
+                if !targets.isEmpty || isMonitoringPaused {
+                    Button {
+                        actions.setMonitoringPaused(!isMonitoringPaused)
+                    } label: {
+                        Label(
+                            isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
+                            systemImage: isMonitoringPaused ? "play.circle" : "pause.circle"
+                        )
+                    }
+                    .help(isMonitoringPaused
+                        ? "Start the folders that were being watched again"
+                        : "Hold every watch off without switching the folders off")
+                }
 
                 if isLiveMonitorActive {
                     Button {
