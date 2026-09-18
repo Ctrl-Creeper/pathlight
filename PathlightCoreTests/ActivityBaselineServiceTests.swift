@@ -28,6 +28,49 @@ struct ActivityBaselineServiceTests {
         #expect(baseline.unidentifiedItemCount == 0)
     }
 
+    @Test("tells the watch every size it read, so a file it never touched still has one")
+    func reportsEverySizeItReads() async {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let child = root.appending(path: "installer.dmg")
+        let service = ActivityBaselineService(
+            measurementProvider: { url in
+                ActivityBaselineService.Measurement(
+                    allocatedSize: url.standardizedFileURL.path == child.standardizedFileURL.path ? 2_048 : 64,
+                    identity: nil
+                )
+            },
+            contentsProvider: { url in
+                url.standardizedFileURL.path == root.standardizedFileURL.path ? [child] : []
+            }
+        )
+        let sizes = ActivityBaselineSizes()
+
+        _ = await service.captureBaseline(rootPath: root) { url, size in
+            sizes.record(size, for: url, scope: "live:test")
+        }
+
+        #expect(sizes.size(for: child, scope: "live:test") == 2_048)
+        #expect(sizes.size(for: child, scope: "long-term:test") == nil)
+        sizes.forget(scope: "live:test")
+        #expect(sizes.size(for: child, scope: "live:test") == nil)
+    }
+
+    @Test("finds a size recorded under a symlinked spelling of the folder")
+    func findsSizesAcrossSymlinkSpellings() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightSizes-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let real = directory.appending(path: "real", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = directory.appending(path: "link", directoryHint: .isDirectory)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let sizes = ActivityBaselineSizes()
+
+        sizes.record(4_096, for: link.appending(path: "gone.bin"), scope: "live:x")
+
+        #expect(sizes.size(for: real.appending(path: "gone.bin"), scope: "live:x") == 4_096)
+    }
+
     @Test("captures recursive allocated size baseline")
     func capturesRecursiveAllocatedSizeBaseline() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

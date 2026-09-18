@@ -414,10 +414,10 @@ final class AppModel: ObservableObject {
             attribution: dependencies.activityAttribution,
             processHints: dependencies.processHints
         )
-        let sizeProviders = dependencies.activitySizeProviders(
-            ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
-        )
+        let scope = ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
+        let sizeProviders = dependencies.activitySizeProviders(scope)
         let baselineService = dependencies.activityBaselineService
+        let baselineSizes = dependencies.activityBaselineSizes
 
         liveWatchTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -450,7 +450,9 @@ final class AppModel: ObservableObject {
                 }
                 if session.receivedStreamEventCount > 0, self.liveWatchBaselineTask == nil {
                     self.liveWatchBaselineTask = Task.detached {
-                        _ = await baselineService.captureBaseline(rootPath: rootPath)
+                        _ = await baselineService.captureBaseline(rootPath: rootPath) { url, size in
+                            baselineSizes.record(size, for: url, scope: scope)
+                        }
                     }
                 }
                 self.liveWatchSession = session
@@ -466,6 +468,11 @@ final class AppModel: ObservableObject {
         liveWatchTaskID = nil
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
+        if let rootPath = liveWatchSession?.rootPath {
+            dependencies.activityBaselineSizes.forget(
+                scope: ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
+            )
+        }
         liveWatchSession = nil
         if let liveWatcherStatusKey {
             clearWatcherStartFailure(key: liveWatcherStatusKey)
@@ -1397,8 +1404,12 @@ final class AppModel: ObservableObject {
         let scanID = UUID()
         longTermWatchBaselineIDs[target.id] = scanID
         let service = dependencies.activityBaselineService
+        let sizes = dependencies.activityBaselineSizes
+        let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: target.rootPath)
         longTermWatchBaselineTasks[target.id] = Task { @MainActor [weak self] in
-            let baseline = await service.captureBaseline(rootPath: target.rootPath)
+            let baseline = await service.captureBaseline(rootPath: target.rootPath) { url, size in
+                sizes.record(size, for: url, scope: scope)
+            }
             guard let self, !Task.isCancelled,
                   self.longTermWatchTaskIDs[target.id] == watchTaskID,
                   self.longTermWatchBaselineIDs[target.id] == scanID,
@@ -1419,6 +1430,11 @@ final class AppModel: ObservableObject {
         longTermWatchBaselineTasks[targetID]?.cancel()
         longTermWatchBaselineTasks[targetID] = nil
         longTermWatchBaselineIDs[targetID] = nil
+        if let target = longTermWatchTargets.first(where: { $0.id == targetID }) {
+            dependencies.activityBaselineSizes.forget(
+                scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: target.rootPath)
+            )
+        }
         flushJournalNow()
         longTermWatchTasks[targetID]?.cancel()
         longTermWatchTasks[targetID] = nil

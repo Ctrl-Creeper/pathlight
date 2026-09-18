@@ -22,6 +22,8 @@ struct AppDependencies {
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
+    /// Filled by each watch's baseline walk; the size providers fall back to it.
+    var activityBaselineSizes: ActivityBaselineSizes
     var activityStoragePreferences: any ActivityStoragePreferencesPersisting
     var activityStorageUsageService: ActivityStorageUsageService
     /// Deletes the journal and its live attribution index as one coordinated
@@ -55,6 +57,7 @@ struct AppDependencies {
             persistence: UserDefaultsLongTermWatchTargetPersistence()
         ),
         activityBaselineService: ActivityBaselineService = ActivityBaselineService(),
+        activityBaselineSizes: ActivityBaselineSizes = ActivityBaselineSizes(),
         activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
         activityStorageReset: (@Sendable () async throws -> Void)? = nil,
@@ -73,6 +76,7 @@ struct AppDependencies {
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
+        self.activityBaselineSizes = activityBaselineSizes
         self.activityStoragePreferences = activityStoragePreferences
         self.activityStorageUsageService = activityStorageUsageService
         self.activityStorageReset = activityStorageReset ?? {
@@ -112,6 +116,7 @@ struct AppDependencies {
         let activitySizeIndex = activitySizeIndex
             ?? ActivitySizeIndex.live(lineCodec: activityStorageLineCodec, keepDays: sizeIndexKeepDays)
         let activityEventStore = JSONLActivityEventStore.live(lineCodec: activityStorageLineCodec)
+        let baselineSizes = ActivityBaselineSizes()
         return AppDependencies(
             systemActions: .live,
             activityMonitor: activityMonitor,
@@ -126,8 +131,14 @@ struct AppDependencies {
                             scope: scope
                         )
                     },
-                    prior: { url in activitySizeIndex.takeKnownSize(for: url, scope: scope) },
-                    known: { url in activitySizeIndex.knownSize(for: url, scope: scope) }
+                    prior: { url in
+                        activitySizeIndex.takeKnownSize(for: url, scope: scope)
+                            ?? baselineSizes.size(for: url, scope: scope)
+                    },
+                    known: { url in
+                        activitySizeIndex.knownSize(for: url, scope: scope)
+                            ?? baselineSizes.size(for: url, scope: scope)
+                    }
                 )
             },
             activityEventStore: activityEventStore,
@@ -135,6 +146,7 @@ struct AppDependencies {
             // Keep those measurements out of the live attribution index so they
             // cannot consume an increment or overwrite a newer event measurement.
             activityBaselineService: ActivityBaselineService(),
+            activityBaselineSizes: baselineSizes,
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(
                 lineCodec: activityStorageLineCodec,
