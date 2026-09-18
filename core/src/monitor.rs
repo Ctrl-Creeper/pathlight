@@ -92,12 +92,29 @@ pub(crate) trait Backend: Send {
 /// Shared by backends: knows the root and forwards to the host listener.
 pub(crate) struct Emitter {
     pub root: String,
+    /// The root as the disk spells it, when that differs from `root`: a
+    /// watch on `/tmp/x` hears about `/private/tmp/x/file` from FSEvents.
+    /// Every path is rebased onto `root`, so exclusions, sizes and the
+    /// screen all speak the spelling the watch was asked for.
+    canonical: Option<String>,
     listener: Arc<dyn ActivityListener>,
 }
 
 impl Emitter {
     pub fn emit(&self, event: StreamEvent) {
         self.listener.on_event(event);
+    }
+
+    /// `path` spelled under `root` rather than under the disk's name for it.
+    fn rebased(&self, path: String) -> String {
+        let path = crate::paths::normalize(&path);
+        match &self.canonical {
+            Some(canonical) if path == *canonical => self.root.clone(),
+            Some(canonical) if crate::paths::is_inside(canonical, &path) => {
+                format!("{}{}", self.root, &path[canonical.len()..])
+            }
+            _ => path,
+        }
     }
 
     pub fn change(&self, kind: ChangeKind, path: String, event_id: u64) {
@@ -111,10 +128,19 @@ impl Emitter {
         process_name: Option<String>,
         event_id: u64,
     ) {
+        let path = self.rebased(path);
+        let kind = match kind {
+            ChangeKind::Renamed {
+                previous_path: Some(previous),
+            } => ChangeKind::Renamed {
+                previous_path: Some(self.rebased(previous)),
+            },
+            kind => kind,
+        };
         self.emit(StreamEvent::Change {
             change: Change {
                 kind,
-                path: crate::paths::normalize(&path),
+                path,
                 root_path: self.root.clone(),
                 timestamp: SystemTime::now(),
                 process_name,
@@ -146,7 +172,15 @@ impl Watcher {
         listener: Arc<dyn ActivityListener>,
     ) -> Result<Arc<Self>, CoreError> {
         let root = crate::paths::normalize(&root_path);
-        let emitter = Arc::new(Emitter { root, listener });
+        let canonical = std::fs::canonicalize(&root)
+            .ok()
+            .map(|real| crate::paths::normalize(&real.to_string_lossy()))
+            .filter(|real| *real != root);
+        let emitter = Arc::new(Emitter {
+            root,
+            canonical,
+            listener,
+        });
         let latency = Duration::from_millis(bounded_monitor_latency_ms(latency_ms));
         let backend = platform::start(emitter, since_event_id, latency)?;
         Ok(Arc::new(Self {

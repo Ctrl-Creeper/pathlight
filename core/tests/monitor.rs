@@ -179,6 +179,64 @@ fn a_clone_reports_a_creation() {
     );
 }
 
+/// A watch asked for through a symlink hears about the real path from the
+/// disk; every change comes back spelled the way the watch was asked for, or
+/// nothing downstream - exclusions, sizes, the screen - would recognise it.
+#[cfg(unix)]
+#[test]
+fn a_change_is_spelled_the_way_the_watch_was_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = canonical_root(dir.path()).join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = canonical_root(dir.path()).join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let collector = Arc::new(Collector::default());
+    let watcher = Watcher::start(
+        link.to_string_lossy().into_owned(),
+        None,
+        100,
+        collector.clone(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let harness = Harness {
+        _dir: dir,
+        root: link.clone(),
+        watcher,
+        collector,
+    };
+
+    std::fs::write(link.join("hello.txt"), b"hi").unwrap();
+
+    let changes = harness.wait_for("the file written through the link", |changes| {
+        !named(changes, "hello.txt").is_empty()
+    });
+    let expected = link.join("hello.txt").to_string_lossy().into_owned();
+    assert!(
+        named(&changes, "hello.txt")
+            .iter()
+            .any(|change| change.path == expected),
+        "the change is not spelled with the watched root: {changes:#?}"
+    );
+
+    // The other half of a rename is a path too.
+    std::fs::rename(link.join("hello.txt"), link.join("renamed.txt")).unwrap();
+    let changes = harness.wait_for("the rename through the link", |changes| {
+        !named(changes, "renamed.txt").is_empty()
+    });
+    let real = real.to_string_lossy().into_owned();
+    for change in &changes {
+        let previous = match &change.kind {
+            ChangeKind::Renamed { previous_path } => previous_path.as_deref(),
+            _ => None,
+        };
+        assert!(
+            !change.path.starts_with(&real) && !previous.is_some_and(|p| p.starts_with(&real)),
+            "a path is spelled the disk's way, not the watch's: {change:#?}"
+        );
+    }
+}
+
 #[test]
 fn a_delete_reports_a_removal() {
     let harness = Harness::start(|root| std::fs::write(root.join("doomed.txt"), b"bye").unwrap());
