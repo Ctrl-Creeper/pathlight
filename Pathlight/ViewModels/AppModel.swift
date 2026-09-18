@@ -564,6 +564,8 @@ final class AppModel: ObservableObject {
             }
             journalFlushFailureCount = 0
             setMonitoringStatus(nil, for: .journal)
+            // A row was sealed and written, so the key is in hand again.
+            setMonitoringStatus(nil, for: .encryptionKey)
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
             for entry in batch.entries {

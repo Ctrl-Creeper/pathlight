@@ -15,7 +15,8 @@ nonisolated struct RustActivityStorageCryptor: ActivityStorageLineCrypting {
             wrapping: FileActivityStorageKeyProvider.live
         ),
         legacyKeyProvider: CachingActivityStorageKeyProvider(
-            wrapping: LegacyKeychainActivityStorageKeyProvider()
+            wrapping: LegacyKeychainActivityStorageKeyProvider(),
+            remembersFailure: true
         )
     )
 

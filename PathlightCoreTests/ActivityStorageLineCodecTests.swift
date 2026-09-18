@@ -55,6 +55,23 @@ struct ActivityStorageLineCodecTests {
         #expect(underlying.callCount == 2)
     }
 
+    @Test("asks the legacy Keychain once per launch when told to remember a failure")
+    func remembersLegacyKeyLoadFailure() throws {
+        let underlying = ScriptedActivityStorageKeyProvider(results: [
+            .failure(ActivityStorageLineCodecError.keychainReadFailed(-1)),
+            .success(Data(repeating: 2, count: 32))
+        ])
+        let caching = CachingActivityStorageKeyProvider(wrapping: underlying, remembersFailure: true)
+
+        #expect(throws: (any Error).self) {
+            try caching.loadOrCreateKey()
+        }
+        #expect(throws: (any Error).self) {
+            try caching.loadOrCreateKey()
+        }
+        #expect(underlying.callCount == 1)
+    }
+
     @Test("reports a stalled key load instead of blocking the caller")
     func reportsStalledKeyLoadInsteadOfBlocking() throws {
         let underlying = BlockingActivityStorageKeyProvider(key: Data(repeating: 4, count: 32))
@@ -105,6 +122,39 @@ struct ActivityStorageLineCodecTests {
             legacyKeyLoader: { throw ActivityStorageLineCodecError.keychainReadFailed(-1) }
         )
         #expect(try reopened.loadOrCreateKey() == legacyKey)
+    }
+
+    @Test("creates a shared key when the legacy Keychain cannot be read")
+    func createsKeyWhenLegacyKeychainIsUnreadable() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightUnreadableLegacy-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keyURL = directory.appending(path: "activity-events.key")
+        let provider = FileActivityStorageKeyProvider(
+            keyURL: keyURL,
+            legacyKeyLoader: { throw ActivityStorageLineCodecError.keychainReadFailed(-25293) }
+        )
+
+        let key = try provider.loadOrCreateKey()
+        #expect(key.count == 32)
+        #expect(try Data(contentsOf: keyURL) == key)
+    }
+
+    @Test("creates the key while the caller already holds the storage lock")
+    func createsKeyUnderTheStorageLock() throws {
+        // The journal reader holds the storage lock while it asks for the
+        // key; a key provider that took the same lock would wait forever.
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightLockedKey-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keyURL = directory.appending(path: "activity-events.key")
+        let provider = FileActivityStorageKeyProvider(keyURL: keyURL)
+
+        let key = try ActivityStorageFileProtection.withStorageLock(in: directory) {
+            try provider.loadOrCreateKey()
+        }
+        #expect(key.count == 32)
+        #expect(try provider.loadOrCreateKey() == key)
     }
 
     @Test("refuses to replace a malformed shared key")
