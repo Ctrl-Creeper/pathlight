@@ -52,6 +52,10 @@ const EVENT_UNMOUNT: u32 = 0x0080;
 const EVENT_ITEM_CREATED: u32 = 0x0100;
 const EVENT_ITEM_REMOVED: u32 = 0x0200;
 const EVENT_ITEM_RENAMED: u32 = 0x0800;
+/// A Finder "Duplicate" on APFS is a clonefile: the new name arrives with this
+/// flag and often without `ItemCreated`, and a bare "modified" for a path
+/// nobody has measured has no size to report.
+const EVENT_ITEM_CLONED: u32 = 0x0040_0000;
 const RESCAN_FLAGS: u32 = EVENT_MUST_SCAN_SUB_DIRS
     | EVENT_USER_DROPPED
     | EVENT_KERNEL_DROPPED
@@ -447,7 +451,7 @@ impl FsState {
                         previous_path: None,
                     },
                 }
-            } else if event.flags & EVENT_ITEM_CREATED != 0 {
+            } else if is_arrival(event.flags) {
                 ChangeKind::Created
             } else {
                 ChangeKind::Modified
@@ -459,4 +463,26 @@ impl FsState {
 
 fn is_rename(flags: u32) -> bool {
     flags & EVENT_ITEM_RENAMED != 0
+}
+
+/// A new name under the root: created, or cloned from another file.
+fn is_arrival(flags: u32) -> bool {
+    flags & (EVENT_ITEM_CREATED | EVENT_ITEM_CLONED) != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What FSEvents says about a Finder "Duplicate" on APFS: a file, cloned,
+    /// its inode metadata touched, and nothing about a creation.
+    #[test]
+    fn a_finder_duplicate_arrives_as_a_creation() {
+        const ITEM_INODE_META_MOD: u32 = 0x0400;
+        const ITEM_IS_FILE: u32 = 0x0001_0000;
+        assert!(is_arrival(
+            EVENT_ITEM_CLONED | ITEM_INODE_META_MOD | ITEM_IS_FILE
+        ));
+        assert!(!is_arrival(ITEM_INODE_META_MOD | ITEM_IS_FILE));
+    }
 }
