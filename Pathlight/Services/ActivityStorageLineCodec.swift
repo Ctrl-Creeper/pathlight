@@ -73,15 +73,23 @@ nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyPro
     private let underlying: any ActivityStorageKeyProviding
     private let timeout: DispatchTimeInterval
     private let queue = DispatchQueue(label: "com.ctrlcreeper.Pathlight.activity-storage-key")
+    private let remembersFailure: Bool
     private var cachedKey: Data?
+    private var cachedFailure: (any Error)?
     private var inFlight: Load?
 
+    /// `remembersFailure` is for the legacy Keychain key: it is asked for once
+    /// per old row, and every ask this build cannot answer is a prompt on
+    /// screen and a five-second wait under the storage lock. One answer per
+    /// launch is enough; the shared key file never remembers a failure.
     init(
         wrapping underlying: any ActivityStorageKeyProviding,
-        timeout: DispatchTimeInterval = .seconds(5)
+        timeout: DispatchTimeInterval = .seconds(5),
+        remembersFailure: Bool = false
     ) {
         self.underlying = underlying
         self.timeout = timeout
+        self.remembersFailure = remembersFailure
     }
 
     func loadOrCreateKey() throws -> Data {
@@ -89,6 +97,10 @@ nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyPro
         if let cachedKey {
             lock.unlock()
             return cachedKey
+        }
+        if let cachedFailure {
+            lock.unlock()
+            throw cachedFailure
         }
         let load = inFlight ?? startLoad()
         lock.unlock()
@@ -121,8 +133,13 @@ nonisolated final class CachingActivityStorageKeyProvider: ActivityStorageKeyPro
             let result = Result { try underlying.loadOrCreateKey() }
             lock.lock()
             load.result = result
-            if case .success(let key) = result {
+            switch result {
+            case .success(let key):
                 cachedKey = key
+            case .failure(let error) where remembersFailure:
+                cachedFailure = error
+            case .failure:
+                break
             }
             if inFlight === load {
                 inFlight = nil
@@ -256,40 +273,38 @@ nonisolated final class FileActivityStorageKeyProvider: ActivityStorageKeyProvid
             return key
         }
 
-        // Do not hold the cross-process file lock across a possible Keychain
-        // prompt. The file is checked again under the lock, so a CLI writer
-        // that wins this race remains authoritative.
-        let candidate = try legacyKeyLoader() ?? generateKey()
-        return try ActivityStorageFileProtection.withStorageLock(
-            in: keyURL.deletingLastPathComponent()
-        ) {
-            if let key = try loadFileKey() {
-                return key
-            }
-            guard candidate.count == 32 else {
+        // ponytail: a legacy Keychain item this build cannot read (another
+        // signature, a denied prompt) must not hold recording off forever;
+        // rows sealed under it still open through the legacy fallback.
+        let candidate = try ((try? legacyKeyLoader()) ?? nil) ?? generateKey()
+        guard candidate.count == 32 else {
+            throw ActivityStorageLineCodecError.keyUnavailable
+        }
+        try ActivityStorageFileProtection.createProtectedDirectory(
+            at: keyURL.deletingLastPathComponent()
+        )
+        // O_EXCL, the way the core's `crypt::key_or_create` does it: two
+        // writers cannot both publish a key, and whoever lost re-reads. No
+        // storage lock here — the journal reader already holds it while it
+        // asks for the key, and a second flock on the same file from another
+        // thread of this process never returns.
+        let descriptor = open(keyURL.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard descriptor >= 0 else {
+            guard errno == EEXIST, let key = try loadFileKey() else {
                 throw ActivityStorageLineCodecError.keyUnavailable
             }
-            guard FileManager.default.createFile(
-                atPath: keyURL.path,
-                contents: nil,
-                attributes: [.posixPermissions: 0o600]
-            ) else {
-                guard let key = try loadFileKey() else {
-                    throw ActivityStorageLineCodecError.keyUnavailable
-                }
-                return key
-            }
-            do {
-                let handle = try FileHandle(forWritingTo: keyURL)
-                defer { try? handle.close() }
-                try handle.write(contentsOf: candidate)
-                try handle.synchronize()
-                try ActivityStorageFileProtection.applyProtectedFilePermissions(to: keyURL)
-                return candidate
-            } catch {
-                try? FileManager.default.removeItem(at: keyURL)
-                throw error
-            }
+            return key
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: candidate)
+            try handle.synchronize()
+            try handle.close()
+            try ActivityStorageFileProtection.applyProtectedFilePermissions(to: keyURL)
+            return candidate
+        } catch {
+            try? FileManager.default.removeItem(at: keyURL)
+            throw error
         }
     }
 
