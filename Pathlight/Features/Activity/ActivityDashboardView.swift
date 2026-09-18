@@ -94,8 +94,8 @@ struct ActivityDashboardView: View {
                 // One switch for every watch, for something noisy about to
                 // happen. The folders stay as they are, so resuming starts
                 // the same ones again. Nothing to hold off before the first
-                // folder; it stays while paused so the pause can be released.
-                if !targets.isEmpty || isMonitoringPaused {
+                // folder, so nothing to show either.
+                if !targets.isEmpty {
                     Button {
                         actions.setMonitoringPaused(!isMonitoringPaused)
                     } label: {
@@ -183,7 +183,7 @@ struct ActivityDashboardView: View {
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            if isMonitoringPaused {
+            if isMonitoringPaused && !targets.isEmpty {
                 Label("Paused — nothing is being recorded", systemImage: "pause.circle")
                     .font(.subheadline)
                     .foregroundStyle(.orange)
