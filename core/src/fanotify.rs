@@ -589,10 +589,11 @@ impl Watch {
         Some(at.join(std::ffi::OsStr::from_bytes(name)))
     }
 
+    /// The kernel hands back the disk's spelling of a path, so a root asked
+    /// for through a symlink is compared by what it resolves to.
     fn inside(&self, path: &Path) -> bool {
-        let spelled = crate::paths::normalize(&path.to_string_lossy());
-        spelled == self.emitter.root
-            || spelled.starts_with(&format!("{}/", self.emitter.root.trim_end_matches('/')))
+        self.emitter
+            .contains(&crate::paths::normalize(&path.to_string_lossy()))
     }
 }
 
