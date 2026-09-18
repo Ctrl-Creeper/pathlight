@@ -260,11 +260,12 @@ struct ActivityDashboardView: View {
             .animation(PathlightMotion.state, value: presentation.targetRows.count)
             .animation(PathlightMotion.state, value: showsLaunchAtLoginNudge)
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var selectedTargetDetail: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
             ActivityDashboardTrendSection(buckets: presentation.trendBuckets)
 
             Divider()
@@ -296,6 +297,7 @@ struct ActivityDashboardView: View {
                 onLocate: { actions.revealInFinder(URL(filePath: $0)) },
                 onReveal: { actions.revealInFinder(URL(filePath: $0)) }
             )
+            }
         }
     }
 
@@ -401,6 +403,7 @@ private struct MonitoringStartConfigurationView: View {
                     ) {
                         HStack(spacing: 6) {
                             TextField("Kilobytes", value: $minimumKilobytes, format: .number)
+                                .labelsHidden()
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 90)
                             Text("KB")
@@ -421,6 +424,7 @@ private struct MonitoringStartConfigurationView: View {
                                 value: $reportIntervalSeconds,
                                 format: .number.precision(.fractionLength(0...2))
                             )
+                            .labelsHidden()
                             .multilineTextAlignment(.trailing)
                             .frame(width: 90)
                             Text("seconds")
@@ -502,10 +506,11 @@ private struct ActivityDashboardTargetRow: View {
                         Spacer(minLength: 8)
                     }
 
-                    HStack(spacing: 8) {
+                    HStack(alignment: .top, spacing: 8) {
                         ActivityDashboardMetric(title: row.statusText, value: row.changeText)
                         ActivityDashboardMetric(title: row.eventText, value: row.thresholdText)
                     }
+                    .fixedSize(horizontal: false, vertical: true)
 
                     Text(row.lastActivityText)
                         .font(.caption)
@@ -561,7 +566,8 @@ private struct ActivityDashboardTargetRow: View {
                         systemImage: row.growthAlertThresholdBytes == nil ? "bell.slash" : "bell.fill"
                     )
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
                 .menuIndicator(.hidden)
                 .labelStyle(.iconOnly)
                 .fixedSize()
@@ -920,10 +926,10 @@ private struct ActivityDashboardMetric: View {
 
             Text(value)
                 .font(.caption.monospacedDigit().weight(.medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -1147,28 +1153,34 @@ private struct ActivityDashboardTimelineSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Label("Timeline", systemImage: "list.bullet.rectangle")
-                    .font(.headline)
-                Spacer()
-                narrowingControls
+            // The controls drop under the title when the pane is narrow;
+            // otherwise the whole detail column overflows and is clipped on
+            // its leading edge, icons first.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    title
+                    Spacer()
+                    narrowingControls
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    title
+                    narrowingControls
+                }
             }
 
             if rows.isEmpty {
                 Text(query.isNarrowed ? "Nothing recorded here matches that" : "No events recorded")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(rows) { row in
-                            ActivityDashboardTimelineRow(
-                                row: row,
-                                onLocate: onLocate,
-                                onReveal: onReveal
-                            )
-                        }
+                LazyVStack(spacing: 8) {
+                    ForEach(rows) { row in
+                        ActivityDashboardTimelineRow(
+                            row: row,
+                            onLocate: onLocate,
+                            onReveal: onReveal
+                        )
                     }
                 }
 
@@ -1176,17 +1188,22 @@ private struct ActivityDashboardTimelineSection: View {
             }
         }
         .padding(22)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: query) { _, query in
             find = query.text
         }
+    }
+
+    private var title: some View {
+        Label("Timeline", systemImage: "list.bullet.rectangle")
+            .font(.headline)
     }
 
     private var narrowingControls: some View {
         HStack(spacing: 10) {
             TextField("Find in paths", text: $find)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
+                .frame(minWidth: 120, maxWidth: 180)
                 .onSubmit { ask { $0.text = find } }
 
             Picker("Kind", selection: kind) {
