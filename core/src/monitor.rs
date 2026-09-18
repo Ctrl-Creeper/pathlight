@@ -105,6 +105,14 @@ impl Emitter {
         self.listener.on_event(event);
     }
 
+    /// Whether `path`, as the disk spells it, is the root or inside it. For a
+    /// backend that resolves paths itself and has to decide what is ours.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn contains(&self, path: &str) -> bool {
+        let root = self.canonical.as_deref().unwrap_or(&self.root);
+        path == root || crate::paths::is_inside(root, path)
+    }
+
     /// `path` spelled under `root` rather than under the disk's name for it.
     fn rebased(&self, path: String) -> String {
         let path = crate::paths::normalize(&path);
