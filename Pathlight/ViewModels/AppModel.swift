@@ -183,7 +183,9 @@ final class AppModel: ObservableObject {
             options: configuration.liveOptions,
             monitorLatency: configuration.monitorLatency
         )
-        return true
+        // Paused refuses the watch and says so in the dashboard; an empty
+        // Live Monitor window on top of that message would hide it.
+        return liveWatchSession != nil
     }
 
     /// The tail of the watch diary, read when somebody asks rather than kept

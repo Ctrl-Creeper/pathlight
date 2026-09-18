@@ -654,7 +654,7 @@ impl App {
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
-                if self.paused {
+                if self.paused && !self.watches.is_empty() {
                     ui.add_space(12.0);
                     ui.label(
                         egui::RichText::new("Paused — nothing is being recorded.")
@@ -662,9 +662,8 @@ impl App {
                             .color(ui.visuals().warn_fg_color),
                     );
                 }
-                // Nothing to hold off before the first folder; the box stays
-                // while paused so the pause can be released.
-                if !self.watches.is_empty() || self.paused {
+                // Nothing to hold off before the first folder, so nothing to show.
+                if !self.watches.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut paused = self.paused;
                         ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
