@@ -518,7 +518,8 @@ fn watch(rest: &[OsString]) -> io::Result<()> {
             }
             if live.gaps > watched.reported_gaps {
                 eprintln!(
-                    "! {}: the watcher reported {} history gap(s); recovered changes are estimates.",
+                    "! {}: not watching for a while {} time(s) (closed, or events dropped); \
+                     the changes recovered by comparing are estimates.",
                     watched.root,
                     live.gaps - watched.reported_gaps
                 );
