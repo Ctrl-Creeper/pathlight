@@ -1,6 +1,26 @@
 A pre-release. Nothing here is signed or notarized, so both desktop platforms
 will warn before running it:
 
+## Changes in v1.8.2
+
+Replaces v1.8.1, which could stop recording for good: the macOS app took the
+storage lock while creating its key file and the journal reader already held
+it while asking for the key, so every row waited out a timeout and the
+"could not access its activity encryption key" banner never left. The key
+file is now created without the lock, a Keychain item this build cannot read
+no longer holds recording off, and the Keychain is asked once per launch.
+
+Also, on every platform: a file the watch never touched is sized from the
+walk that opened the watch, so deleting it reports the bytes freed and a
+first modification reports growth rather than the whole file; a Finder
+duplicate is a creation, not an unsized modification; a watch asked for
+through a symlink spells every change the way it was asked for; what a run
+recorded live is not recovered again as a gap by the next run; a large write
+that spans two batches is one file, not two; the Windows and Linux window
+follows folders the terminal adds or removes while it is open; the macOS
+dashboard is laid out for macOS 26 (one scrolling column, readable dialog,
+no pause switch before the first folder).
+
 ## Changes in v1.8.1
 
 Replaces the v1.8.0 pre-release, which should not be used: on Windows, Linux
