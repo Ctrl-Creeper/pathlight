@@ -105,7 +105,7 @@ struct App {
     /// Whether every watch is held off, mirrored from storage for the same
     /// reason.
     paused: bool,
-    shared_pause_changes: Option<Receiver<bool>>,
+    shared_pause_changes: Option<Receiver<(bool, Vec<WatchTarget>)>>,
     shared_pause_stop: Option<mpsc::Sender<()>>,
     /// What the two size boxes hold while they are being typed, in MB. Text
     /// rather than numbers, because an empty box is "no bound" and a
@@ -466,14 +466,41 @@ impl App {
             .shared_pause_changes
             .as_ref()
             .and_then(|changes| changes.try_iter().last());
-        if let Some(paused) = changed {
-            self.apply_shared_pause(paused);
+        if let Some((paused, watches)) = changed {
+            self.watches = watches;
+            if paused != self.paused {
+                self.apply_shared_pause(paused);
+            } else {
+                self.reconcile_sessions();
+            }
         }
     }
 
-    /// Watches the one shared setting off the paint path. It wakes egui only
-    /// when the value changes, so a hidden or idle window remains idle while
-    /// still observing another host's pause within a second.
+    /// The sessions the settings file says there should be: a folder the
+    /// terminal added while this window was open is watched by somebody, and
+    /// one it removed is not watched by two.
+    fn reconcile_sessions(&mut self) {
+        if self.paused {
+            return;
+        }
+        let enabled: Vec<String> = self
+            .watches
+            .iter()
+            .filter(|watch| watch.enabled)
+            .map(|watch| watch.path.clone())
+            .collect();
+        self.sessions.retain(|root, _| enabled.contains(root));
+        for root in enabled {
+            if !self.sessions.contains_key(&root) {
+                self.open(&root, None);
+            }
+        }
+    }
+
+    /// Watches the shared settings off the paint path. It wakes egui only
+    /// when something changes, so a hidden or idle window remains idle while
+    /// still observing another host's pause, or a folder it added, within a
+    /// second.
     fn observe_shared_pause(&mut self, ctx: &egui::Context) {
         let Some(storage) = self.storage().cloned() else {
             return;
@@ -481,7 +508,7 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         let (stop_sender, stop_receiver) = mpsc::channel::<()>();
         let ctx = ctx.clone();
-        let mut paused = self.paused;
+        let mut last = (self.paused, self.watches.clone());
         if std::thread::Builder::new()
             .name("pathlight-settings".into())
             .spawn(move || loop {
@@ -489,11 +516,11 @@ impl App {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-                let current = storage.paused();
-                if current == paused {
+                let current = (storage.paused(), storage.watches());
+                if current == last {
                     continue;
                 }
-                paused = current;
+                last = current.clone();
                 if sender.send(current).is_err() {
                     return;
                 }
@@ -1160,7 +1187,7 @@ impl App {
         ui.horizontal(|ui| {
             metric(ui, "Net change", &human_bytes(live.total_byte_delta));
             metric(ui, "Events", &live.event_count.to_string());
-            metric(ui, "Watching for", &elapsed(live.started_at));
+            metric(ui, "Watching since", &elapsed(live.started_at));
         });
 
         if live.gaps > 0 {
@@ -1842,6 +1869,49 @@ mod tests {
             app.poll_shared_pause();
         }
         assert!(!app.paused && app.sessions.contains_key(&root));
+        app.stop_shared_pause_observer();
+    }
+
+    /// The terminal and the window share one settings file. A folder added
+    /// there while the window is open is watched by the window, not by nobody
+    /// until the next launch; one removed there stops here too.
+    #[test]
+    fn a_folder_added_by_another_process_is_watched_by_the_running_window() {
+        let folder = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
+        let added = paths::normalize(&other.path().canonicalize().unwrap().to_string_lossy());
+        let mut app = app(storage_dir.path(), vec![root.clone()]);
+        assert!(app.open(&root, None));
+        app.remember(&root, true);
+        app.observe_shared_pause(&egui::Context::default());
+
+        Storage::at(storage_dir.path())
+            .set_watch_enabled(&added, true)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !app.sessions.contains_key(&added) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(
+            app.sessions.contains_key(&added) && app.sessions.contains_key(&root),
+            "the added folder is not being watched"
+        );
+
+        Storage::at(storage_dir.path())
+            .set_watch_enabled(&added, false)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while app.sessions.contains_key(&added) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            app.poll_shared_pause();
+        }
+        assert!(
+            !app.sessions.contains_key(&added) && app.sessions.contains_key(&root),
+            "the switched-off folder is still being watched"
+        );
         app.stop_shared_pause_observer();
     }
 
