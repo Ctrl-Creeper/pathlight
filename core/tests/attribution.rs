@@ -182,6 +182,23 @@ fn modifications_report_growth_and_moves_inside_root_net_out() {
     assert_eq!(events[3].confidence, Confidence::Estimated);
 }
 
+/// A large file is written across two batches. FSEvents keeps saying
+/// "created" for it; the second row is the growth since the first, and says so.
+#[test]
+fn a_second_creation_of_a_measured_file_is_growth() {
+    let size = |_: &str| Some(3_000);
+    let known = |_: &str| Some(1_000);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &none, &known);
+
+    let events = attributor.process(&[change(ChangeKind::Created, "big.dmg", 1)]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Modified);
+    assert_eq!(events[0].byte_delta, Some(2_000));
+    assert_eq!(events[0].confidence, Confidence::Confirmed);
+}
+
 #[test]
 fn small_deletions_respect_the_size_threshold() {
     let prior = |_: &str| Some(4_096);

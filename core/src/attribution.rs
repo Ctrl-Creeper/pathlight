@@ -636,11 +636,19 @@ impl<'a> Attributor<'a> {
             if !self.options.watches_file(Some(size)) {
                 return None;
             }
-            let (byte_delta, confidence) = match (kind, known) {
-                (EventKind::Modified, None) => (None, Confidence::Unknown),
-                (_, Some(previous)) => (Some(size - previous), Confidence::Confirmed),
-                (EventKind::Created, None) => (Some(size), Confidence::Confirmed),
-                (_, None) => (None, Confidence::Unknown),
+            let (kind, byte_delta, confidence) = match (kind, known) {
+                (EventKind::Modified, None) => (kind, None, Confidence::Unknown),
+                // A "created" for a file already measured is the rest of a
+                // write still in progress when the first batch was flushed:
+                // the same file growing, not a second one.
+                (EventKind::Created, Some(previous)) => (
+                    EventKind::Modified,
+                    Some(size - previous),
+                    Confidence::Confirmed,
+                ),
+                (_, Some(previous)) => (kind, Some(size - previous), Confidence::Confirmed),
+                (EventKind::Created, None) => (kind, Some(size), Confidence::Confirmed),
+                (_, None) => (kind, None, Confidence::Unknown),
             };
             Some(base(kind, byte_delta, confidence, previous_path))
         };
