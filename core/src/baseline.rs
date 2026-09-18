@@ -137,13 +137,55 @@ pub fn directory(dir: &Path) -> PathBuf {
 /// ponytail: FNV-1a rather than a real hash — this names a cache file, and a
 /// collision costs one unnecessary rescan, not a wrong answer, because the
 /// root the file records is checked on the way back in.
-fn fnv1a(text: &str) -> u64 {
+pub(crate) fn fnv1a(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// What every file held when the folder was last walked, for the two
+/// questions a live change cannot answer on its own: how big was the file
+/// that just vanished, and how big was this one before it was modified.
+/// The size index knows files the watch has already touched; this knows the
+/// rest.
+///
+/// ponytail: a sorted `(fnv1a(path), bytes)` table, 16 bytes a file, so a
+/// whole-disk watch of five million files costs 80 MB rather than the paths
+/// themselves. A collision misreports one size as an estimate; spill this to a
+/// file beside the baseline if that memory shows up.
+#[derive(Default)]
+pub struct Sizes {
+    table: Vec<(u64, u64)>,
+}
+
+impl Sizes {
+    pub fn from(snapshot: &ScanSnapshot) -> Self {
+        let mut table: Vec<(u64, u64)> = snapshot
+            .entries
+            .iter()
+            .filter_map(|(path, measurement)| {
+                let bytes = measurement.allocated_bytes?;
+                Some((
+                    fnv1a(&crate::paths::normalize(&path.to_string_lossy())),
+                    bytes,
+                ))
+            })
+            .collect();
+        table.sort_unstable();
+        table.dedup_by_key(|entry| entry.0);
+        Self { table }
+    }
+
+    pub fn get(&self, path: &str) -> Option<u64> {
+        let hash = fnv1a(path);
+        self.table
+            .binary_search_by_key(&hash, |entry| entry.0)
+            .ok()
+            .map(|at| self.table[at].1)
+    }
 }
 
 /// Write `snapshot` where [`file`] says, through a temporary so an interrupted

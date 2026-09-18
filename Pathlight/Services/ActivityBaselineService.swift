@@ -151,9 +151,12 @@ nonisolated struct ActivityBaselineService: Sendable {
         self.now = now
     }
 
+    /// `record` hears every path whose size was read, as it is read, so the
+    /// watch can size a deletion or first modification of a file it never touched.
     func captureBaseline(
         rootPath: URL,
-        capturedAt: Date = Date()
+        capturedAt: Date = Date(),
+        record: (@Sendable (URL, Int64) -> Void)? = nil
     ) async -> ActivityBaselineSnapshot {
         let standardizedRoot = rootPath.standardizedFileURL
         var pending = [standardizedRoot]
@@ -192,6 +195,7 @@ nonisolated struct ActivityBaselineService: Sendable {
             }
 
             if let size = measurement.allocatedSize, size >= 0 {
+                record?(standardizedURL, size)
                 measuredItemCount += 1
                 let isNewObject: Bool
                 if let identity = measurement.identity {

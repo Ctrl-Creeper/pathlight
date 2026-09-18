@@ -236,6 +236,9 @@ struct BaselineState {
     /// Applied before a comparison so a change already in the journal is not
     /// recovered a second time as a guess.
     overlay: BTreeMap<String, (SystemTime, Option<u64>)>,
+    /// Every file's size as of the last walk, for a deletion or first
+    /// modification of a file the index never measured.
+    sizes: baseline::Sizes,
     /// A fresh scan, waiting to be compared. Owed to the worker rather than
     /// done on the thread that scanned, because only the worker writes rows.
     catching_up: Option<ScanSnapshot>,
@@ -296,6 +299,16 @@ fn keep(
 
 /// The last known state at `path`, opened with the journal's key when it was
 /// sealed under one.
+/// The last walk's size for `path`, as the index would report it.
+fn baseline_size(baseline: &Baseline, path: &str) -> Option<i64> {
+    let size = baseline
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .sizes
+        .get(path)?;
+    i64::try_from(size).ok()
+}
+
 fn read_baseline(path: &Path, root: &Path, storage: &Storage) -> Option<ScanSnapshot> {
     baseline::read(path, root, crate::crypt::key(&storage.journal()))
 }
@@ -385,20 +398,6 @@ impl Worker {
         // against yesterday's sizes instead of calling every first change a
         // whole file and every deletion nothing at all.
         let index = self.storage.size_index();
-        let size_scope = self.scope.clone();
-        let prior_scope = self.scope.clone();
-        let known_scope = self.scope.clone();
-        // The size provider records what it measured, so a later deletion of
-        // the same path still has a size to report.
-        let size = |path: &str| {
-            let size = allocated_size(Path::new(path));
-            index.record(&size_scope, path, size);
-            size
-        };
-        let prior_size = |path: &str| index.take(&prior_scope, path);
-        let known_size = |path: &str| index.peek(&known_scope, path);
-        let attributor = Attributor::new(self.options, &size, &prior_size, &known_size);
-        let mut pending: Vec<Change> = Vec::new();
         // What the folder looked like when the watch opened. Without it a gap
         // can only ever be counted; with it the gap becomes a list of files.
         //
@@ -412,19 +411,47 @@ impl Worker {
         // changed while Pathlight was closed, and that is a gap like any
         // other. The scan below is what it gets compared against.
         let earlier = baseline::file(self.storage.dir(), &self.scope);
-        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
-            kept: earlier.exists().then_some(earlier),
-            ..BaselineState::default()
-        }));
-        if baseline
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .kept
-            .is_some()
-        {
+        let kept = earlier.exists().then_some(earlier);
+        // Yesterday's sizes serve until today's walk lands, so a file deleted
+        // in the first minutes of a whole-disk watch still has a size.
+        let sizes = kept
+            .as_deref()
+            .and_then(|path| read_baseline(path, Path::new(&self.scope), &self.storage))
+            .map(|snapshot| baseline::Sizes::from(&snapshot))
+            .unwrap_or_default();
+        if kept.is_some() {
             self.live().gaps += 1;
         }
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState {
+            kept,
+            sizes,
+            ..BaselineState::default()
+        }));
         self.rescan(&baseline);
+
+        let size_scope = self.scope.clone();
+        let prior_scope = self.scope.clone();
+        let known_scope = self.scope.clone();
+        // The size provider records what it measured, so a later deletion of
+        // the same path still has a size to report. What it never measured,
+        // the baseline may have.
+        let size = |path: &str| {
+            let size = allocated_size(Path::new(path));
+            index.record(&size_scope, path, size);
+            size
+        };
+        let prior_size = |path: &str| {
+            index
+                .take(&prior_scope, path)
+                .or_else(|| baseline_size(&baseline, path))
+        };
+        let known_size = |path: &str| {
+            index
+                .peek(&known_scope, path)
+                .or_else(|| baseline_size(&baseline, path))
+        };
+        let attributor = Attributor::new(self.options, &size, &prior_size, &known_size);
+        let mut pending: Vec<Change> = Vec::new();
         let mut due = Instant::now() + self.flush_interval;
         // Before the first row of this watch, so a journal left over the cap
         // by an earlier run does not have to wait an hour to come back under it.
@@ -543,6 +570,7 @@ impl Worker {
         let Some(mut previous) = previous else {
             current.amend(amendments(&slot.overlay, Some(current.started_at)));
             slot.overlay.clear();
+            slot.sizes = baseline::Sizes::from(&current);
             slot.kept = keep(current, &self.scope, &self.live, &self.storage);
             drop(slot);
             if owed {
@@ -565,6 +593,7 @@ impl Worker {
             .collect();
         let unread = previous.errors.len().max(current.errors.len());
         drop(previous);
+        slot.sizes = baseline::Sizes::from(&current);
         slot.kept = keep(current, &self.scope, &self.live, &self.storage);
         drop(slot);
         if owed {
@@ -1504,6 +1533,81 @@ mod tests {
         assert!(
             row.byte_delta.is_some_and(|delta| delta > 1_000_000),
             "{row:?}"
+        );
+    }
+
+    /// A file the watch never touched has no size in the index; the walk
+    /// that opened the watch measured it, and that is what a deletion or
+    /// first modification reports.
+    #[test]
+    fn a_file_the_watch_never_measured_is_sized_from_the_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(storage_dir.path());
+        fs::write(root.join("old.bin"), vec![b'o'; 8192]).unwrap();
+        fs::write(root.join("grown.bin"), vec![b'g'; 8192]).unwrap();
+        let mut worker = worker_on(&root, &storage);
+        let scope = worker.scope.clone();
+        let baseline: Baseline = Arc::new(Mutex::new(BaselineState::default()));
+        worker.reconcile(&baseline);
+        settle(&baseline);
+        worker.catch_up(&baseline);
+
+        let index = SizeIndex::default();
+        let size = |path: &str| {
+            let size = allocated_size(Path::new(path));
+            index.record(&scope, path, size);
+            size
+        };
+        let prior = |path: &str| {
+            index
+                .take(&scope, path)
+                .or_else(|| baseline_size(&baseline, path))
+        };
+        let known = |path: &str| {
+            index
+                .peek(&scope, path)
+                .or_else(|| baseline_size(&baseline, path))
+        };
+        let attributor = Attributor::new(worker.options, &size, &prior, &known);
+
+        fs::remove_file(root.join("old.bin")).unwrap();
+        fs::write(root.join("grown.bin"), vec![b'g'; 1 << 20]).unwrap();
+        let change = |kind, path: &Path| Change {
+            kind,
+            path: paths::normalize(&path.to_string_lossy()),
+            root_path: scope.clone(),
+            timestamp: SystemTime::now(),
+            process_name: None,
+        };
+        let mut pending = vec![
+            change(ChangeKind::Deleted, &root.join("old.bin")),
+            change(ChangeKind::Modified, &root.join("grown.bin")),
+        ];
+        worker.flush(&attributor, &mut pending, &index, &baseline);
+
+        let live = worker.live();
+        let deleted = live
+            .rows
+            .iter()
+            .find(|row| row.path.ends_with("old.bin"))
+            .expect("the deletion went unrecorded");
+        assert!(
+            deleted.byte_delta.is_some_and(|delta| delta <= -8192),
+            "{deleted:?}"
+        );
+        let grown = live
+            .rows
+            .iter()
+            .find(|row| row.path.ends_with("grown.bin"))
+            .expect("the growth went unrecorded");
+        // Growth, not the whole file: the megabyte less what it already had.
+        assert!(
+            grown
+                .byte_delta
+                .is_some_and(|delta| delta > 1_000_000 && delta < (1 << 20)),
+            "{grown:?}"
         );
     }
 
