@@ -8,6 +8,12 @@ nonisolated struct ActivityHistoryBucket: Equatable, Sendable {
     let unknownSizeEventCount: Int
 }
 
+/// Net change of one immediate child of the watch root, over every retained row.
+nonisolated struct ActivityHistoryChildTotal: Equatable, Sendable {
+    var byteDelta: Int64 = 0
+    var eventCount = 0
+}
+
 nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
     let rootPath: URL
     let generatedAt: Date
@@ -24,6 +30,9 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
     /// When this folder last changed, across everything retained for it — not
     /// only what the current filter, sort and page happen to show.
     let latestEventAt: Date?
+    /// Keyed by the name of the child; covers every retained row like the
+    /// totals do, which is why it is not derived from `recentEvents`.
+    let childTotals: [String: ActivityHistoryChildTotal]
 
     init(
         rootPath: URL,
@@ -34,7 +43,8 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
         buckets: [ActivityHistoryBucket],
         recentEvents: [DiskActivityEvent],
         isTruncated: Bool = false,
-        latestEventAt: Date? = nil
+        latestEventAt: Date? = nil,
+        childTotals: [String: ActivityHistoryChildTotal] = [:]
     ) {
         self.rootPath = rootPath
         self.generatedAt = generatedAt
@@ -45,6 +55,7 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
         self.recentEvents = recentEvents
         self.isTruncated = isTruncated
         self.latestEventAt = latestEventAt
+        self.childTotals = childTotals
     }
 }
 
@@ -106,6 +117,7 @@ nonisolated struct ActivityEventPage: Equatable, Sendable {
     let buckets: [ActivityHistoryBucket]
     /// The newest event for this root, whatever the query asked for.
     let latestEventAt: Date?
+    let childTotals: [String: ActivityHistoryChildTotal]
 
     static let empty = ActivityEventPage(
         events: [],
@@ -113,7 +125,8 @@ nonisolated struct ActivityEventPage: Equatable, Sendable {
         totalNetByteDelta: 0,
         unknownSizeEventCount: 0,
         buckets: [],
-        latestEventAt: nil
+        latestEventAt: nil,
+        childTotals: [:]
     )
 }
 
@@ -124,7 +137,9 @@ nonisolated struct ActivityEventPageBuilder {
     private let skip: Int
     private let bucketInterval: TimeInterval
     private let query: ActivityHistoryQuery
+    private let rootPrefix: String
     private var window: [DiskActivityEvent] = []
+    private var childTotals: [String: ActivityHistoryChildTotal] = [:]
     private var totalEventCount = 0
     private var totalNetByteDelta: Int64 = 0
     private var unknownSizeEventCount = 0
@@ -132,10 +147,13 @@ nonisolated struct ActivityEventPageBuilder {
     private var latestEventAt: Date?
 
     init(
+        rootPath: URL,
         limit: Int,
         bucketInterval: TimeInterval,
         query: ActivityHistoryQuery = .everything
     ) {
+        let root = rootPath.standardizedFileURL.path
+        rootPrefix = root.hasSuffix("/") ? root : root + "/"
         self.limit = max(limit, 0)
         self.skip = max(query.skip, 0)
         self.bucketInterval = max(bucketInterval, 1)
@@ -169,6 +187,15 @@ nonisolated struct ActivityEventPageBuilder {
         totals.eventCount += 1
         totals.unknownSizeEventCount += event.byteDelta == nil ? 1 : 0
         bucketTotals[start] = totals
+
+        if event.kind != .aggregate {
+            let path = event.path.standardizedFileURL.path
+            if path.hasPrefix(rootPrefix),
+               let child = path.dropFirst(rootPrefix.count).split(separator: "/").first {
+                childTotals[String(child), default: .init()].byteDelta += event.byteDelta ?? 0
+                childTotals[String(child), default: .init()].eventCount += 1
+            }
+        }
 
         // ponytail: a bounded buffer that is sorted and cut when it fills,
         // rather than a ring holding the last `limit` lines. "Biggest first"
@@ -204,7 +231,8 @@ nonisolated struct ActivityEventPageBuilder {
                     )
                 }
                 .sorted { $0.startDate < $1.startDate },
-            latestEventAt: latestEventAt
+            latestEventAt: latestEventAt,
+            childTotals: childTotals
         )
     }
 }
@@ -242,7 +270,8 @@ struct ActivityHistoryService: Sendable {
             buckets: page.buckets,
             recentEvents: page.events,
             isTruncated: page.totalEventCount > max(query.skip, 0) + page.events.count,
-            latestEventAt: page.latestEventAt
+            latestEventAt: page.latestEventAt,
+            childTotals: page.childTotals
         )
     }
 

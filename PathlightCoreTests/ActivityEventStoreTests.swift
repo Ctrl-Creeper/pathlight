@@ -162,6 +162,7 @@ struct ActivityEventStoreTests {
         #expect(page.totalEventCount == 10)
         #expect(page.totalNetByteDelta == 10_000)
         #expect(page.buckets.count == 10, "trend buckets span the whole journal, not the page")
+        #expect(page.childTotals.count == 10, "child totals span the whole journal, not the page")
         #expect(page.events.map(\.path.lastPathComponent) == ["9.bin", "8.bin", "7.bin"])
     }
 

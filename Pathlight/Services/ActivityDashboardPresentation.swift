@@ -162,33 +162,15 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
             }
     }
 
-    /// Aggregates recent events by the immediate child of the watch root, so the
-    /// dashboard can answer "what inside this folder is growing".
+    /// Net change per immediate child of the watch root, so the dashboard can
+    /// answer "what inside this folder is growing" — over every retained row,
+    /// like the totals beside it, not the page the timeline lists.
     private static func topChanges(
         history: ActivityHistorySnapshot,
         limit: Int = 6
     ) -> [TopChange] {
-        struct Accumulator {
-            var byteDelta: Int64 = 0
-            var eventCount = 0
-        }
-
         let root = history.rootPath.standardizedFileURL
-        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        var accumulators: [String: Accumulator] = [:]
-        for event in history.recentEvents where event.kind != .aggregate {
-            let path = event.path.standardizedFileURL.path
-            guard path.hasPrefix(rootPrefix) else {
-                continue
-            }
-            let relative = path.dropFirst(rootPrefix.count)
-            guard let childName = relative.split(separator: "/").first.map(String.init) else {
-                continue
-            }
-            accumulators[childName, default: Accumulator()].byteDelta += event.byteDelta ?? 0
-            accumulators[childName, default: Accumulator()].eventCount += 1
-        }
-
+        let accumulators = history.childTotals
         let maxMagnitude = accumulators.values.map { abs($0.byteDelta) }.max() ?? 0
         return accumulators
             .sorted { lhs, rhs in

@@ -210,11 +210,14 @@ struct ActivityDashboardPresentationTests {
             rootPath: downloads,
             totalNetByteDelta: 0,
             eventCount: 4,
+            // The page lists one newer row; the totals cover every row.
             recentEvents: [
-                event(.created, root: downloads, name: "Movies/one.mov", timestamp: 100, byteDelta: 3_000),
-                event(.created, root: downloads, name: "Movies/two.mov", timestamp: 110, byteDelta: 2_000),
-                event(.deleted, root: downloads, name: "Archives/old.zip", timestamp: 120, byteDelta: -1_000),
                 event(.created, root: downloads, name: "loose.txt", timestamp: 130, byteDelta: 500)
+            ],
+            childTotals: [
+                "Movies": ActivityHistoryChildTotal(byteDelta: 5_000, eventCount: 2),
+                "Archives": ActivityHistoryChildTotal(byteDelta: -1_000, eventCount: 1),
+                "loose.txt": ActivityHistoryChildTotal(byteDelta: 500, eventCount: 1)
             ]
         )
 
@@ -300,7 +303,8 @@ private func historySnapshot(
     eventCount: Int,
     unknownSizeEventCount: Int = 0,
     buckets: [ActivityHistoryBucket] = [],
-    recentEvents: [DiskActivityEvent] = []
+    recentEvents: [DiskActivityEvent] = [],
+    childTotals: [String: ActivityHistoryChildTotal] = [:]
 ) -> ActivityHistorySnapshot {
     ActivityHistorySnapshot(
         rootPath: rootPath,
@@ -309,7 +313,8 @@ private func historySnapshot(
         eventCount: eventCount,
         unknownSizeEventCount: unknownSizeEventCount,
         buckets: buckets,
-        recentEvents: recentEvents
+        recentEvents: recentEvents,
+        childTotals: childTotals
     )
 }
 
