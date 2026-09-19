@@ -85,7 +85,8 @@ struct ActivityTimelinePanel: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Top-anchored: before the first row the header should not float mid-window.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.regularMaterial)
     }
 }
