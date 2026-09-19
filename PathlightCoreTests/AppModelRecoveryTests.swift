@@ -444,6 +444,31 @@ final class AppModelRecoveryTests: XCTestCase {
         XCTAssertEqual(model.longTermWatchTargets.first?.checkpoint?.eventID, 1)
     }
 
+    func testSizeTableIsKeptAfterTheWalkForTheNextLaunch() async throws {
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let directory = URL(filePath: "/tmp/pathlight-sizes-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, baselineDirectory: directory)
+        defer { model.cleanup() }
+        let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: root)
+        let file = ActivityBaselineSizes.fileURL(scope: scope, in: directory)
+
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+
+        try await eventually("the table to be written") { FileManager.default.fileExists(atPath: file.path) }
+        try await eventually("the progress row to go away") { model.baselineProgress[root.standardizedFileURL.path] == nil }
+        // The walk saw one item, the root, at 0 bytes: one 16-byte entry.
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int, 16)
+        let nextLaunch = ActivityBaselineSizes()
+        XCTAssertEqual(try nextLaunch.load(scope: scope, from: file), 1)
+        XCTAssertEqual(nextLaunch.size(for: root, scope: scope), 0)
+
+        model.removeLongTermWatchTarget(rootPath: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
     private var detailedOptions: LongTermWatchTargetOptions {
         LongTermWatchTargetOptions(minimumRecordedByteDelta: 1, aggregationWindow: 0, recordsFileNames: true, exclusionPatterns: [])
     }
@@ -453,7 +478,8 @@ final class AppModelRecoveryTests: XCTestCase {
         scan: RecoveryScanGate,
         eventStore: (any ActivityEventStoring)? = nil,
         keyWarmUp: @escaping @Sendable () throws -> Void = {},
-        storageReset: (@Sendable () async throws -> Void)? = nil
+        storageReset: (@Sendable () async throws -> Void)? = nil,
+        baselineDirectory: URL? = nil
     ) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
         let suite = "AppModelRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -480,6 +506,7 @@ final class AppModelRecoveryTests: XCTestCase {
                 },
                 contentsProvider: { scan.contents(at: $0) },
             ),
+            activityBaselineSizesDirectory: baselineDirectory,
             activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
             activityStorageReset: storageReset,
             launchAtLoginService: RecoveryTestLoginService(),

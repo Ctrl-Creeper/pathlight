@@ -25,6 +25,7 @@ struct ActivityDashboardView: View {
     let targets: [LongTermWatchTarget]
     let histories: [ActivityHistorySnapshot]
     let runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
+    var baselineProgress: [String: BaselineProgress] = [:]
     var historyQuery: ActivityHistoryQuery = .everything
     let showsLaunchAtLoginNudge: Bool
     var monitoringStatusMessage: String? = nil
@@ -227,6 +228,7 @@ struct ActivityDashboardView: View {
                 ForEach(presentation.targetRows) { row in
                     ActivityDashboardTargetRow(
                         row: row,
+                        baselineProgress: baselineProgress[row.id],
                         isSelected: row.id == presentation.selectedTargetID,
                         onSelect: {
                             selectedTargetID = row.id
@@ -466,6 +468,7 @@ private struct MonitoringStartConfigurationView: View {
 
 private struct ActivityDashboardTargetRow: View {
     let row: ActivityDashboardPresentation.TargetRow
+    var baselineProgress: BaselineProgress? = nil
     let isSelected: Bool
     let onSelect: () -> Void
     let onSetEnabled: (Bool) -> Void
@@ -512,6 +515,10 @@ private struct ActivityDashboardTargetRow: View {
                         ActivityDashboardMetric(title: row.eventText, value: row.thresholdText)
                     }
                     .fixedSize(horizontal: false, vertical: true)
+
+                    if let baselineProgress {
+                        BaselineProgressRow(progress: baselineProgress)
+                    }
 
                     Text(row.lastActivityText)
                         .font(.caption)

@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import os
 
 /// Central state for folder monitoring: live (short-term) watches, persisted
 /// long-term watches, activity history, storage policy, and launch-at-login.
@@ -29,6 +30,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var activityStorageUsage = ActivityStorageUsageSnapshot.empty
     @Published private(set) var longTermWatchTargets: [LongTermWatchTarget] = []
     @Published private(set) var longTermWatchRuntimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus] = [:]
+    /// Keyed by the long-term target's ID, or `"live"` for the Live Monitor.
+    @Published private(set) var baselineProgress: [String: BaselineProgress] = [:]
     @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus = .disabled
     @Published private(set) var launchAtLoginNudgeDismissed =
         UserDefaults.standard.bool(forKey: AppModel.launchAtLoginNudgeDismissedKey)
@@ -416,8 +419,6 @@ final class AppModel: ObservableObject {
         )
         let scope = ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
         let sizeProviders = dependencies.activitySizeProviders(scope)
-        let baselineService = dependencies.activityBaselineService
-        let baselineSizes = dependencies.activityBaselineSizes
 
         liveWatchTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -449,10 +450,8 @@ final class AppModel: ObservableObject {
                     self.clearWatcherStartFailure(key: watcherStatusKey)
                 }
                 if session.receivedStreamEventCount > 0, self.liveWatchBaselineTask == nil {
-                    self.liveWatchBaselineTask = Task.detached {
-                        _ = await baselineService.captureBaseline(rootPath: rootPath) { url, size in
-                            baselineSizes.record(size, for: url, scope: scope)
-                        }
+                    self.liveWatchBaselineTask = Task { @MainActor [weak self] in
+                        _ = await self?.sizeBaseline(rootPath: rootPath, scope: scope, progressKey: Self.liveProgressKey, expected: nil)
                     }
                 }
                 self.liveWatchSession = session
@@ -1012,6 +1011,11 @@ final class AppModel: ObservableObject {
         let targetID = rootPath.standardizedFileURL.path
         stopLongTermWatch(targetID: targetID)
         longTermWatchRuntimeStatuses.removeValue(forKey: targetID)
+        if let directory = dependencies.activityBaselineSizesDirectory {
+            try? FileManager.default.removeItem(at: ActivityBaselineSizes.fileURL(
+                scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath), in: directory
+            ))
+        }
         longTermWatchTargets = dependencies.longTermWatchTargets.remove(
             rootPath: rootPath,
             currentTargets: longTermWatchTargets
@@ -1397,20 +1401,52 @@ final class AppModel: ObservableObject {
         }
     }
 
+    static let liveProgressKey = "live"
+
+    /// Reads the table this scope kept from last time, walks the folder to
+    /// refresh it while the card shows how far along the walk is, and keeps
+    /// the result for next time. A cancelled walk keeps nothing: the saved
+    /// table is still whole, the half-walked one is not.
+    private func sizeBaseline(
+        rootPath: URL, scope: String, progressKey: String, expected: Int?
+    ) async -> ActivityBaselineSnapshot {
+        let sizes = dependencies.activityBaselineSizes
+        let service = dependencies.activityBaselineService
+        let fileURL = dependencies.activityBaselineSizesDirectory.map { ActivityBaselineSizes.fileURL(scope: scope, in: $0) }
+        baselineProgress[progressKey] = BaselineProgress(phase: .loading, measured: 0, expected: expected)
+        let known = await Task.detached { fileURL.flatMap { try? sizes.load(scope: scope, from: $0) } }.value
+        let total = (known ?? 0) > 0 ? known : expected
+        baselineProgress[progressKey] = BaselineProgress(phase: .measuring, measured: 0, expected: total)
+        let measured = OSAllocatedUnfairLock(initialState: 0)
+        let baseline = await service.captureBaseline(rootPath: rootPath) { [weak self] url, size in
+            sizes.record(size, for: url, scope: scope)
+            let count = measured.withLock { $0 += 1; return $0 }
+            // ponytail: one hop to the main actor per 8K files, ~0.3 s apart.
+            if count % 8192 == 0 {
+                Task { @MainActor in self?.baselineProgress[progressKey]?.measured = count }
+            }
+        }
+        if !Task.isCancelled, let fileURL {
+            await Task.detached { try? sizes.save(scope: scope, to: fileURL) }.value
+        }
+        baselineProgress[progressKey] = nil
+        return baseline
+    }
+
     private func captureLongTermBaseline(for target: LongTermWatchTarget, watchTaskID: UUID) {
         // A distinct gap supersedes an older in-flight scan. Cancellation IDs
         // prevent a removed/restarted watch from being resurrected on completion.
         longTermWatchBaselineTasks[target.id]?.cancel()
         let scanID = UUID()
         longTermWatchBaselineIDs[target.id] = scanID
-        let service = dependencies.activityBaselineService
-        let sizes = dependencies.activityBaselineSizes
         let scope = ActivitySizeProviders.scope(kind: "long-term", rootPath: target.rootPath)
         longTermWatchBaselineTasks[target.id] = Task { @MainActor [weak self] in
-            let baseline = await service.captureBaseline(rootPath: target.rootPath) { url, size in
-                sizes.record(size, for: url, scope: scope)
-            }
-            guard let self, !Task.isCancelled,
+            guard let self else { return }
+            let baseline = await self.sizeBaseline(
+                rootPath: target.rootPath, scope: scope, progressKey: target.id,
+                expected: target.baseline?.measuredItemCount
+            )
+            guard !Task.isCancelled,
                   self.longTermWatchTaskIDs[target.id] == watchTaskID,
                   self.longTermWatchBaselineIDs[target.id] == scanID,
                   self.longTermWatchTargets.contains(where: { $0.id == target.id && $0.isEnabled }) else { return }

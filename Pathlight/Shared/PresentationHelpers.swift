@@ -76,3 +76,25 @@ struct HelpTip: View {
     }
 }
 
+/// One line under a watch while it learns its files' sizes.
+struct BaselineProgressRow: View {
+    let progress: BaselineProgress
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let fraction = progress.fraction {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 120)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text(progress.text)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            HelpTip("Deleted files have no size left to read, so Pathlight learns every file's size up front and keeps the table for next launch. Until the walk reaches a file, its deletion shows an unknown size.")
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
