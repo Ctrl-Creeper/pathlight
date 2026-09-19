@@ -545,7 +545,13 @@ impl App {
     /// Every row's switch pressed at once, so the rows and the button never
     /// disagree the way a shared pause did. Each row's switch turns it back on.
     fn stop_all(&mut self) {
-        for root in self.watches.iter().filter(|w| w.enabled).map(|w| w.path.clone()).collect::<Vec<_>>() {
+        for root in self
+            .watches
+            .iter()
+            .filter(|w| w.enabled)
+            .map(|w| w.path.clone())
+            .collect::<Vec<_>>()
+        {
             self.remember(&root, false);
         }
         self.sessions.clear();
@@ -685,7 +691,9 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("Stop all watches")
-                            .on_hover_text("Switches every folder off. Each row's switch turns it back on.")
+                            .on_hover_text(
+                                "Switches every folder off. Each row's switch turns it back on.",
+                            )
                             .clicked()
                         {
                             self.stop_all();
@@ -1812,11 +1820,17 @@ mod tests {
         );
         let watches = Storage::at(storage_dir.path()).watches();
         assert_eq!(
-            watches.iter().map(|w| (w.path.as_str(), w.enabled)).collect::<Vec<_>>(),
+            watches
+                .iter()
+                .map(|w| (w.path.as_str(), w.enabled))
+                .collect::<Vec<_>>(),
             vec![(root.as_str(), false)],
             "the folder should stay listed, switched off"
         );
-        assert!(!Storage::at(storage_dir.path()).paused(), "stop all is not a pause");
+        assert!(
+            !Storage::at(storage_dir.path()).paused(),
+            "stop all is not a pause"
+        );
     }
 
     #[test]
