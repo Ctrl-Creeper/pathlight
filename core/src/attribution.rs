@@ -1,7 +1,7 @@
 //! Turns raw path changes into `ActivityEvent`s with byte deltas.
 //! Port of Swift's `StorageAttributionService` + `FileAllocatedSizeProvider`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -583,8 +583,27 @@ impl<'a> Attributor<'a> {
     }
 
     pub fn process(&self, changes: &[Change]) -> Vec<ActivityEvent> {
+        // An arrival measures the whole file. A "modified" for the same path
+        // in the same batch is the write that made it, and nobody has a size
+        // from before to report growth against, so it would only add an
+        // unknown row beside the sized one. A screenshot is the usual case:
+        // written under a dot name, renamed into place, touched once more.
+        let arrivals: HashSet<&str> = changes
+            .iter()
+            .filter(|change| {
+                matches!(
+                    change.kind,
+                    ChangeKind::Created | ChangeKind::Renamed { .. }
+                )
+            })
+            .map(|change| change.path.as_str())
+            .collect();
         let events: Vec<AttributedEvent> = changes
             .iter()
+            .filter(|change| {
+                !(matches!(change.kind, ChangeKind::Modified)
+                    && arrivals.contains(change.path.as_str()))
+            })
             .filter_map(|change| self.event_for(change))
             .map(|event| AttributedEvent { event })
             .collect();

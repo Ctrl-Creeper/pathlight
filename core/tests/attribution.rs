@@ -77,6 +77,31 @@ fn first_modified_observation_has_unknown_growth_instead_of_the_whole_file_size(
     assert_eq!(events[0].confidence, Confidence::Unknown);
 }
 
+/// A screenshot is written under a dot name, renamed into place and touched
+/// once more, all inside one batch. The rename sizes the file; the touch
+/// must not add an unknown row beside it.
+#[test]
+fn a_modification_in_the_batch_that_brought_the_file_adds_no_unknown_row() {
+    let size = |_: &str| Some(2_383_872);
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &none, &none);
+
+    let events = attributor.process(&[
+        change(ChangeKind::Modified, "Screenshot.png", 1),
+        change(
+            ChangeKind::Renamed {
+                previous_path: Some(format!("{ROOT}/.Screenshot.png")),
+            },
+            "Screenshot.png",
+            1,
+        ),
+    ]);
+
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].kind, EventKind::Moved);
+    assert_eq!(events[0].byte_delta, Some(2_383_872));
+}
+
 #[test]
 fn deletions_and_departed_renames_use_prior_size() {
     let index = SizeIndex::default();
