@@ -542,22 +542,13 @@ impl App {
 
     /// Holds every watch off, or lets them open again.
     ///
-    /// Pausing does not switch the folders off: what was being watched is what
-    /// starts again on resume, here or at the next launch, which is the whole
-    /// point of one switch rather than a row of them.
-    fn set_paused(&mut self, paused: bool) {
-        let Some(storage) = self.storage() else {
-            return;
-        };
-        if let Err(error) = storage.set_paused(paused) {
-            self.notice = Some(format!("Could not save that: {error}"));
-            return;
+    /// Every row's switch pressed at once, so the rows and the button never
+    /// disagree the way a shared pause did. Each row's switch turns it back on.
+    fn stop_all(&mut self) {
+        for root in self.watches.iter().filter(|w| w.enabled).map(|w| w.path.clone()).collect::<Vec<_>>() {
+            self.remember(&root, false);
         }
-        self.paused = paused;
-        match paused {
-            true => self.sessions.clear(),
-            false => self.resume(),
-        }
+        self.sessions.clear();
     }
 
     /// Turns encryption of new rows on or off.
@@ -689,17 +680,15 @@ impl App {
                             .color(ui.visuals().warn_fg_color),
                     );
                 }
-                // Nothing to hold off before the first folder, so nothing to show.
-                if !self.watches.is_empty() {
+                // Nothing to stop before the first switched-on folder, so nothing to show.
+                if self.watches.iter().any(|watch| watch.enabled) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut paused = self.paused;
-                        ui.checkbox(&mut paused, "Pause all watches").on_hover_text(
-                        "Holds every watch off, for something noisy about to happen — a build, \
-                         a restore, a large copy. The folders stay as they are, and resuming \
-                         starts the same ones again.",
-                    );
-                        if paused != self.paused {
-                            self.set_paused(paused);
+                        if ui
+                            .button("Stop all watches")
+                            .on_hover_text("Switches every folder off. Each row's switch turns it back on.")
+                            .clicked()
+                        {
+                            self.stop_all();
                         }
                     });
                 }
@@ -861,10 +850,9 @@ impl App {
         if pressed(egui::Key::Comma) {
             self.settings = self.storage().map(settings::Draft::read);
         }
-        // Where macOS stops the live monitor, this stops every watch: the
-        // same key for the same "that is enough for now".
+        // Every row's switch at once, the macOS app's Cmd-Shift-.
         if pressed(egui::Key::Period) {
-            self.set_paused(!self.paused);
+            self.stop_all();
         }
         if pressed(egui::Key::F) {
             ctx.memory_mut(|memory| memory.request_focus(find_box()));
@@ -1771,28 +1759,14 @@ mod tests {
 
     /// The keyboard is the other way to reach what the buttons do, and the
     /// one a person who watches folders all day uses. Ctrl-. is the macOS
-    /// app's Cmd-. — stop what is running now.
+    /// app's Cmd-Shift-. — every row's switch at once.
     #[test]
-    fn the_keyboard_pauses_and_resumes_without_a_button() {
+    fn the_keyboard_stops_every_watch_without_a_button() {
         let folder = tempfile::tempdir().unwrap();
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
         confirm_watch_configuration(&mut harness);
-
-        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
-        harness.step();
-        assert!(
-            harness.state().paused && harness.state().sessions.is_empty(),
-            "the pause shortcut did not stop the watch"
-        );
-
-        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
-        harness.step();
-        assert!(
-            !harness.state().paused && harness.state().sessions.contains_key(&root),
-            "the shortcut did not resume"
-        );
 
         // The settings shortcut opens the pane the button opens, and while it
         // is open the other shortcuts stay out of the way.
@@ -1802,46 +1776,47 @@ mod tests {
         harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
         harness.step();
         assert!(
-            !harness.state().paused,
+            harness.state().sessions.contains_key(&root),
             "a shortcut acted behind an open dialog"
+        );
+        harness.state_mut().settings = None;
+
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+        harness.step();
+        assert!(
+            harness.state().sessions.is_empty(),
+            "the stop shortcut did not stop the watch"
         );
     }
 
-    /// One switch, every watch: pausing ends what is running without
-    /// forgetting it, and resuming brings the same folder back — including
-    /// after a restart, which is why the answer lives in the settings file.
+    /// Every row's switch at once: the folder stays listed, switched off, so
+    /// the rows and the button agree — the promise
+    /// `testStopAllSwitchesEveryWatchOff` makes of the macOS app.
     #[test]
-    fn pausing_ends_every_watch_and_resuming_brings_them_back() {
+    fn stop_all_switches_every_watch_off() {
         let folder = tempfile::tempdir().unwrap();
         let storage_dir = tempfile::tempdir().unwrap();
         let root = paths::normalize(&folder.path().canonicalize().unwrap().to_string_lossy());
         let mut harness = harness(app(storage_dir.path(), vec![root.clone()]));
         confirm_watch_configuration(&mut harness);
         assert!(harness.state().sessions.contains_key(&root));
+        // The row's switch turned on in the frame that started the watch;
+        // the button that presses every switch appears in the next one.
+        harness.step();
 
-        harness.get_by_label("Pause all watches").click();
+        harness.get_by_label("Stop all watches").click();
         harness.step();
         assert!(
             harness.state().sessions.is_empty(),
-            "a pause left a watch running"
+            "stop all left a watch running"
         );
-        assert!(Storage::at(storage_dir.path()).paused());
-        // A watch cannot be started while paused, whichever button asks.
-        harness.step();
-        harness.get_by_label("Watch").click();
-        harness.step();
-        assert!(
-            harness.state().sessions.is_empty(),
-            "a paused install opened a watch"
+        let watches = Storage::at(storage_dir.path()).watches();
+        assert_eq!(
+            watches.iter().map(|w| (w.path.as_str(), w.enabled)).collect::<Vec<_>>(),
+            vec![(root.as_str(), false)],
+            "the folder should stay listed, switched off"
         );
-
-        harness.get_by_label("Pause all watches").click();
-        harness.step();
-        assert!(
-            harness.state().sessions.contains_key(&root),
-            "resuming did not bring the watch back"
-        );
-        assert!(!Storage::at(storage_dir.path()).paused());
+        assert!(!Storage::at(storage_dir.path()).paused(), "stop all is not a pause");
     }
 
     #[test]
