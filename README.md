@@ -39,7 +39,7 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 - **Suggested folders** for the places a machine keeps its churn — the whole disk, Downloads, `AppData\Local`, `~/.cache`
 - **The same journal** the macOS app writes, in the same place an uninstall looks for it
 - **Opens where it was left** — window position and size are remembered in the core's own storage, so an uninstall takes them with it
-- **The keys the Mac app answers**: `Ctrl+O` adds a folder, `Ctrl+,` opens settings, `Ctrl+F` jumps to the search box, `Ctrl+.` pauses or resumes every watch
+- **The keys the Mac app answers**: `Ctrl+O` adds a folder, `Ctrl+,` opens settings, `Ctrl+F` jumps to the search box, `Ctrl+.` switches every watch off
 - **Interface tests through accesskit**, so the window is exercised on each OS in CI rather than only where it was written
 
 ### From a terminal (any OS)
