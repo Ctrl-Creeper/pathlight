@@ -629,10 +629,18 @@ impl Worker {
     /// watch ends, so the next run does not recover, as a gap, every change
     /// this run already recorded live.
     fn close(&self, baseline: &Baseline) {
-        let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(scan) = slot.scan.take() {
+        // Joined with the lock released: the scan takes this same lock to
+        // hand over its result, so joining it under the lock deadlocks a
+        // watch closed before its first scan finished.
+        let scan = baseline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .scan
+            .take();
+        if let Some(scan) = scan {
             let _ = scan.join();
         }
+        let mut slot = baseline.lock().unwrap_or_else(PoisonError::into_inner);
         if !slot.overlay.is_empty() {
             self.fold(&mut slot);
         }
