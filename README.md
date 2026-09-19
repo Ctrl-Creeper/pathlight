@@ -25,7 +25,7 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 - **Activity Dashboard** with hourly trend charts, top changes, and a full timeline per folder
 - **Search the history** — narrow a folder's rows by part of a path or by kind, sort biggest-change-first, and page through them; the totals always describe every row that matched, not the page
 - **Growth alerts** — get a notification when a folder grows past a daily threshold
-- **Pause everything** with one switch, and resume the same folders — nothing has to be switched back on one at a time
+- **Stop everything** with one button — every folder's switch at once; each row's switch turns it back on
 - **The watch's own diary** — when it opened, what it caught up on after a gap, what it warned about, what failed. Every host shows the same file, which is the answer to "it missed something last night"
 - **gitignore-style exclusions** per folder to drop caches, `.DS_Store`, temp files, and other churn
 - **Copy a path** from any row, and see which build this is beside what its watcher promises on this OS
