@@ -1311,10 +1311,14 @@ private struct ActivityDashboardTimelineRow: View {
 
             Spacer(minLength: 12)
 
-            Text(row.detail)
-                .font(.subheadline.monospacedDigit().weight(.medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(row.detail)
+                    .font(.subheadline.monospacedDigit().weight(.medium))
+                Text(row.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute().second())
+                    .font(.caption.monospacedDigit())
+            }
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
         .help(row.path)
         .padding(.horizontal, 12)
