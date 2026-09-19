@@ -18,6 +18,7 @@ struct ActivityDashboardActions {
     let exportHistory: (URL) -> Void
     let startLiveMonitor: (MonitoringStartConfiguration) -> Void
     let stopLiveMonitor: () -> Void
+    let stopAllMonitoring: () -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -28,7 +29,6 @@ struct ActivityDashboardView: View {
     var historyQuery: ActivityHistoryQuery = .everything
     let showsLaunchAtLoginNudge: Bool
     var monitoringStatusMessage: String? = nil
-    var isMonitoringPaused = false
     let isLiveMonitorActive: Bool
     let actions: ActivityDashboardActions
 
@@ -95,12 +95,7 @@ struct ActivityDashboardView: View {
                 // rows and this button can never disagree the way a shared pause did.
                 if targets.contains(where: \.isEnabled) || isLiveMonitorActive {
                     Button {
-                        for target in targets where target.isEnabled {
-                            actions.setLongTermWatchEnabled(false, target.rootPath)
-                        }
-                        if isLiveMonitorActive {
-                            actions.stopLiveMonitor()
-                        }
+                        actions.stopAllMonitoring()
                     } label: {
                         Label("Stop All", systemImage: "stop.circle.fill")
                     }
@@ -180,12 +175,6 @@ struct ActivityDashboardView: View {
             Text(presentation.summaryText)
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
-
-            if isMonitoringPaused && !targets.isEmpty {
-                Label("Paused — nothing is being recorded", systemImage: "pause.circle")
-                    .font(.subheadline)
-                    .foregroundStyle(.orange)
-            }
 
             Spacer(minLength: 12)
         }
