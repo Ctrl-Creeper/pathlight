@@ -28,16 +28,12 @@ struct PathlightCommands: Commands {
 
             Divider()
 
-            // One switch for every watch, on a key as well as in the toolbar
-            // and the menu bar — the other two hosts spell it Ctrl-. and
-            // `pathlight-monitor pause`.
-            Button(
-                appModel.isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
-                systemImage: appModel.isMonitoringPaused ? "play.circle" : "pause.circle"
-            ) {
-                appModel.setMonitoringPaused(!appModel.isMonitoringPaused)
+            // Every row's switch at once, on a key as well as in the toolbar
+            // and the menu bar — `gui/` spells it Ctrl-Shift-.
+            Button("Stop All Monitoring", systemImage: "stop.circle.fill") {
+                appModel.stopAllMonitoring()
             }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
+            .keyboardShortcut(".", modifiers: [.command, .shift])
         }
     }
 }

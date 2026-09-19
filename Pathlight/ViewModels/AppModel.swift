@@ -36,15 +36,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLoginNudgeDismissed =
         UserDefaults.standard.bool(forKey: AppModel.launchAtLoginNudgeDismissedKey)
 
-    /// Every watch held off by one switch, for something noisy about to
-    /// happen. The other two hosts keep this in the settings file the core
-    /// owns; this host keeps its settings in defaults, and the meaning is the
-    /// same — the folders stay as they are, and resuming starts the same ones.
-    @Published private(set) var isMonitoringPaused =
-        UserDefaults.standard.bool(forKey: AppModel.monitoringPausedKey)
-
     private static let launchAtLoginNudgeDismissedKey = "launchAtLoginNudgeDismissed"
-    private static let monitoringPausedKey = "monitoringPaused"
     private static let preferencePersistenceDebounce: RunLoop.SchedulerTimeType.Stride = .milliseconds(50)
 
     private let dependencies: AppDependencies
@@ -87,7 +79,6 @@ final class AppModel: ObservableObject {
     private enum MonitoringStatusSource: Hashable {
         case journal
         case encryptionKey
-        case paused
     }
     private var monitoringStatusMessages: [MonitoringStatusSource: String] = [:]
     private var watcherStartFailures: [String: String] = [:]
@@ -399,13 +390,6 @@ final class AppModel: ObservableObject {
         monitorLatency: TimeInterval = MonitoringStartConfiguration.default.monitorLatency
     ) {
         stopShortTermWatch()
-        guard !isMonitoringPaused else {
-            setMonitoringStatus(
-                "Monitoring is paused. Resume it and this folder starts again.",
-                for: .paused
-            )
-            return
-        }
 
         let watcherStatusKey = "live:\(rootPath.standardizedFileURL.path)"
         liveWatcherStatusKey = watcherStatusKey
@@ -1217,36 +1201,22 @@ final class AppModel: ObservableObject {
         longTermWatchBaselineIDs.removeAll()
     }
 
-    func setMonitoringPaused(_ paused: Bool) {
-        guard paused != isMonitoringPaused else { return }
-        isMonitoringPaused = paused
-        UserDefaults.standard.set(paused, forKey: Self.monitoringPausedKey)
-        note(paused ? "monitoring paused" : "monitoring resumed")
-        guard paused else {
-            setMonitoringStatus(nil, for: .paused)
-            startEnabledLongTermWatches()
-            return
-        }
-        setMonitoringStatus("Monitoring is paused.", for: .paused)
+    /// Every row's switch pressed at once, so the rows and the button never
+    /// disagree the way a shared pause did. Each row's switch turns it back on.
+    func stopAllMonitoring() {
         stopShortTermWatch()
-        stopAllLongTermWatches()
+        for target in longTermWatchTargets where target.isEnabled {
+            setLongTermWatchEnabled(false, rootPath: target.rootPath)
+        }
     }
 
     private func startEnabledLongTermWatches() {
-        guard !isMonitoringPaused else { return }
         for target in longTermWatchTargets where target.isEnabled {
             startLongTermWatch(for: target)
         }
     }
 
     private func startLongTermWatch(for target: LongTermWatchTarget) {
-        // Checked here rather than at each caller, for the same reason
-        // `Session::start` checks it in the core: a path that forgot would
-        // record through a pause the user asked for.
-        guard !isMonitoringPaused else {
-            stopLongTermWatch(targetID: target.id)
-            return
-        }
         guard target.isEnabled else {
             stopLongTermWatch(targetID: target.id)
             return
@@ -1576,7 +1546,6 @@ final class AppModel: ObservableObject {
         monitoringStatusMessage = monitoringStatusMessages[.journal]
             ?? monitoringStatusMessages[.encryptionKey]
             ?? watcherStartFailures.sorted(by: { $0.key < $1.key }).first?.value
-            ?? monitoringStatusMessages[.paused]
     }
 
     /// Every message the window shows about trouble is also written down, once
