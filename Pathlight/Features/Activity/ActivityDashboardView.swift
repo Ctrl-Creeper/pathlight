@@ -1005,9 +1005,10 @@ private struct ActivityDashboardTrendChart: View {
         guard let selectedDate else {
             return nil
         }
-        return buckets.min { lhs, rhs in
-            abs(lhs.startDate.timeIntervalSince(selectedDate)) < abs(rhs.startDate.timeIntervalSince(selectedDate))
-        }
+        // A bar spans its period, so the hovered bar is the one whose period
+        // holds the pointer — not the one whose left edge is nearest.
+        return buckets.first { $0.startDate <= selectedDate && selectedDate < $0.endDate }
+            ?? buckets.last { $0.startDate <= selectedDate }
     }
 
     private var selectionCaption: String {
