@@ -18,7 +18,6 @@ struct ActivityDashboardActions {
     let exportHistory: (URL) -> Void
     let startLiveMonitor: (MonitoringStartConfiguration) -> Void
     let stopLiveMonitor: () -> Void
-    let setMonitoringPaused: (Bool) -> Void
 }
 
 struct ActivityDashboardView: View {
@@ -92,22 +91,20 @@ struct ActivityDashboardView: View {
                 .help("Monitor a Folder Long-Term")
 
 
-                // One switch for every watch, for something noisy about to
-                // happen. The folders stay as they are, so resuming starts
-                // the same ones again. Nothing to hold off before the first
-                // folder, so nothing to show either.
-                if !targets.isEmpty {
+                // ponytail: "stop all" is the row switches pressed at once, so the
+                // rows and this button can never disagree the way a shared pause did.
+                if targets.contains(where: \.isEnabled) || isLiveMonitorActive {
                     Button {
-                        actions.setMonitoringPaused(!isMonitoringPaused)
+                        for target in targets where target.isEnabled {
+                            actions.setLongTermWatchEnabled(false, target.rootPath)
+                        }
+                        if isLiveMonitorActive {
+                            actions.stopLiveMonitor()
+                        }
                     } label: {
-                        Label(
-                            isMonitoringPaused ? "Resume Monitoring" : "Pause Monitoring",
-                            systemImage: isMonitoringPaused ? "play.circle" : "pause.circle"
-                        )
+                        Label("Stop All", systemImage: "stop.circle.fill")
                     }
-                    .help(isMonitoringPaused
-                        ? "Start the folders that were being watched again"
-                        : "Hold every watch off without switching the folders off")
+                    .help("Switch every folder off and stop the live monitor")
                 }
 
                 if isLiveMonitorActive {

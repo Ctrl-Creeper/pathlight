@@ -76,8 +76,7 @@ struct ContentView: View {
                     openWindow(id: "live-monitor")
                 }
             },
-            stopLiveMonitor: { appModel.stopShortTermWatch() },
-            setMonitoringPaused: { appModel.setMonitoringPaused($0) }
+            stopLiveMonitor: { appModel.stopShortTermWatch() }
         )
     }
 }
