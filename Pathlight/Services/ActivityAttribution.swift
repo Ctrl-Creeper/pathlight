@@ -97,6 +97,62 @@ nonisolated final class ActivityBaselineSizes: @unchecked Sendable {
         tables[scope] = nil
     }
 
+    func count(scope: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return tables[scope].map { $0.sorted.count + $0.pending.count } ?? 0
+    }
+
+    /// Where one scope's table lives between launches: the storage folder,
+    /// under a name that says nothing about the folder it describes.
+    static func fileURL(scope: String, in directory: URL) -> URL {
+        directory.appending(path: "baseline-sizes-\(String(hash(scope), radix: 16)).bin")
+    }
+
+    /// The table as it is in memory, 16 native-endian bytes an entry, sorted.
+    /// Only hashes and byte counts: no name, no path, nothing to encrypt.
+    /// Written for this Mac by this Mac, so no header and no byte order.
+    func save(scope: String, to url: URL) throws {
+        lock.lock()
+        if tables[scope] == nil { lock.unlock(); return }
+        tables[scope]!.merge()
+        let entries = tables[scope]!.sorted
+        lock.unlock()
+        var data = Data(count: entries.count * 16)
+        data.withUnsafeMutableBytes { raw in
+            for (index, entry) in entries.enumerated() {
+                raw.storeBytes(of: entry.key, toByteOffset: index * 16, as: UInt64.self)
+                raw.storeBytes(of: entry.size, toByteOffset: index * 16 + 8, as: Int64.self)
+            }
+        }
+        try data.write(to: url, options: .atomic)
+        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: url)
+    }
+
+    /// Reads a saved table under whatever the walk has recorded meanwhile, and
+    /// says how many files it knows about. A file that is not there is an empty table.
+    @discardableResult
+    func load(scope: String, from url: URL) throws -> Int {
+        guard let data = try? Data(contentsOf: url), data.count % 16 == 0 else { return 0 }
+        var entries: [Table.Entry] = []
+        entries.reserveCapacity(data.count / 16)
+        data.withUnsafeBytes { raw in
+            for offset in stride(from: 0, to: raw.count, by: 16) {
+                entries.append((raw.loadUnaligned(fromByteOffset: offset, as: UInt64.self),
+                                raw.loadUnaligned(fromByteOffset: offset + 8, as: Int64.self)))
+            }
+        }
+        guard zip(entries, entries.dropFirst()).allSatisfy({ $0.key < $1.key }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        // What was measured before the file was read is newer than the file.
+        let live = tables[scope].map { $0.pending + $0.sorted } ?? []
+        tables[scope] = Table(sorted: entries, pending: live)
+        return entries.count
+    }
+
     /// The core rebases every change onto the root the watch was asked for,
     /// so the walk and the events already spell a path the same way.
     private static func key(_ url: URL) -> UInt64 {

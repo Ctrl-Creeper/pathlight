@@ -15,6 +15,7 @@ struct ContentView: View {
             targets: appModel.longTermWatchTargets,
             histories: Array(appModel.activityDashboardHistories.values),
             runtimeStatuses: appModel.longTermWatchRuntimeStatuses,
+            baselineProgress: appModel.baselineProgress,
             historyQuery: appModel.activityHistoryQuery,
             showsLaunchAtLoginNudge: appModel.shouldShowLaunchAtLoginNudge,
             monitoringStatusMessage: appModel.monitoringStatusMessage,

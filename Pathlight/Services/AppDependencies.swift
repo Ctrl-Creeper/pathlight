@@ -24,6 +24,10 @@ struct AppDependencies {
     var activityBaselineService: ActivityBaselineService
     /// Filled by each watch's baseline walk; the size providers fall back to it.
     var activityBaselineSizes: ActivityBaselineSizes
+    /// Where each watch keeps its size table between launches. No default: a
+    /// test that saved into the real storage would be a test editing the
+    /// user's records. `nil` keeps the table in memory only.
+    var activityBaselineSizesDirectory: URL?
     var activityStoragePreferences: any ActivityStoragePreferencesPersisting
     var activityStorageUsageService: ActivityStorageUsageService
     /// Deletes the journal and its live attribution index as one coordinated
@@ -58,6 +62,7 @@ struct AppDependencies {
         ),
         activityBaselineService: ActivityBaselineService = ActivityBaselineService(),
         activityBaselineSizes: ActivityBaselineSizes = ActivityBaselineSizes(),
+        activityBaselineSizesDirectory: URL? = nil,
         activityStoragePreferences: any ActivityStoragePreferencesPersisting = UserDefaultsActivityStoragePreferencesStore(),
         activityStorageUsageService: ActivityStorageUsageService = ActivityStorageUsageService(),
         activityStorageReset: (@Sendable () async throws -> Void)? = nil,
@@ -77,6 +82,7 @@ struct AppDependencies {
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
         self.activityBaselineSizes = activityBaselineSizes
+        self.activityBaselineSizesDirectory = activityBaselineSizesDirectory
         self.activityStoragePreferences = activityStoragePreferences
         self.activityStorageUsageService = activityStorageUsageService
         self.activityStorageReset = activityStorageReset ?? {
@@ -147,6 +153,7 @@ struct AppDependencies {
             // cannot consume an increment or overwrite a newer event measurement.
             activityBaselineService: ActivityBaselineService(),
             activityBaselineSizes: baselineSizes,
+            activityBaselineSizesDirectory: ActivitySizeIndex.defaultJournalURL().deletingLastPathComponent(),
             activityStoragePreferences: activityStoragePreferences,
             activityStorageUsageService: ActivityStorageUsageService(
                 lineCodec: activityStorageLineCodec,

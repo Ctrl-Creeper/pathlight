@@ -17,7 +17,8 @@ struct LiveMonitorWindowView: View {
                         appModel.isLongTermWatchTarget(session.rootPath)
                             ? { appModel.excludeNoise(suggestion, rootPath: session.rootPath) }
                             : nil
-                    }
+                    },
+                    baselineProgress: appModel.baselineProgress[AppModel.liveProgressKey]
                 )
             } else {
                 ContentUnavailableView(

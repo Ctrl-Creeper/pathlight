@@ -79,6 +79,28 @@ struct ActivityBaselineServiceTests {
         #expect(sizes.size(for: root.appending(path: "missing.bin"), scope: "s") == nil)
     }
 
+    @Test("a saved table comes back whole and yields to what was measured meanwhile")
+    func savesAndLoadsTheTable() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let file = ActivityBaselineSizes.fileURL(scope: "long-term:x", in: directory)
+        let first = ActivityBaselineSizes()
+        for index in 0..<1_000 {
+            first.record(Int64(index), for: root.appending(path: "\(index).bin"), scope: "long-term:x")
+        }
+        try first.save(scope: "long-term:x", to: file)
+        #expect(try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int == 16_000)
+
+        let next = ActivityBaselineSizes()
+        next.record(7, for: root.appending(path: "3.bin"), scope: "long-term:x")
+        #expect(try next.load(scope: "long-term:x", from: file) == 1_000)
+        #expect(next.size(for: root.appending(path: "999.bin"), scope: "long-term:x") == 999)
+        #expect(next.size(for: root.appending(path: "3.bin"), scope: "long-term:x") == 7)
+        #expect(next.count(scope: "long-term:x") == 1_001)
+        #expect(try ActivityBaselineSizes().load(scope: "long-term:x", from: directory.appending(path: "missing.bin")) == 0)
+    }
+
     @Test("captures recursive allocated size baseline")
     func capturesRecursiveAllocatedSizeBaseline() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

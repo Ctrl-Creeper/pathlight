@@ -5,6 +5,7 @@ struct ActivityTimelinePanel: View {
     let onStop: () -> Void
     var noiseSuggestion: ActivityNoiseSuggestion? = nil
     var onExcludeNoise: (() -> Void)? = nil
+    var baselineProgress: BaselineProgress? = nil
 
     private var presentation: ActivityTimelinePresentation {
         // ponytail: 200 rows is plenty of scrollback; raise if sessions outgrow it.
@@ -30,6 +31,10 @@ struct ActivityTimelinePanel: View {
                 }
                 .labelStyle(.iconOnly)
                 .help("Stop Watching")
+            }
+
+            if let baselineProgress {
+                BaselineProgressRow(progress: baselineProgress)
             }
 
             if let noiseSuggestion {

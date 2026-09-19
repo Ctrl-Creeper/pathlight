@@ -126,6 +126,37 @@ nonisolated enum LongTermWatchRuntimeState: Equatable, Sendable {
     case paused
 }
 
+/// Where a watch is in learning the sizes of the files it guards: reading the
+/// table kept from last time, then walking the folder to refresh it.
+nonisolated struct BaselineProgress: Equatable, Sendable {
+    enum Phase: Equatable, Sendable {
+        case loading
+        case measuring
+    }
+
+    var phase: Phase
+    var measured: Int
+    /// Files the table knew last time, when there was a last time.
+    var expected: Int?
+
+    var fraction: Double? {
+        guard phase == .measuring, let expected, expected > 0 else { return nil }
+        return min(Double(measured) / Double(expected), 1)
+    }
+
+    var text: String {
+        switch phase {
+        case .loading:
+            return "Loading saved sizes…"
+        case .measuring:
+            if let expected, expected > 0 {
+                return "Measuring \(measured.formatted()) of \(expected.formatted()) files"
+            }
+            return measured == 0 ? "Measuring files…" : "Measuring files… \(measured.formatted())"
+        }
+    }
+}
+
 nonisolated struct LongTermWatchRuntimeStatus: Equatable, Sendable {
     let state: LongTermWatchRuntimeState
     let lastActivityAt: Date?
