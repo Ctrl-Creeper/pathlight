@@ -55,6 +55,30 @@ struct ActivityBaselineServiceTests {
         #expect(sizes.size(for: child, scope: "live:test") == nil)
     }
 
+    @Test("keeps the newest size for a path across a merge of the sorted table")
+    func keepsTheNewestSizeAcrossAMerge() {
+        let sizes = ActivityBaselineSizes()
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let rescanned = root.appending(path: "rescanned.bin")
+        sizes.record(1, for: rescanned, scope: "s")
+        for index in 0..<70_000 {
+            sizes.record(Int64(index), for: root.appending(path: "\(index).bin"), scope: "s")
+        }
+        // Past the merge threshold: the first lookup folds the tail into the table.
+        #expect(sizes.size(for: root.appending(path: "69999.bin"), scope: "s") == 69_999)
+        #expect(sizes.size(for: root.appending(path: "0.bin"), scope: "s") == 0)
+        #expect(sizes.size(for: rescanned, scope: "s") == 1)
+        // A rescan of the same folder speaks last, whether merged or still pending.
+        sizes.record(2, for: rescanned, scope: "s")
+        #expect(sizes.size(for: rescanned, scope: "s") == 2)
+        for index in 0..<70_000 {
+            sizes.record(Int64(index) + 1, for: root.appending(path: "\(index).bin"), scope: "s")
+        }
+        #expect(sizes.size(for: rescanned, scope: "s") == 2)
+        #expect(sizes.size(for: root.appending(path: "5.bin"), scope: "s") == 6)
+        #expect(sizes.size(for: root.appending(path: "missing.bin"), scope: "s") == nil)
+    }
+
     @Test("captures recursive allocated size baseline")
     func capturesRecursiveAllocatedSizeBaseline() async {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

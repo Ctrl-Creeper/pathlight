@@ -153,7 +153,10 @@ nonisolated struct ActivityBaselineService: Sendable {
 
     /// `record` hears every path whose size was read, as it is read, so the
     /// watch can size a deletion or first modification of a file it never touched.
-    func captureBaseline(
+    /// `@concurrent`: the app defaults nonisolated async work to the caller's
+    /// actor, and the caller is the main actor. A walk over millions of files
+    /// belongs on the pool, not between two frames.
+    @concurrent func captureBaseline(
         rootPath: URL,
         capturedAt: Date = Date(),
         record: (@Sendable (URL, Int64) -> Void)? = nil
@@ -164,7 +167,10 @@ nonisolated struct ActivityBaselineService: Sendable {
         var measuredItemCount = 0
         var unreadableItemCount = 0
         var unidentifiedItemCount = 0
-        var visitedPaths = Set<String>()
+        var visitedCount = 0
+        var repeatedNameCount = 0
+        // Only multi-named objects are tracked: a name that is the only one is
+        // trivially new, and a set of every inode was 135 MB on a 4M-file home.
         var measuredObjects = Set<ObjectIdentity>()
         // Only multi-named objects are tracked, so this stays empty on the
         // overwhelming majority of folders.
@@ -173,7 +179,8 @@ nonisolated struct ActivityBaselineService: Sendable {
 
         while let url = pending.popLast() {
             guard !Task.isCancelled else { break }
-            if visitedPaths.count % 512 == 511 {
+            visitedCount += 1
+            if visitedCount % 512 == 0 {
                 if isSystemUnderPressure() {
                     try? await Task.sleep(for: .milliseconds(500))
                 } else {
@@ -181,8 +188,9 @@ nonisolated struct ActivityBaselineService: Sendable {
                 }
                 guard !Task.isCancelled else { break }
             }
+            // Symlinks are never descended, so the walk is a tree and needs no
+            // visited set; one of every path was 750 MB on a 4M-file home.
             let standardizedURL = url.standardizedFileURL
-            guard visitedPaths.insert(standardizedURL.path).inserted else { continue }
 
             let measurement = measurementProvider(standardizedURL)
             if measurement.isSymbolicLink {
@@ -199,12 +207,14 @@ nonisolated struct ActivityBaselineService: Sendable {
                 measuredItemCount += 1
                 let isNewObject: Bool
                 if let identity = measurement.identity {
-                    isNewObject = measuredObjects.insert(identity).inserted
+                    isNewObject = measurement.linkCount <= 1 || measuredObjects.insert(identity).inserted
                 } else {
                     unidentifiedItemCount += 1
                     isNewObject = true
                 }
-                if isNewObject {
+                if !isNewObject {
+                    repeatedNameCount += 1
+                } else {
                     let (sum, overflow) = allocatedSize.addingReportingOverflow(size)
                     if overflow {
                         unreadableItemCount += 1
@@ -242,7 +252,7 @@ nonisolated struct ActivityBaselineService: Sendable {
             scanStartedAt: capturedAt,
             scanFinishedAt: now(),
             scanState: scanState,
-            measuredObjectCount: measuredObjects.count,
+            measuredObjectCount: measuredItemCount - repeatedNameCount,
             unidentifiedItemCount: unidentifiedItemCount,
             unobservableLinkCount: escapingSymlinkCount + externalHardLinkCount
         )
@@ -298,14 +308,8 @@ nonisolated struct ActivityBaselineService: Sendable {
         // be miscounted as unreadable, and following symlinks double counts or loops.
         let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isDirectory == true, values.isSymbolicLink != true else { return [] }
-        return try FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [
-                .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
-                .totalFileAllocatedSizeKey, .fileAllocatedSizeKey
-            ],
-            options: []
-        )
+        // Nothing is prefetched: every entry is measured with one lstat anyway.
+        return try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
     }
 }
 
