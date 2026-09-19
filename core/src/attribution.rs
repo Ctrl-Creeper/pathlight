@@ -691,14 +691,22 @@ impl<'a> Attributor<'a> {
                 let within_root = previous_path
                     .as_deref()
                     .is_some_and(|p| crate::paths::is_inside(&change.root_path, p));
+                // Read before `size`, which records the new one. A rename over
+                // a file that was there frees that file, and nothing else
+                // reports it: the temporary the write went to is gone before
+                // the batch is read, so it was never measured, and the old
+                // inode's own Renamed event arrives at this same path with no
+                // origin — after this, it measures the size already known and
+                // nets to zero.
+                let replaced = (self.known_size)(&change.path).unwrap_or(0);
                 match (self.size)(&change.path)
                     .filter(|size| self.options.watches_file(Some(*size)))
                 {
                     Some(size) => {
                         let delta = if within_root {
-                            size - previous_known.unwrap_or(0)
+                            size - replaced - previous_known.unwrap_or(0)
                         } else {
-                            size
+                            size - replaced
                         };
                         let confidence = if within_root && previous_known.is_none() {
                             Confidence::Estimated

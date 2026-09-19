@@ -137,6 +137,40 @@ fn deletions_and_departed_renames_use_prior_size() {
 }
 
 #[test]
+fn a_rename_over_a_file_counts_only_its_growth() {
+    // Chrome saves Preferences by writing a dot-named temporary and renaming
+    // it into place. The temporary is gone before the batch is read, so it is
+    // never measured, and the old file's inode reports a second rename at the
+    // same path. The folder grew by the difference, once.
+    let known = std::sync::atomic::AtomicI64::new(516_096);
+    let size = |_: &str| {
+        known.store(520_000, std::sync::atomic::Ordering::Relaxed);
+        Some(520_000)
+    };
+    let known_size = |_: &str| Some(known.load(std::sync::atomic::Ordering::Relaxed));
+    let none = |_: &str| None;
+    let attributor = Attributor::new(AggregationOptions::SHORT_TERM, &size, &none, &known_size);
+    let events = attributor.process(&[
+        change(
+            ChangeKind::Renamed {
+                previous_path: Some(format!("{ROOT}/.Preferences.7dlZ2a")),
+            },
+            "Preferences",
+            1,
+        ),
+        change(
+            ChangeKind::Renamed {
+                previous_path: None,
+            },
+            "Preferences",
+            1,
+        ),
+    ]);
+    let deltas: Vec<_> = events.iter().map(|event| event.byte_delta).collect();
+    assert_eq!(deltas, vec![Some(3_904)]);
+}
+
+#[test]
 fn aggregates_same_parent_inside_window() {
     let size = |_: &str| Some(1024 * 1024 * 20);
     let none = |_: &str| None;
