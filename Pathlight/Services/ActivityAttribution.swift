@@ -28,27 +28,73 @@ nonisolated struct ActivitySizeProviders: Sendable {
 /// ponytail: one dictionary per scope keyed by path hash, 16 bytes a file plus
 /// dictionary overhead; the core keeps the same table for the other hosts.
 nonisolated final class ActivityBaselineSizes: @unchecked Sendable {
+    /// One scope's sizes: a sorted table the way the core keeps it (16 bytes a
+    /// file, 64 MB for a 4M-file home) plus what the walk has recorded since the
+    /// last merge. Lookups read the tail linearly and the table by bisection.
+    private struct Table {
+        typealias Entry = (key: UInt64, size: Int64)
+        var sorted: [Entry] = []
+        var pending: [Entry] = []
+
+        // ponytail: merge every 64K records; a lookup scans at most that many
+        // linearly (~30 µs), and a 4M-file walk merges about sixty times.
+        static let mergeAt = 1 << 16
+
+        func size(for key: UInt64) -> Int64? {
+            // A rescan records a path again, so the newest word wins.
+            if let hit = pending.last(where: { $0.key == key }) { return hit.size }
+            var low = 0
+            var high = sorted.count
+            while low < high {
+                let mid = (low + high) / 2
+                if sorted[mid].key < key { low = mid + 1 } else { high = mid }
+            }
+            return low < sorted.count && sorted[low].key == key ? sorted[low].size : nil
+        }
+
+        mutating func merge() {
+            let incoming = pending.sorted { $0.key < $1.key }
+            pending.removeAll(keepingCapacity: true)
+            var merged: [Entry] = []
+            merged.reserveCapacity(sorted.count + incoming.count)
+            var old = 0
+            var new = 0
+            while new < incoming.count {
+                // Later records of one key replace earlier ones, and any table row.
+                if new + 1 < incoming.count, incoming[new + 1].key == incoming[new].key { new += 1; continue }
+                while old < sorted.count, sorted[old].key < incoming[new].key { merged.append(sorted[old]); old += 1 }
+                if old < sorted.count, sorted[old].key == incoming[new].key { old += 1 }
+                merged.append(incoming[new])
+                new += 1
+            }
+            merged.append(contentsOf: sorted[old...])
+            sorted = merged
+        }
+    }
+
     private let lock = NSLock()
-    private var sizes: [String: [UInt64: Int64]] = [:]
+    private var tables: [String: Table] = [:]
 
     func record(_ size: Int64, for url: URL, scope: String) {
         let key = Self.key(url)
         lock.lock()
         defer { lock.unlock() }
-        sizes[scope, default: [:]][key] = size
+        tables[scope, default: Table()].pending.append((key, size))
     }
 
     func size(for url: URL, scope: String) -> Int64? {
         let key = Self.key(url)
         lock.lock()
         defer { lock.unlock() }
-        return sizes[scope]?[key]
+        guard tables[scope] != nil else { return nil }
+        if tables[scope]!.pending.count >= Table.mergeAt { tables[scope]!.merge() }
+        return tables[scope]!.size(for: key)
     }
 
     func forget(scope: String) {
         lock.lock()
         defer { lock.unlock() }
-        sizes[scope] = nil
+        tables[scope] = nil
     }
 
     /// The core rebases every change onto the root the watch was asked for,
