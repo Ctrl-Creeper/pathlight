@@ -70,6 +70,7 @@ extension ActivityEventStoring {
         query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
         var builder = ActivityEventPageBuilder(
+            rootPath: rootPath,
             limit: limit,
             bucketInterval: bucketInterval,
             query: query
@@ -282,6 +283,7 @@ actor JSONLActivityEventStore: ActivityEventStoring {
 
         let root = rootPath.standardizedFileURL.path
         var builder = ActivityEventPageBuilder(
+            rootPath: rootPath,
             limit: limit,
             bucketInterval: bucketInterval,
             query: query
