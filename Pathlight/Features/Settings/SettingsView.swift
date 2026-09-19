@@ -71,12 +71,11 @@ private struct GeneralSettingsPane: View {
             }
 
             Section("Command Line") {
-                Text("pathlight-monitor records a folder from a terminal and reads the same history this app does. Installing puts it in your own home directory — no administrator, nothing outside your account.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Install Command Line Tool") {
-                    commandLineReport = Self.installCommandLineTool()
+                HStack(spacing: 6) {
+                    Button("Install Command Line Tool") {
+                        commandLineReport = Self.installCommandLineTool()
+                    }
+                    HelpTip("pathlight-monitor records a folder from a terminal and reads the same history this app does. Installing puts it in your own home directory — no administrator, nothing outside your account.")
                 }
 
                 if let commandLineReport {
@@ -182,11 +181,7 @@ private struct PrivacySettingsPane: View {
 
     var body: some View {
         Form {
-            Section("Full Disk Access") {
-                Text("Pathlight can monitor ordinary folders immediately. For protected macOS locations such as Mail, Safari, Messages, and Library content, grant Full Disk Access in System Settings.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
+            Section {
                 Label(
                     appModel.fullDiskAccessStatus.fullDiskAccessSettingsSummary,
                     systemImage: appModel.fullDiskAccessStatus.fullDiskAccessSystemImage
@@ -203,12 +198,19 @@ private struct PrivacySettingsPane: View {
                         appModel.refreshFullDiskAccessStatus()
                     }
                 }
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Full Disk Access")
+                    HelpTip("Pathlight can monitor ordinary folders immediately. For protected macOS locations such as Mail, Safari, Messages, and Library content, grant Full Disk Access in System Settings.")
+                }
             }
 
             Section("Activity Data") {
-                Text("Activity history and the size attribution index stay on this Mac. Manage retention and encryption in the Storage tab.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text("Kept on this Mac")
+                    Spacer()
+                    HelpTip("Activity history and the size attribution index stay on this Mac. Manage retention and encryption in the Storage tab.")
+                }
             }
         }
         .formStyle(.grouped)
@@ -276,11 +278,10 @@ private struct ActivityStorageSettingsPane: View {
             }
 
             Section("Privacy") {
-                Toggle("Encrypt new activity data", isOn: $appModel.activityEncryptNewData)
-                Text("New activity journals are sealed with AES-GCM before they are written. The protected key is shared by the app and command-line monitor on this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Toggle("Encrypt new activity data", isOn: $appModel.activityEncryptNewData)
+                    HelpTip("New activity journals are sealed with AES-GCM before they are written. The protected key is shared by the app and command-line monitor on this Mac.")
+                }
             }
 
             Section {
@@ -336,37 +337,35 @@ private struct UninstallSettingsPane: View {
 
     var body: some View {
         Form {
-            Section("Uninstall Pathlight") {
-                Text("Both options stop monitoring, remove the login item, and move Pathlight to the Trash.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Move Pathlight to the Trash…") {
-                    pendingScope = .appOnly
+            Section {
+                HStack(spacing: 6) {
+                    Button("Move Pathlight to the Trash…") {
+                        pendingScope = .appOnly
+                    }
+                    HelpTip("Keeps your activity history, settings, and encryption key, so reinstalling picks up where you left off.")
                 }
-
-                Text("Keeps your activity history, settings, and encryption key, so reinstalling picks up where you left off.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Uninstall Pathlight")
+                    HelpTip("Both options stop monitoring, remove the login item, and move Pathlight to the Trash.")
+                }
             }
 
             Section {
-                Button("Remove Pathlight and All Its Data…", role: .destructive) {
-                    pendingScope = .everything
+                HStack(spacing: 6) {
+                    Button("Remove Pathlight and All Its Data…", role: .destructive) {
+                        pendingScope = .everything
+                    }
+                    HelpTip(Self.everythingDetail)
                 }
-
-                Text(Self.everythingDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("One Thing Pathlight Cannot Remove") {
-                Text("macOS keeps its own record of the Full Disk Access you granted, and no app is allowed to delete that entry. Remove Pathlight from System Settings › Privacy & Security › Full Disk Access yourself.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text("The Full Disk Access entry in System Settings")
+                    Spacer()
+                    HelpTip("macOS keeps its own record of the Full Disk Access you granted, and no app is allowed to delete that entry. Remove Pathlight from System Settings › Privacy & Security › Full Disk Access yourself.")
+                }
             }
         }
         .formStyle(.grouped)

@@ -396,7 +396,7 @@ private struct MonitoringStartConfigurationView: View {
                 .font(.title2.weight(.semibold))
 
             Form {
-                LabeledContent("Smallest change") {
+                LabeledContent {
                     Stepper(
                         value: $minimumKilobytes,
                         in: 0...MonitoringStartConfiguration.maximumMinimumKilobytes
@@ -410,9 +410,14 @@ private struct MonitoringStartConfigurationView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Smallest change")
+                        HelpTip("A change that moves fewer bytes than this is not recorded. 0 records every measurable change.")
+                    }
                 }
 
-                LabeledContent("Report changes every") {
+                LabeledContent {
                     Stepper(
                         value: $reportIntervalSeconds,
                         in: MonitoringStartConfiguration.minimumMonitorLatency...MonitoringStartConfiguration.maximumMonitorLatency,
@@ -431,21 +436,17 @@ private struct MonitoringStartConfigurationView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Report changes every")
+                        HelpTip("A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it. Both of these stay editable while the watch runs.")
+                    }
                 }
 
-                Text("A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it. Both of these stay editable while the watch runs.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .formStyle(.grouped)
 
             HStack {
-                if minimumKilobytes == 0 {
-                    Text("Every measurable change will be recorded.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 Spacer()
                 Button("Cancel", role: .cancel) {
                     dismiss()
@@ -672,13 +673,11 @@ private struct ActivityLaunchAtLoginNudge: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Monitoring stops when Pathlight quits", systemImage: "power")
-                .font(.subheadline.weight(.semibold))
-
-            Text("Start Pathlight at login so monitoring resumes automatically.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Label("Monitoring stops when Pathlight quits", systemImage: "power")
+                    .font(.subheadline.weight(.semibold))
+                HelpTip("Start Pathlight at login so monitoring resumes automatically.")
+            }
 
             HStack(spacing: 10) {
                 Button("Start at Login", action: onEnable)
@@ -763,12 +762,8 @@ private struct ActivityRecordingFilterEditor: View {
             Text("What This Watch Records")
                 .font(.headline)
 
-            Text("A change that moves fewer bytes than this is not recorded at all. The default of 1,024 leaves out the churn nobody asked about — lock files, editor autosaves, log lines. Type 0 to record every change there is, down to a single byte: the most detail this watch can give, and the most rows, which the storage cap then ages out sooner.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            LabeledContent("Smallest change") {
+            LabeledContent {
                 HStack(spacing: 6) {
                     TextField("0", text: $deltaText)
                         .textFieldStyle(.roundedBorder)
@@ -777,14 +772,15 @@ private struct ActivityRecordingFilterEditor: View {
                     Text("bytes")
                         .foregroundStyle(.secondary)
                 }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Smallest change")
+                    HelpTip("A change that moves fewer bytes than this is not recorded at all. The default of 1,024 leaves out the churn nobody asked about — lock files, editor autosaves, log lines. Type 0 to record every change there is, down to a single byte: the most detail this watch can give, and the most rows, which the storage cap then ages out sooner.")
+                }
             }
 
-            Text("How long the watcher gathers changes before reporting them. A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            LabeledContent("Report changes every") {
+            LabeledContent {
                 HStack(spacing: 6) {
                     TextField("5", text: $latencyText)
                         .textFieldStyle(.roundedBorder)
@@ -793,14 +789,20 @@ private struct ActivityRecordingFilterEditor: View {
                     Text("seconds")
                         .foregroundStyle(.secondary)
                 }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Report changes every")
+                    HelpTip("How long the watcher gathers changes before reporting them. A shorter wait shows a change sooner and wakes this Mac more often; a longer one is cheaper and groups a burst of edits into fewer rows. Nothing is lost either way — only when you hear about it.")
+                }
             }
 
             Divider()
 
-            Text("File size, in MB. Leave a field empty for no limit. A file whose size cannot be read — a deletion, usually — is always recorded.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 4) {
+                Text("File size")
+                HelpTip("File size, in MB. Leave a field empty for no limit. A file whose size cannot be read — a deletion, usually — is always recorded.")
+            }
 
             HStack(spacing: 8) {
                 LabeledContent("At least") {
@@ -827,10 +829,11 @@ private struct ActivityRecordingFilterEditor: View {
 
             Divider()
 
-            Text("One gitignore-style pattern per line. Matching files and folders are left out of monitoring. Leave empty to record everything.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 4) {
+                Text("Excluded patterns")
+                HelpTip("One gitignore-style pattern per line. Matching files and folders are left out of monitoring. Leave empty to record everything.")
+            }
 
             TextEditor(text: $text)
                 .font(.body.monospaced())
@@ -941,8 +944,11 @@ private struct ActivityDashboardTrendSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Space Trend", systemImage: "chart.xyaxis.line")
-                .font(.headline)
+            HStack(spacing: 6) {
+                Label("Space Trend", systemImage: "chart.xyaxis.line")
+                    .font(.headline)
+                HelpTip("Each bar is one period's net change. Hover a bar for its bytes and event count.")
+            }
 
             if buckets.isEmpty {
                 Text("No recorded history")
@@ -1010,7 +1016,7 @@ private struct ActivityDashboardTrendChart: View {
 
     private var selectionCaption: String {
         guard let bucket = selectedBucket else {
-            return "Hover for details"
+            return " "
         }
         let eventLabel = bucket.eventCount == 1 ? "event" : "events"
         return "\(bucket.label) • \(bucket.detail) • \(bucket.eventCount.formatted()) \(eventLabel)"
@@ -1361,12 +1367,11 @@ private struct ActivityDashboardEmptyState: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
 
-            Text(title)
-                .font(.title3.weight(.semibold))
-
-            Text("Pathlight records what changes inside the folders you monitor.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                HelpTip("Pathlight records what changes inside the folders you monitor.")
+            }
 
             Button {
                 onAddFolder()

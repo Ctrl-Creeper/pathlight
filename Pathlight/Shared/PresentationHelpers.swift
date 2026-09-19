@@ -45,3 +45,34 @@ extension FullDiskAccessStatus {
         }
     }
 }
+
+/// The "?" beside a control. Explanatory prose lives here, not on the page:
+/// hover reads it as a tooltip, a click keeps it open.
+struct HelpTip: View {
+    let text: String
+    @State private var isShown = false
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Button {
+            isShown.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Help")
+        .help(text)
+        .popover(isPresented: $isShown, arrowEdge: .bottom) {
+            Text(text)
+                .font(.callout)
+                .frame(width: 280, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+        }
+    }
+}
+
