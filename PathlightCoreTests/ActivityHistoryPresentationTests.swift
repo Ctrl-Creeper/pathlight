@@ -44,6 +44,26 @@ struct ActivityHistoryPresentationTests {
         #expect(presentation.rows.map(\.title) == ["Deleted old.zip", "Created installer.dmg"])
     }
 
+    @Test("merges five-minute totals into bars that fit the chart")
+    func mergesBucketsToFitTheChart() {
+        let buckets = (0..<40).map { index in
+            ActivityHistoryBucket(
+                startDate: Date(timeIntervalSince1970: Double(index) * 300),
+                endDate: Date(timeIntervalSince1970: Double(index + 1) * 300),
+                byteDelta: 1,
+                eventCount: 1,
+                unknownSizeEventCount: 0
+            )
+        }
+
+        let merged = ActivityHistoryPresentation.merged(buckets, limit: 24)
+
+        #expect(merged.count == 14, "40 five-minute totals become 15-minute bars")
+        #expect(merged.first?.byteDelta == 3)
+        #expect(merged.first?.endDate == Date(timeIntervalSince1970: 900))
+        #expect(merged.last?.byteDelta == 1)
+    }
+
     @Test("marks unknown-size history without changing net summary")
     func marksUnknownSizeHistory() {
         let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)

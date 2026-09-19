@@ -940,7 +940,7 @@ private struct ActivityDashboardTrendSection: View {
             HStack(spacing: 6) {
                 Label("Space Trend", systemImage: "chart.xyaxis.line")
                     .font(.headline)
-                HelpTip("Each bar is one period's net change. Hover a bar for its bytes and event count.")
+                HelpTip("Each bar is one period's net change; the period grows with the span, from 5 minutes to a week. Hover a bar for its bytes and event count.")
             }
 
             if buckets.isEmpty {
@@ -967,7 +967,10 @@ private struct ActivityDashboardTrendChart: View {
         VStack(alignment: .leading, spacing: 6) {
             Chart(buckets) { bucket in
                 BarMark(
-                    x: .value("Time", bucket.startDate),
+                    xStart: .value("Start", bucket.startDate),
+                    xEnd: .value("End", bucket.endDate.addingTimeInterval(
+                        -bucket.endDate.timeIntervalSince(bucket.startDate) * 0.15
+                    )),
                     y: .value("Change", bucket.byteDelta)
                 )
                 .foregroundStyle(bucket.byteDelta >= 0 ? Color.green.gradient : Color.orange.gradient)

@@ -9,6 +9,7 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
         let eventCount: Int
         let magnitudeFraction: Double
         let startDate: Date
+        let endDate: Date
     }
 
     struct Row: Equatable, Identifiable, Sendable {
@@ -46,7 +47,7 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             : ""
         summaryText = "\(snapshot.eventCount.formatted()) \(eventLabel) • \(sizeSummary)\(truncationNote)"
 
-        let visibleBuckets = Array(snapshot.buckets.suffix(bucketLimit))
+        let visibleBuckets = Array(Self.merged(snapshot.buckets, limit: bucketLimit).suffix(bucketLimit))
         let maxMagnitude = visibleBuckets.map { abs($0.byteDelta) }.max() ?? 0
         buckets = visibleBuckets.map { bucket in
             Self.presentationBucket(for: bucket, maxMagnitude: maxMagnitude)
@@ -61,6 +62,29 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             }
             .prefix(eventLimit)
             .map(Self.row)
+    }
+
+    /// The store totals every five minutes; the chart shows the coarsest step
+    /// that still fits the whole span in `limit` bars, so two hours get
+    /// five-minute bars and a month gets days instead of a few thin bars.
+    static func merged(_ buckets: [ActivityHistoryBucket], limit: Int) -> [ActivityHistoryBucket] {
+        guard let first = buckets.first, let last = buckets.last else { return [] }
+        let span = last.endDate.timeIntervalSince(first.startDate)
+        let steps: [TimeInterval] = [300, 900, 1_800, 3_600, 3 * 3_600, 6 * 3_600, 12 * 3_600, 86_400, 7 * 86_400]
+        let step = steps.first { span <= $0 * Double(max(limit, 1)) } ?? steps[steps.count - 1]
+        var merged: [Date: ActivityHistoryBucket] = [:]
+        for bucket in buckets {
+            let start = ActivityHistoryService.bucketStart(for: bucket.startDate, interval: step)
+            let sum = merged[start]
+            merged[start] = ActivityHistoryBucket(
+                startDate: start,
+                endDate: start.addingTimeInterval(step),
+                byteDelta: (sum?.byteDelta ?? 0) + bucket.byteDelta,
+                eventCount: (sum?.eventCount ?? 0) + bucket.eventCount,
+                unknownSizeEventCount: (sum?.unknownSizeEventCount ?? 0) + bucket.unknownSizeEventCount
+            )
+        }
+        return merged.values.sorted { $0.startDate < $1.startDate }
     }
 
     private static func presentationBucket(
@@ -86,7 +110,8 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             byteDelta: bucket.byteDelta,
             eventCount: bucket.eventCount,
             magnitudeFraction: fraction,
-            startDate: bucket.startDate
+            startDate: bucket.startDate,
+            endDate: bucket.endDate
         )
     }
 

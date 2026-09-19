@@ -819,7 +819,7 @@ final class AppModel: ObservableObject {
 
     func refreshActivityHistory(
         rootPath: URL,
-        bucketInterval: TimeInterval = 3_600,
+        bucketInterval: TimeInterval = 300,
         eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityHistoryRefresh(clearHistory: false)
@@ -874,7 +874,7 @@ final class AppModel: ObservableObject {
 
     func refreshActivityDashboardHistories(
         rootPaths: [URL],
-        bucketInterval: TimeInterval = 3_600,
+        bucketInterval: TimeInterval = 300,
         eventLimit: Int = ActivityHistoryService.pageSize
     ) {
         cancelActivityDashboardHistoryRefresh(clearHistories: false)
