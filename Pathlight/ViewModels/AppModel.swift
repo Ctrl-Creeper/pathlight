@@ -991,10 +991,35 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func removeLongTermWatchTarget(rootPath: URL) {
+    /// Removes the folder from the watch list. Its history stays unless
+    /// `deletingHistory`, in which case adding it back starts empty.
+    func removeLongTermWatchTarget(rootPath: URL, deletingHistory: Bool = false) {
         let targetID = rootPath.standardizedFileURL.path
+        if deletingHistory {
+            // Rows still waiting for the journal would land after the delete
+            // below and bring part of the history back.
+            let queued = Set(pendingJournalOrder.filter {
+                pendingJournalEvents[$0]?.rootPath.standardizedFileURL.path == targetID
+            })
+            pendingJournalOrder.removeAll { queued.contains($0) }
+            for id in queued {
+                pendingJournalEvents[id] = nil
+            }
+            pendingJournalRoots.remove(targetID)
+            pendingJournalCheckpoints[targetID] = nil
+        }
         stopLongTermWatch(targetID: targetID)
         longTermWatchRuntimeStatuses.removeValue(forKey: targetID)
+        if deletingHistory, let store = dependencies.activityEventStore {
+            activityDashboardHistories[targetID] = nil
+            Task {
+                do {
+                    try await store.removeEvents(rootPath: rootPath)
+                } catch {
+                    setMonitoringStatus("Could not delete the history of \(rootPath.path): \(error.localizedDescription)", for: .journal)
+                }
+            }
+        }
         if let directory = dependencies.activityBaselineSizesDirectory {
             try? FileManager.default.removeItem(at: ActivityBaselineSizes.fileURL(
                 scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath), in: directory

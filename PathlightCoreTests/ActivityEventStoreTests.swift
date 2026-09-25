@@ -50,6 +50,30 @@ struct ActivityEventStoreTests {
         #expect(loaded == [second, first])
     }
 
+    @Test("removing a root deletes only its rows and keeps unreadable lines")
+    func removingRootDeletesOnlyItsRows() async throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        let journalURL = tempDirectory.appending(path: "activity-events.jsonl")
+        let gone = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let kept = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
+        let store = JSONLActivityEventStore(journalURL: journalURL)
+        let keptEvent = makeEvent(root: kept, name: "b", timestamp: Date(timeIntervalSince1970: 110), byteDelta: 2)
+        try await store.append([
+            makeEvent(root: gone, name: "a", timestamp: Date(timeIntervalSince1970: 100), byteDelta: 1),
+            keptEvent,
+        ])
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("not a row\n".utf8))
+        try handle.close()
+
+        try await store.removeEvents(rootPath: gone)
+
+        #expect(try await store.loadEvents(rootPath: gone, limit: 10).isEmpty)
+        #expect(try await store.loadEvents(rootPath: kept, limit: 10) == [keptEvent])
+        #expect(try String(contentsOf: journalURL, encoding: .utf8).contains("not a row"))
+    }
+
     @Test("reset removes companion storage inside the same transaction")
     func resetRemovesCompanionStorageInOneTransaction() async throws {
         let tempDirectory = try makeTemporaryDirectory()
