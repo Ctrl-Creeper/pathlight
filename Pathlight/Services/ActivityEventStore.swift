@@ -58,9 +58,14 @@ nonisolated protocol ActivityEventStoring: Sendable {
         eventJournalLimitBytes: Int64,
         now: Date
     ) async throws
+    /// Deletes every row recorded for the root, grouped rows included, so a
+    /// folder added back starts a fresh history. Mirrors `Journal::forget_root`.
+    func removeEvents(rootPath: URL) async throws
 }
 
 extension ActivityEventStoring {
+    func removeEvents(rootPath: URL) async throws {}
+
     /// Stores without their own single-pass reader still answer correctly; they
     /// just pay for materializing every event first.
     func loadEventPage(
@@ -312,6 +317,24 @@ actor JSONLActivityEventStore: ActivityEventStoring {
                 eventJournalLimitBytes: eventJournalLimitBytes,
                 now: now
             )
+        }
+    }
+
+    func removeEvents(rootPath: URL) async throws {
+        try ActivityStorageFileProtection.withStorageLock(
+            in: journalURL.deletingLastPathComponent()
+        ) {
+            guard FileManager.default.fileExists(atPath: journalURL.path) else {
+                return
+            }
+            let root = rootPath.standardizedFileURL.path
+            let (events, unreadable) = try readAllEvents()
+            let kept = events.filter { $0.rootPath.standardizedFileURL.path != root }
+            guard kept.count != events.count else {
+                return
+            }
+            // A line this build cannot read may be any folder's, so it stays.
+            try rewriteJournal(with: kept, preserving: unreadable)
         }
     }
 

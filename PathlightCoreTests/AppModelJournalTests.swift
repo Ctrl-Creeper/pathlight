@@ -57,6 +57,47 @@ final class AppModelJournalTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.path.lastPathComponent == "other.txt" }?.byteDelta, 7)
     }
 
+    func testRemovingAWatchDeletesItsHistoryOnlyWhenAsked() async throws {
+        let root = URL(filePath: "/tmp/pathlight-journal-tests/\(UUID().uuidString)", directoryHint: .isDirectory)
+        let store = InMemoryActivityEventStore()
+        try await store.append([DiskActivityEvent(
+            kind: .created,
+            path: root.appending(path: "a.bin"),
+            rootPath: root,
+            timestamp: Date(),
+            byteDelta: 1,
+            confidence: .confirmed,
+            previousPath: nil,
+            affectedItemCount: 1
+        )])
+        let model = AppModel(
+            dependencies: AppDependencies(
+                systemActions: .inert,
+                activityMonitor: ScriptedDiskActivityMonitor(events: []),
+                activityAttribution: stubActivityAttribution,
+                activityEventStore: store,
+                longTermWatchTargets: LongTermWatchTargetStore(
+                    persistence: UserDefaultsLongTermWatchTargetPersistence(
+                        defaults: UserDefaults(suiteName: "AppModelJournalTests.\(UUID().uuidString)")!
+                    )
+                ),
+                activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
+                launchAtLoginService: NoopLaunchAtLoginService()
+            )
+        )
+        defer { model.cleanup() }
+
+        model.removeLongTermWatchTarget(rootPath: root)
+        try await Task.sleep(for: .milliseconds(100))
+        let kept = await store.allEvents()
+        XCTAssertEqual(kept.count, 1, "removing alone must keep the history")
+
+        model.removeLongTermWatchTarget(rootPath: root, deletingHistory: true)
+        try await Task.sleep(for: .milliseconds(100))
+        let remaining = await store.allEvents()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     func testMergedVersionAfterEarlyCommitWritesOnlyItsNewDelta() {
         let root = URL(filePath: "/tmp/pathlight-journal-tests", directoryHint: .isDirectory)
         let path = root.appending(path: "continuous-copy.bin")
@@ -150,6 +191,10 @@ private actor InMemoryActivityEventStore: ActivityEventStoring {
     }
 
     func enforceStoragePolicy(_ preferences: ActivityStoragePreferences, eventJournalLimitBytes: Int64, now: Date) async throws {}
+
+    func removeEvents(rootPath: URL) async throws {
+        events.removeAll { $0.rootPath.standardizedFileURL == rootPath.standardizedFileURL }
+    }
 
     func allEvents() -> [DiskActivityEvent] { events }
     func appendCallCount() -> Int { appendCalls }
