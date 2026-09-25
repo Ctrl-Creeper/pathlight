@@ -283,6 +283,47 @@ impl Journal {
         Ok(std::io::BufReader::new(fs::File::open(&self.path)?).lines())
     }
 
+    /// Deletes every row recorded for `root_path`, grouped rows included.
+    /// Returns how many went. A row this build cannot read stays: it may be
+    /// any folder's, and deleting it on a guess could take another's history.
+    pub fn forget_root(&self, root_path: &str) -> Result<u64, CoreError> {
+        if !self.path.exists() {
+            return Ok(0);
+        }
+        let root = crate::paths::normalize(root_path);
+        let key = crate::crypt::key(&self.path);
+        // Written beside the journal and renamed over it, like trim.
+        let temporary = self.path.with_extension("jsonl.forgetting");
+        let mut file = std::io::BufWriter::new(fs::File::create(&temporary)?);
+        set_permissions(&temporary, 0o600)?;
+        let mut dropped = 0u64;
+        for line in self.lines()? {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            let theirs = readable(&line, key.as_ref())
+                .and_then(|json| ActivityEvent::from_json_line(&json).ok())
+                .is_some_and(|event| crate::paths::normalize(&event.root_path) == root);
+            if theirs {
+                dropped += 1;
+                continue;
+            }
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+        }
+        let file = file.into_inner().map_err(|error| error.into_error())?;
+        if dropped == 0 {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Ok(0);
+        }
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &self.path)?;
+        Ok(dropped)
+    }
+
     fn encoded_line(&self, event: &ActivityEvent) -> Result<String, CoreError> {
         let line = event.to_json_line()?;
         if !self.encrypt {
