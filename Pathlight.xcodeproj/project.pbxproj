@@ -286,7 +286,7 @@
 				INFOPLIST_FILE = Pathlight/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pathlight;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Colin Kim.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Wu Chencheng (CtrlCreeper).";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -327,7 +327,7 @@
 				INFOPLIST_FILE = Pathlight/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pathlight;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Colin Kim.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Wu Chencheng (CtrlCreeper).";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
