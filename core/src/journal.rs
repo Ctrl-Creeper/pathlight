@@ -20,15 +20,36 @@ pub struct Journal {
     /// it: an encrypted line is recognised by its marker either way, which is
     /// what lets the setting be turned on and off without a migration.
     encrypt: bool,
+    /// Keys older builds of a host sealed rows under, asked for only when a
+    /// row will not open under the shared key.
+    legacy_keys: Option<Arc<dyn LegacyKeys>>,
+}
+
+/// A host's older keys: the macOS app kept its key in the Keychain before
+/// every host shared the key file, and those rows are still its history.
+#[uniffi::export(with_foreign)]
+pub trait LegacyKeys: Send + Sync + std::fmt::Debug {
+    fn keys(&self) -> Vec<Vec<u8>>;
 }
 
 #[uniffi::export]
 impl Journal {
+    /// A journal that can also read rows sealed under a host's older keys.
+    #[uniffi::constructor]
+    pub fn with_legacy_keys(path: String, encrypt: bool, keys: Arc<dyn LegacyKeys>) -> Arc<Self> {
+        Arc::new(Self {
+            path: PathBuf::from(path),
+            encrypt,
+            legacy_keys: Some(keys),
+        })
+    }
+
     #[uniffi::constructor]
     pub fn new(path: String) -> Arc<Self> {
         Arc::new(Self {
             path: PathBuf::from(path),
             encrypt: false,
+            legacy_keys: None,
         })
     }
 
@@ -38,6 +59,7 @@ impl Journal {
         Arc::new(Self {
             path: PathBuf::from(path),
             encrypt: true,
+            legacy_keys: None,
         })
     }
 
@@ -209,15 +231,20 @@ impl Journal {
         }
 
         let root = crate::paths::normalize(&root_path);
-        let contents = fs::read_to_string(&self.path)?;
-        let key = self.key_for(&contents);
-        let mut events: Vec<ActivityEvent> = contents
-            .lines()
-            .filter(|line| !line.is_empty())
-            .filter_map(|line| readable(line, key.as_ref()))
-            .filter_map(|line| ActivityEvent::from_json_line(&line).ok())
-            .filter(|event| crate::paths::normalize(&event.root_path) == root)
-            .collect();
+        let key = crate::crypt::key(&self.path);
+        let mut legacy = None;
+        let mut events = Vec::new();
+        for line in self.lines()? {
+            let Some(line) = text(line)? else { continue };
+            let event = self
+                .open_line(&line, key.as_ref(), &mut legacy)
+                .and_then(|json| ActivityEvent::from_json_line(&json).ok());
+            if let Some(event) = event {
+                if crate::paths::normalize(&event.root_path) == root {
+                    events.push(event);
+                }
+            }
+        }
 
         events.sort_by(|lhs, rhs| {
             rhs.timestamp
@@ -250,9 +277,11 @@ impl Journal {
         if self.path.exists() {
             let root = crate::paths::normalize(&root_path);
             let key = crate::crypt::key(&self.path);
+            let mut legacy = None;
             for line in self.lines()? {
-                let line = line?;
-                let Some(event) = readable(&line, key.as_ref())
+                let Some(line) = text(line)? else { continue };
+                let Some(event) = self
+                    .open_line(&line, key.as_ref(), &mut legacy)
                     .and_then(|json| ActivityEvent::from_json_line(&json).ok())
                 else {
                     continue;
@@ -267,14 +296,29 @@ impl Journal {
 }
 
 impl Journal {
-    /// The key, if this journal has encrypted rows and this machine holds it.
-    /// Nothing is created here: a read must not leave a key behind.
-    fn key_for(&self, contents: &str) -> Option<[u8; 32]> {
-        contents
-            .lines()
-            .any(|line| line.starts_with(ENCRYPTED_PREFIX))
-            .then(|| crate::crypt::key(&self.path))
-            .flatten()
+    /// [`readable`], falling back to the host's older keys. `legacy` is the
+    /// caller's cache for one read: the host is asked at most once, and not at
+    /// all while every row opens under the shared key.
+    fn open_line(
+        &self,
+        line: &str,
+        key: Option<&[u8; 32]>,
+        legacy: &mut Option<Vec<[u8; 32]>>,
+    ) -> Option<String> {
+        if let Some(text) = readable(line, key) {
+            return Some(text);
+        }
+        let source = self.legacy_keys.as_ref()?;
+        legacy
+            .get_or_insert_with(|| {
+                source
+                    .keys()
+                    .into_iter()
+                    .filter_map(|key| key.try_into().ok())
+                    .collect()
+            })
+            .iter()
+            .find_map(|key| readable(line, Some(key)))
     }
 
     /// The journal a line at a time. Trim is the caller that needs it: it has
@@ -331,6 +375,16 @@ impl Journal {
         }
         let key = crate::crypt::key_or_create(&self.path)?;
         crate::crypt::seal(&key, line.as_bytes())
+    }
+}
+
+/// One line for a reader. Bytes that are not text are a damaged row, not a
+/// damaged journal: the rows around them are still somebody's history.
+fn text(line: std::io::Result<String>) -> Result<Option<String>, CoreError> {
+    match line {
+        Ok(line) => Ok(Some(line)),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 

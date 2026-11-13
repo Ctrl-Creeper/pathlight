@@ -289,3 +289,31 @@ fn a_page_far_inside_a_long_journal_is_the_page_a_full_sort_would_give() {
     );
     assert!(history.is_truncated);
 }
+
+/// The dashboard's "where did it go" and "last activity": totals per direct
+/// child for the rows the query matched, and the newest change whatever the
+/// query was.
+#[test]
+fn child_totals_follow_the_query_and_latest_event_does_not() {
+    let mut grouped = event("Installers", 50, Some(999));
+    grouped.kind = EventKind::Aggregate;
+    let events = vec![
+        event("Installers/a.pkg", 10, Some(100)),
+        event("Installers/deep/b.pkg", 20, Some(-30)),
+        event("notes.txt", 9_000, None),
+        grouped,
+    ];
+    let query = Query {
+        text: "installers".into(),
+        ..Query::default()
+    };
+    let history = build_history(ROOT, events, 3_600, 10, &query, UNIX_EPOCH);
+
+    assert_eq!(history.child_totals.len(), 1);
+    let installers = &history.child_totals["Installers"];
+    assert_eq!((installers.byte_delta, installers.event_count), (70, 2));
+    assert_eq!(
+        history.latest_event_at,
+        Some(UNIX_EPOCH + Duration::from_secs(9_000))
+    );
+}
