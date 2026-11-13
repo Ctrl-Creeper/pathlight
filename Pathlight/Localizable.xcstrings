@@ -969,12 +969,12 @@
         }
       }
     },
-    "This removes locally stored activity history and the size attribution index on this Mac.": {
+    "This removes locally stored activity history, the size attribution index and the watch diary on this Mac.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "这会删除保存在这台 Mac 上的活动历史和大小归因索引。"
+            "value": "这会删除保存在这台 Mac 上的活动历史、大小归因索引和监控日志。"
           }
         }
       }

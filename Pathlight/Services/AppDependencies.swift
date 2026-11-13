@@ -108,6 +108,24 @@ struct AppDependencies {
     ///
     /// The cryptor has no default on purpose: a fallback would write plaintext
     /// rows for a user who asked for encryption.
+    /// Everything a reset deletes with the journal, as the core's
+    /// `Storage::forget_records` does for the other hosts: the size index and
+    /// the walked tables say what the watched folders held, and the diary
+    /// names the folders themselves, so "delete every record" that left any
+    /// of them behind would not be one.
+    nonisolated static func recordsBesideTheJournal(in directory: URL) -> [URL] {
+        let tables = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ))?.filter {
+            $0.lastPathComponent.hasPrefix("baseline-sizes-") && $0.pathExtension == "bin"
+        } ?? []
+        return [
+            directory.appending(path: ActivitySizeIndex.defaultJournalURL().lastPathComponent),
+            directory.appending(path: ActivityDiary.defaultFileURL().lastPathComponent)
+        ] + tables
+    }
+
     static func live(
         activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
@@ -168,7 +186,9 @@ struct AppDependencies {
             activityStorageReset: {
                 activitySizeIndex.reset()
                 try await activityEventStore.reset(
-                    additionalStorageFiles: [ActivitySizeIndex.defaultJournalURL()]
+                    additionalStorageFiles: Self.recordsBesideTheJournal(
+                        in: ActivitySizeIndex.defaultJournalURL().deletingLastPathComponent()
+                    )
                 )
             },
             launchAtLoginService: SystemLaunchAtLoginService(),
