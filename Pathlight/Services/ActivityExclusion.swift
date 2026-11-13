@@ -24,8 +24,12 @@ typealias ActivityExclusionFactory = @Sendable (
     _ rootPath: URL
 ) -> (any ActivityExcluding)?
 
-/// The pattern list itself: what a new watch starts with, and how a typed
-/// pattern is stored.
+/// One spelling for a pattern however it was typed, blanks and duplicates
+/// dropped. The core owns the rule, since it applies it again when it compiles
+/// the list; the app target injects `normalizedExclusionPatterns`.
+typealias ActivityExclusionNormalizing = @Sendable (_ patterns: [String]) -> [String]
+
+/// What a new watch starts with.
 // `nonisolated`, like the rules it describes: a pattern list is text, and the
 // watch that asks about it runs off the main actor.
 nonisolated enum ActivityExclusionPatterns {
@@ -49,47 +53,4 @@ nonisolated enum ActivityExclusionPatterns {
         "*.crdownload",
         "*.download"
     ]
-
-    /// One spelling for a pattern however it was typed, blanks dropped and
-    /// duplicates removed while the order the user wrote them in is kept.
-    ///
-    /// This is about what gets stored and shown, not about what matches: the
-    /// core applies the same rules again when it compiles the list, so a
-    /// pattern saved by an older build still means what it says.
-    static func normalized(_ patterns: [String]) -> [String] {
-        var normalizedPatterns: [String] = []
-        for pattern in patterns {
-            guard let normalizedPattern = normalized(pattern: pattern),
-                  !normalizedPatterns.contains(normalizedPattern) else {
-                continue
-            }
-            normalizedPatterns.append(normalizedPattern)
-        }
-        return normalizedPatterns
-    }
-
-    /// nil for a pattern that is nothing but separators and space.
-    private static func normalized(pattern: String) -> String? {
-        var text = pattern
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\", with: "/")
-
-        while text.hasPrefix("./") {
-            text.removeFirst(2)
-        }
-        while text.hasPrefix("/") {
-            text.removeFirst()
-        }
-        while text.contains("//") {
-            text = text.replacingOccurrences(of: "//", with: "/")
-        }
-
-        let directoryOnly = text.hasSuffix("/")
-        while text.hasSuffix("/") {
-            text.removeLast()
-        }
-
-        guard !text.isEmpty else { return nil }
-        return directoryOnly ? "\(text)/" : text
-    }
 }

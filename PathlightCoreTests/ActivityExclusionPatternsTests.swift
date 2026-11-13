@@ -2,39 +2,10 @@ import Foundation
 import Testing
 @testable import PathlightCore
 
-/// What a typed pattern is stored as. The matching those patterns drive lives
-/// in the Rust core and is checked in `core/tests/exclusion.rs`, which is why
-/// none of it is checked twice here.
+/// What a watch's stored pattern list holds. Normalizing and matching live in
+/// the Rust core and are checked in `core/tests/exclusion.rs`, not twice here.
 @Suite("Activity exclusion patterns")
 struct ActivityExclusionPatternsTests {
-    @Test("a pattern is stored one way however it was typed")
-    func aPatternIsStoredOneWayHoweverItWasTyped() {
-        #expect(
-            ActivityExclusionPatterns.normalized([
-                " node_modules/ ",
-                #"build\"#,
-                "./target/",
-                "/dist/",
-                "Library//Caches/",
-                "node_modules/",
-                "",
-                "   "
-            ]) == [
-                "node_modules/",
-                "build/",
-                "target/",
-                "dist/",
-                "Library/Caches/"
-            ]
-        )
-    }
-
-    @Test("patterns that are nothing but separators and space are dropped")
-    func emptyPatternsAreDropped() {
-        #expect(ActivityExclusionPatterns.normalized([]).isEmpty)
-        #expect(ActivityExclusionPatterns.normalized(["   ", "", "/", "//", "./"]).isEmpty)
-    }
-
     @Test("legacy persisted options adopt default patterns")
     func legacyPersistedOptionsAdoptDefaultPatterns() throws {
         let legacyJSON = Data("""

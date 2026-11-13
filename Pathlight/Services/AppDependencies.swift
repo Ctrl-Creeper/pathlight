@@ -16,6 +16,9 @@ struct AppDependencies {
     /// package has nothing to fall back on: filtering nothing records more
     /// than the user asked for, never less.
     var activityExclusion: ActivityExclusionFactory
+    /// How a typed pattern list is stored. Unchanged without the core: it
+    /// normalizes again when it compiles the list, so only the spelling differs.
+    var normalizedExclusionPatterns: ActivityExclusionNormalizing
     /// Byte-attribution providers for one watch. Each watch asks for its own
     /// scope so overlapping watches cannot consume each other's measurements.
     var activitySizeProviders: @Sendable (_ scope: String) -> ActivitySizeProviders
@@ -53,6 +56,7 @@ struct AppDependencies {
         activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory = { _, _ in nil },
+        normalizedExclusionPatterns: @escaping ActivityExclusionNormalizing = { $0 },
         activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
             ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
         },
@@ -77,6 +81,7 @@ struct AppDependencies {
         self.activityMonitor = activityMonitor
         self.activityAttribution = activityAttribution
         self.activityExclusion = activityExclusion
+        self.normalizedExclusionPatterns = normalizedExclusionPatterns
         self.activitySizeProviders = activitySizeProviders
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
@@ -107,6 +112,7 @@ struct AppDependencies {
         activityMonitor: any DiskActivityMonitoring,
         activityAttribution: @escaping ActivityAttributionFactory,
         activityExclusion: @escaping ActivityExclusionFactory,
+        normalizedExclusionPatterns: @escaping ActivityExclusionNormalizing,
         activityAnomalies: @escaping ActivityAnomalyDetecting,
         activityStorageCryptor: any ActivityStorageLineCrypting,
         activitySizeIndex: ActivitySizeIndex? = nil
@@ -128,6 +134,7 @@ struct AppDependencies {
             activityMonitor: activityMonitor,
             activityAttribution: activityAttribution,
             activityExclusion: activityExclusion,
+            normalizedExclusionPatterns: normalizedExclusionPatterns,
             activitySizeProviders: { scope in
                 ActivitySizeProviders(
                     size: { url in
