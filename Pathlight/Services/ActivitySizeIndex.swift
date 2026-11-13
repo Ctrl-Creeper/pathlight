@@ -98,6 +98,13 @@ nonisolated final class ActivitySizeIndex: @unchecked Sendable {
         }
     }
 
+    /// Forgets one watch's baselines, here and on disk.
+    func forget(scope: String) {
+        ioQueue.sync {
+            write { try index.forgetScope(scope: scope, encrypt: $0) }
+        }
+    }
+
     func reset() {
         ioQueue.sync {
             try? index.clear()

@@ -454,9 +454,7 @@ final class AppModel: ObservableObject {
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
         if let rootPath = liveWatchSession?.rootPath {
-            dependencies.activityBaselineSizes.forget(
-                scope: ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
-            )
+            forgetBaselines(scope: ActivitySizeProviders.scope(kind: "live", rootPath: rootPath))
         }
         liveWatchSession = nil
         if let liveWatcherStatusKey {
@@ -1022,11 +1020,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if let directory = dependencies.activityBaselineSizesDirectory {
-            try? FileManager.default.removeItem(at: ActivityBaselineSizes.fileURL(
-                scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath), in: directory
-            ))
-        }
+        forgetBaselines(scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath))
         longTermWatchTargets = dependencies.longTermWatchTargets.remove(
             rootPath: rootPath,
             currentTargets: longTermWatchTargets
@@ -1459,6 +1453,19 @@ final class AppModel: ObservableObject {
             // this scan unverified and do not append a guessed correction row.
             // The persisted history-gap checkpoint remains set after this scan.
         }
+    }
+
+    /// Everything kept about what one watch's folder holds: the walked table,
+    /// its file, and the size index's entries. A live session that ended and a
+    /// watch that was removed have no use for them, and they name its files.
+    private func forgetBaselines(scope: String) {
+        dependencies.activityBaselineSizes.forget(scope: scope)
+        if let directory = dependencies.activityBaselineSizesDirectory {
+            try? FileManager.default.removeItem(
+                at: ActivityBaselineSizes.fileURL(scope: scope, in: directory)
+            )
+        }
+        dependencies.forgetActivitySizes(scope)
     }
 
     private func stopLongTermWatch(targetID: LongTermWatchTarget.ID) {

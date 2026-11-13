@@ -19,6 +19,9 @@ struct AppDependencies {
     /// Byte-attribution providers for one watch. Each watch asks for its own
     /// scope so overlapping watches cannot consume each other's measurements.
     var activitySizeProviders: @Sendable (_ scope: String) -> ActivitySizeProviders
+    /// Forgets what the size index knows under one watch's scope, when that
+    /// watch is removed or its live session ends.
+    var forgetActivitySizes: @Sendable (_ scope: String) -> Void
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
@@ -56,6 +59,7 @@ struct AppDependencies {
         activitySizeProviders: @escaping @Sendable (String) -> ActivitySizeProviders = { _ in
             ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
         },
+        forgetActivitySizes: @escaping @Sendable (String) -> Void = { _ in },
         activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live(),
         longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence()
@@ -78,6 +82,7 @@ struct AppDependencies {
         self.activityAttribution = activityAttribution
         self.activityExclusion = activityExclusion
         self.activitySizeProviders = activitySizeProviders
+        self.forgetActivitySizes = forgetActivitySizes
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
@@ -147,6 +152,7 @@ struct AppDependencies {
                     }
                 )
             },
+            forgetActivitySizes: { activitySizeIndex.forget(scope: $0) },
             activityEventStore: activityEventStore,
             // A scan may observe a new size before its delayed change event.
             // Keep those measurements out of the live attribution index so they
