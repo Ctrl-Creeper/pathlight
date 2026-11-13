@@ -207,7 +207,17 @@ struct ActivityEventStoreTests {
         )
         let store = JSONLActivityEventStore(
             journalURL: journalURL,
-            lineCodec: makeSealedActivityStorageLineCodec()
+            // The real cipher and the key file beside the journal: the core
+            // reads this journal, and that is where it looks for the key.
+            lineCodec: ActivityStorageLineCodec(
+                preferencesStore: FixedActivityStoragePreferencesStore(encryptNewData: true),
+                cryptor: RustActivityStorageCryptor(
+                    keyProvider: FileActivityStorageKeyProvider(
+                        keyURL: tempDirectory.appending(path: "activity-events.key")
+                    ),
+                    legacyKeyProvider: nil
+                )
+            )
         )
 
         try await store.append([event])

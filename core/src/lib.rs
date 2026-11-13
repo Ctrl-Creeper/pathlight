@@ -42,8 +42,8 @@ pub use anomaly::{Anomaly, AnomalyKind};
 pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};
 pub use event::{ActivityEvent, Confidence, EventKind};
 pub use exclusion::ExclusionFilter;
-pub use history::{HistoryBucket, HistorySnapshot};
-pub use journal::Journal;
+pub use history::{ChildTotal, HistoryBucket, HistorySnapshot};
+pub use journal::{Journal, LegacyKeys};
 pub use monitor::{
     bounded_monitor_latency_ms, watcher_capabilities, ActivityListener, Capabilities, Change,
     ChangeKind, StreamEvent, Watcher, MAX_MONITOR_LATENCY_MS, MIN_MONITOR_LATENCY_MS,

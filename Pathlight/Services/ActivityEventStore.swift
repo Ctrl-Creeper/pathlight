@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 
 nonisolated enum ActivityEventStoreError: Error {
     /// The store could not prove whether part of a failed batch reached disk.
@@ -74,23 +75,24 @@ extension ActivityEventStoring {
         bucketInterval: TimeInterval,
         query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
-        var builder = ActivityEventPageBuilder(
-            rootPath: rootPath,
-            limit: limit,
-            bucketInterval: bucketInterval,
-            query: query
+        ActivityEventPage(
+            historyOfEvents(
+                rootPath: rootPath.standardizedFileURL.path,
+                events: try await loadEvents(rootPath: rootPath, limit: .max).map(\.coreEvent),
+                bucketIntervalSecs: UInt64(max(bucketInterval, 1)),
+                recentLimit: UInt32(clamping: max(limit, 0)),
+                query: query.coreQuery,
+                generatedAt: Date()
+            )
         )
-        // Any order will do: the builder sorts the page it kept, so what it was
-        // handed first no longer decides what it lists.
-        for event in try await loadEvents(rootPath: rootPath, limit: .max) {
-            builder.add(event)
-        }
-        return builder.page()
     }
 }
 
 actor JSONLActivityEventStore: ActivityEventStoring {
     private let journalURL: URL
+    /// The core's reader over the same file. Reads go through it; writes are
+    /// still this actor's.
+    private let journal: Journal
     private let lineCodec: ActivityStorageLineCodec
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -104,6 +106,9 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     ) {
         self.journalURL = journalURL
         self.lineCodec = lineCodec
+        journal = lineCodec.legacyKeys.map {
+            Journal.withLegacyKeys(path: journalURL.path, encrypt: false, keys: $0)
+        } ?? Journal(path: journalURL.path)
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -247,61 +252,27 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     }
 
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
-        let fileManager = FileManager.default
-        guard limit > 0, fileManager.fileExists(atPath: journalURL.path) else {
-            return []
-        }
-
-        let root = rootPath.standardizedFileURL.path
-        var events: [DiskActivityEvent] = []
-        try forEachLine { line in
-            guard let data = try? lineCodec.decode(line),
-                  let event = try? decoder.decode(DiskActivityEvent.self, from: data),
-                  event.rootPath.standardizedFileURL.path == root else {
-                return
-            }
-            events.append(event)
-        }
-
-        return events
-            .sorted { lhs, rhs in
-                if lhs.timestamp == rhs.timestamp {
-                    return lhs.path.path > rhs.path.path
-                }
-                return lhs.timestamp > rhs.timestamp
-            }
-            .prefix(limit)
-            .map { $0 }
+        try journal
+            .load(rootPath: rootPath.standardizedFileURL.path, limit: UInt32(clamping: max(limit, 0)))
+            .map(DiskActivityEvent.init)
     }
 
     /// One pass over the journal: totals and trend buckets come from every
-    /// retained line, while only the newest `limit` events are kept in memory.
+    /// retained line, while only the page asked for is kept in memory.
     func loadEventPage(
         rootPath: URL,
         limit: Int,
         bucketInterval: TimeInterval,
-        query: ActivityHistoryQuery = .everything
+        query: ActivityHistoryQuery
     ) async throws -> ActivityEventPage {
-        guard FileManager.default.fileExists(atPath: journalURL.path) else {
-            return .empty
-        }
-
-        let root = rootPath.standardizedFileURL.path
-        var builder = ActivityEventPageBuilder(
-            rootPath: rootPath,
-            limit: limit,
-            bucketInterval: bucketInterval,
-            query: query
+        ActivityEventPage(
+            try journal.loadHistory(
+                rootPath: rootPath.standardizedFileURL.path,
+                limit: UInt32(clamping: max(limit, 0)),
+                bucketIntervalSecs: UInt64(max(bucketInterval, 1)),
+                query: query.coreQuery
+            )
         )
-        try forEachLine { line in
-            guard let lineData = try? lineCodec.decode(line),
-                  let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),
-                  event.rootPath.standardizedFileURL.path == root else {
-                return
-            }
-            builder.add(event)
-        }
-        return builder.page()
     }
 
     func enforceStoragePolicy(

@@ -300,3 +300,60 @@ fn a_cap_that_bites_after_a_rollup_still_fits_and_keeps_the_group() {
     );
     assert!(kept.iter().any(|row| row.path.ends_with("new4.bin")));
 }
+
+#[derive(Debug)]
+struct OldKey([u8; 32]);
+
+impl pathlight_core::LegacyKeys for OldKey {
+    fn keys(&self) -> Vec<Vec<u8>> {
+        vec![self.0.to_vec()]
+    }
+}
+
+/// Rows a host sealed before the shared key file existed are still that
+/// person's history: the journal reads them once the host hands its old key
+/// over, in the list and in the dashboard totals alike.
+#[test]
+fn rows_sealed_under_a_hosts_older_key_are_read_through_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity-events.jsonl");
+    let old = [7u8; 32];
+    let row = event("old.bin", 1).to_json_line().unwrap();
+    let sealed = pathlight_core::crypt::seal_storage_line(row.into_bytes(), old.to_vec()).unwrap();
+    fs::write(&path, format!("{sealed}\n")).unwrap();
+    let path = path.to_string_lossy().into_owned();
+
+    assert!(Journal::new(path.clone())
+        .load(ROOT.to_owned(), 10)
+        .unwrap()
+        .is_empty());
+
+    let journal = Journal::with_legacy_keys(path, false, std::sync::Arc::new(OldKey(old)));
+    assert_eq!(journal.load(ROOT.to_owned(), 10).unwrap().len(), 1);
+    let history = journal
+        .load_history(ROOT.to_owned(), 10, 3_600, Default::default())
+        .unwrap();
+    assert_eq!(history.event_count, 1);
+}
+
+/// A damaged row costs that row. It must not cost the history around it.
+#[test]
+fn bytes_that_are_not_text_cost_one_row_and_not_the_journal() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    journal.append(vec![event("before.bin", 2)]).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("activity-events.jsonl"))
+        .unwrap()
+        .write_all(b"\xff\xfe not text\n")
+        .unwrap();
+    journal.append(vec![event("after.bin", 1)]).unwrap();
+
+    assert_eq!(journal.load(ROOT.to_owned(), 10).unwrap().len(), 2);
+    let history = journal
+        .load_history(ROOT.to_owned(), 10, 3_600, Default::default())
+        .unwrap();
+    assert_eq!(history.event_count, 2);
+}

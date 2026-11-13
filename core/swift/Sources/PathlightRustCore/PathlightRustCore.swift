@@ -1260,6 +1260,20 @@ public static func encrypting(path: String) -> Journal  {
 })
 }
 
+    /**
+     * A journal that can also read rows sealed under a host's older keys.
+     */
+public static func withLegacyKeys(path: String, encrypt: Bool, keys: LegacyKeys) -> Journal  {
+    return try!  FfiConverterTypeJournal_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_journal_with_legacy_keys(
+        FfiConverterString.lower(path),
+        FfiConverterBool.lower(encrypt),
+        FfiConverterTypeLegacyKeys_lower(keys),uniffiCallStatus
+    )
+})
+}
+
 
 
     /**
@@ -1378,6 +1392,210 @@ public func FfiConverterTypeJournal_lift(_ handle: UInt64) throws -> Journal {
 #endif
 public func FfiConverterTypeJournal_lower(_ value: Journal) -> UInt64 {
     return FfiConverterTypeJournal.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A host's older keys: the macOS app kept its key in the Keychain before
+ * every host shared the key file, and those rows are still its history.
+ */
+public protocol LegacyKeys: AnyObject, Sendable {
+
+    func keys()  -> [Data]
+
+}
+/**
+ * A host's older keys: the macOS app kept its key in the Keychain before
+ * every host shared the key file, and those rows are still its history.
+ */
+open class LegacyKeysImpl: LegacyKeys, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_legacykeys(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_legacykeys(handle, $0) }
+    }
+
+
+
+
+open func keys() -> [Data]  {
+    return try!  FfiConverterSequenceData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_legacykeys_keys(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceLegacyKeys {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceLegacyKeys = UniffiVTableCallbackInterfaceLegacyKeys(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeLegacyKeys.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface LegacyKeys: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeLegacyKeys.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface LegacyKeys: handle missing in uniffiClone")
+            }
+        },
+        keys: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [Data] in
+                guard let uniffiObj = try? FfiConverterTypeLegacyKeys.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.keys(
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceData.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceLegacyKeys> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceLegacyKeys>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitLegacyKeys() {
+    uniffi_pathlight_core_fn_init_callback_vtable_legacykeys(UniffiCallbackInterfaceLegacyKeys.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyKeys: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<LegacyKeys>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = LegacyKeys
+
+    public static func lift(_ handle: UInt64) throws -> LegacyKeys {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return LegacyKeysImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: LegacyKeys) -> UInt64 {
+         if let rustImpl = value as? LegacyKeysImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyKeys {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LegacyKeys, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyKeys_lift(_ handle: UInt64) throws -> LegacyKeys {
+    return try FfiConverterTypeLegacyKeys.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyKeys_lower(_ value: LegacyKeys) -> UInt64 {
+    return FfiConverterTypeLegacyKeys.lower(value)
 }
 
 
@@ -2261,6 +2479,63 @@ public func FfiConverterTypeChange_lower(_ value: Change) -> RustBuffer {
 }
 
 
+/**
+ * What one direct child of the root accounts for.
+ */
+public struct ChildTotal: Equatable, Hashable {
+    public var byteDelta: Int64
+    public var eventCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(byteDelta: Int64, eventCount: UInt32) {
+        self.byteDelta = byteDelta
+        self.eventCount = eventCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ChildTotal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChildTotal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChildTotal {
+        return
+            try ChildTotal(
+                byteDelta: FfiConverterInt64.read(from: &buf),
+                eventCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChildTotal, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.byteDelta, into: &buf)
+        FfiConverterUInt32.write(value.eventCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChildTotal_lift(_ buf: RustBuffer) throws -> ChildTotal {
+    return try FfiConverterTypeChildTotal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChildTotal_lower(_ value: ChildTotal) -> RustBuffer {
+    return FfiConverterTypeChildTotal.lower(value)
+}
+
+
 public struct HistoryBucket: Equatable, Hashable {
     public var start: Date
     public var end: Date
@@ -2342,6 +2617,16 @@ public struct HistorySnapshot: Equatable, Hashable {
      * The totals above cover more rows than `recent_events` lists.
      */
     public var isTruncated: Bool
+    /**
+     * When the folder last changed, whatever `query` narrowed the list to: a
+     * search or a second page must not make a folder look quieter than it was.
+     */
+    public var latestEventAt: Date?
+    /**
+     * Matched rows by the root's direct child they happened under. Grouped
+     * rows are left out: they no longer say which child they were.
+     */
+    public var childTotals: [String: ChildTotal]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2351,7 +2636,15 @@ public struct HistorySnapshot: Equatable, Hashable {
          */recentEvents: [ActivityEvent],
         /**
          * The totals above cover more rows than `recent_events` lists.
-         */isTruncated: Bool) {
+         */isTruncated: Bool,
+        /**
+         * When the folder last changed, whatever `query` narrowed the list to: a
+         * search or a second page must not make a folder look quieter than it was.
+         */latestEventAt: Date?,
+        /**
+         * Matched rows by the root's direct child they happened under. Grouped
+         * rows are left out: they no longer say which child they were.
+         */childTotals: [String: ChildTotal]) {
         self.rootPath = rootPath
         self.generatedAt = generatedAt
         self.totalNetByteDelta = totalNetByteDelta
@@ -2360,6 +2653,8 @@ public struct HistorySnapshot: Equatable, Hashable {
         self.buckets = buckets
         self.recentEvents = recentEvents
         self.isTruncated = isTruncated
+        self.latestEventAt = latestEventAt
+        self.childTotals = childTotals
     }
 
 
@@ -2385,7 +2680,9 @@ public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
                 unknownSizeEventCount: FfiConverterUInt32.read(from: &buf),
                 buckets: FfiConverterSequenceTypeHistoryBucket.read(from: &buf),
                 recentEvents: FfiConverterSequenceTypeActivityEvent.read(from: &buf),
-                isTruncated: FfiConverterBool.read(from: &buf)
+                isTruncated: FfiConverterBool.read(from: &buf),
+                latestEventAt: FfiConverterOptionTimestamp.read(from: &buf),
+                childTotals: FfiConverterDictionaryStringTypeChildTotal.read(from: &buf)
         )
     }
 
@@ -2398,6 +2695,8 @@ public struct FfiConverterTypeHistorySnapshot: FfiConverterRustBuffer {
         FfiConverterSequenceTypeHistoryBucket.write(value.buckets, into: &buf)
         FfiConverterSequenceTypeActivityEvent.write(value.recentEvents, into: &buf)
         FfiConverterBool.write(value.isTruncated, into: &buf)
+        FfiConverterOptionTimestamp.write(value.latestEventAt, into: &buf)
+        FfiConverterDictionaryStringTypeChildTotal.write(value.childTotals, into: &buf)
     }
 }
 
@@ -3119,6 +3418,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTimestamp: FfiConverterRustBuffer {
+    typealias SwiftType = Date?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTimestamp.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTimestamp.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeEventKind: FfiConverterRustBuffer {
     typealias SwiftType = EventKind?
 
@@ -3160,6 +3483,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]
+
+    public static func write(_ value: [Data], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterData.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Data]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterData.read(from: &buf))
         }
         return seq
     }
@@ -3264,6 +3612,32 @@ fileprivate struct FfiConverterSequenceTypeHistoryBucket: FfiConverterRustBuffer
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDictionaryStringTypeChildTotal: FfiConverterRustBuffer {
+    public static func write(_ value: [String: ChildTotal], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterTypeChildTotal.write(value, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: ChildTotal] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: ChildTotal]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0..<len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterTypeChildTotal.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
+    }
+}
 /**
  * Crate version, handy for proving the host actually linked this library.
  */
@@ -3349,6 +3723,23 @@ public func normalizedExclusionPatterns(patterns: [String]) -> [String]  {
 })
 }
 /**
+ * [`build_history`] across the FFI, for a host holding rows that are not in
+ * a journal file.
+ */
+public func historyOfEvents(rootPath: String, events: [ActivityEvent], bucketIntervalSecs: UInt64, recentLimit: UInt32, query: Query, generatedAt: Date) -> HistorySnapshot  {
+    return try!  FfiConverterTypeHistorySnapshot_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_history_of_events(
+        FfiConverterString.lower(rootPath),
+        FfiConverterSequenceTypeActivityEvent.lower(events),
+        FfiConverterUInt64.lower(bucketIntervalSecs),
+        FfiConverterUInt32.lower(recentLimit),
+        FfiConverterTypeQuery_lower(query),
+        FfiConverterTimestamp.lower(generatedAt),uniffiCallStatus
+    )
+})
+}
+/**
  * What this platform's watcher guarantees. Safe to call before starting a
  * watch, which is the point: the host needs it to decide whether a stored
  * cursor is worth trusting.
@@ -3397,6 +3788,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_func_normalized_exclusion_patterns() != 41574) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_func_history_of_events() != 4562) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_func_watcher_capabilities() != 30058) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3430,6 +3824,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_journal_trim() != 8913) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_method_legacykeys_keys() != 1915) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_method_activitylistener_on_event() != 31555) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3448,11 +3845,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_constructor_journal_new() != 12772) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_constructor_journal_with_legacy_keys() != 1986) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_constructor_watcher_start() != 7813) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitActivityListener()
+    uniffiCallbackInitLegacyKeys()
     uniffiCallbackInitSizeLookup()
     return InitializationResult.ok
 }()

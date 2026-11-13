@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 
 nonisolated struct ActivityHistoryBucket: Equatable, Sendable {
     let startDate: Date
@@ -61,9 +62,8 @@ nonisolated struct ActivityHistorySnapshot: Equatable, Sendable {
 
 /// What a person narrowed the history to.
 ///
-/// The Rust core spells the same rule in `core/src/history.rs` for the other
-/// two hosts, and `core/fixtures/history-expectations.json` is what keeps the
-/// two spellings answering alike.
+/// Matching, ordering and paging are the Rust core's (`core/src/history.rs`),
+/// the same for every host.
 nonisolated struct ActivityHistoryQuery: Equatable, Sendable {
     /// Part of a path, matched without regard to case. Empty matches every row.
     var text: String = ""
@@ -82,24 +82,14 @@ nonisolated struct ActivityHistoryQuery: Equatable, Sendable {
 
     var isNarrowed: Bool { !text.isEmpty || kind != nil }
 
-    func matches(_ event: DiskActivityEvent) -> Bool {
-        if let kind, event.kind != kind {
-            return false
-        }
-        return text.isEmpty || event.path.path.localizedCaseInsensitiveContains(text)
-    }
-
-    /// Newest first, or biggest first with the newest order as the tiebreak
-    /// either way, so two rows never swap places between two reads.
-    func sorts(_ lhs: DiskActivityEvent, before rhs: DiskActivityEvent) -> Bool {
-        guard largestFirst else {
-            return ActivityHistoryService.recentEventSort(lhs: lhs, rhs: rhs)
-        }
-        let moved = (abs(lhs.byteDelta ?? 0), abs(rhs.byteDelta ?? 0))
-        if moved.0 != moved.1 {
-            return moved.0 > moved.1
-        }
-        return ActivityHistoryService.recentEventSort(lhs: lhs, rhs: rhs)
+    /// The same question as the core asks it, which is where it is answered.
+    var coreQuery: Query {
+        Query(
+            text: text,
+            kind: kind?.core,
+            largestFirst: largestFirst,
+            skip: UInt32(clamping: max(skip, 0))
+        )
     }
 }
 
@@ -130,112 +120,31 @@ nonisolated struct ActivityEventPage: Equatable, Sendable {
     )
 }
 
-/// Accumulates a page in one pass, holding at most twice the page in memory so
-/// a long journal cannot be read into RAM whole.
-nonisolated struct ActivityEventPageBuilder {
-    private let limit: Int
-    private let skip: Int
-    private let bucketInterval: TimeInterval
-    private let query: ActivityHistoryQuery
-    private let rootPrefix: String
-    private var window: [DiskActivityEvent] = []
-    private var childTotals: [String: ActivityHistoryChildTotal] = [:]
-    private var totalEventCount = 0
-    private var totalNetByteDelta: Int64 = 0
-    private var unknownSizeEventCount = 0
-    private var bucketTotals: [Date: (byteDelta: Int64, eventCount: Int, unknownSizeEventCount: Int)] = [:]
-    private var latestEventAt: Date?
-
-    init(
-        rootPath: URL,
-        limit: Int,
-        bucketInterval: TimeInterval,
-        query: ActivityHistoryQuery = .everything
-    ) {
-        let root = rootPath.standardizedFileURL.path
-        rootPrefix = root.hasSuffix("/") ? root : root + "/"
-        self.limit = max(limit, 0)
-        self.skip = max(query.skip, 0)
-        self.bucketInterval = max(bucketInterval, 1)
-        self.query = query
-    }
-
-    /// The rows the page may hold before it starts: what is listed, plus what
-    /// is stepped over to get there.
-    private var capacity: Int { limit + skip }
-
-    mutating func add(_ event: DiskActivityEvent) {
-        // Before the filter, not after: "last activity" is when the folder
-        // last changed, and a narrowed list or a second page must not make a
-        // folder look quieter than it was.
-        if event.timestamp > latestEventAt ?? .distantPast {
-            latestEventAt = event.timestamp
-        }
-        guard query.matches(event) else {
-            return
-        }
-        totalEventCount += 1
-        if let byteDelta = event.byteDelta {
-            totalNetByteDelta += byteDelta
-        } else {
-            unknownSizeEventCount += 1
-        }
-
-        let start = ActivityHistoryService.bucketStart(for: event.timestamp, interval: bucketInterval)
-        var totals = bucketTotals[start] ?? (0, 0, 0)
-        totals.byteDelta += event.byteDelta ?? 0
-        totals.eventCount += 1
-        totals.unknownSizeEventCount += event.byteDelta == nil ? 1 : 0
-        bucketTotals[start] = totals
-
-        if event.kind != .aggregate {
-            let path = event.path.standardizedFileURL.path
-            if path.hasPrefix(rootPrefix),
-               let child = path.dropFirst(rootPrefix.count).split(separator: "/").first {
-                childTotals[String(child), default: .init()].byteDelta += event.byteDelta ?? 0
-                childTotals[String(child), default: .init()].eventCount += 1
+nonisolated extension ActivityEventPage {
+    /// What the core folded the journal into, in this app's types.
+    init(_ history: HistorySnapshot) {
+        self.init(
+            events: history.recentEvents.map(DiskActivityEvent.init),
+            totalEventCount: Int(history.eventCount),
+            totalNetByteDelta: history.totalNetByteDelta,
+            unknownSizeEventCount: Int(history.unknownSizeEventCount),
+            buckets: history.buckets.map {
+                ActivityHistoryBucket(
+                    startDate: $0.start,
+                    endDate: $0.end,
+                    byteDelta: $0.byteDelta,
+                    eventCount: Int($0.eventCount),
+                    unknownSizeEventCount: Int($0.unknownSizeEventCount)
+                )
+            },
+            latestEventAt: history.latestEventAt,
+            childTotals: history.childTotals.mapValues {
+                ActivityHistoryChildTotal(byteDelta: $0.byteDelta, eventCount: Int($0.eventCount))
             }
-        }
-
-        // ponytail: a bounded buffer that is sorted and cut when it fills,
-        // rather than a ring holding the last `limit` lines. "Biggest first"
-        // is not answerable from the newest rows, and paging is not either;
-        // memory stays at twice the page.
-        guard capacity > 0 else { return }
-        window.append(event)
-        if window.count >= capacity * 2 {
-            window.sort(by: query.sorts(_:before:))
-            window = Array(window.prefix(capacity))
-        }
-    }
-
-    func page() -> ActivityEventPage {
-        ActivityEventPage(
-            events: Array(
-                window
-                    .sorted(by: query.sorts(_:before:))
-                    .dropFirst(skip)
-                    .prefix(limit)
-            ),
-            totalEventCount: totalEventCount,
-            totalNetByteDelta: totalNetByteDelta,
-            unknownSizeEventCount: unknownSizeEventCount,
-            buckets: bucketTotals
-                .map { start, totals in
-                    ActivityHistoryBucket(
-                        startDate: start,
-                        endDate: start.addingTimeInterval(bucketInterval),
-                        byteDelta: totals.byteDelta,
-                        eventCount: totals.eventCount,
-                        unknownSizeEventCount: totals.unknownSizeEventCount
-                    )
-                }
-                .sorted { $0.startDate < $1.startDate },
-            latestEventAt: latestEventAt,
-            childTotals: childTotals
         )
     }
 }
+
 
 struct ActivityHistoryService: Sendable {
     /// How many rows one read lists. Also how far a page button moves.
@@ -278,12 +187,5 @@ struct ActivityHistoryService: Sendable {
     nonisolated static func bucketStart(for date: Date, interval: TimeInterval) -> Date {
         let timestamp = date.timeIntervalSince1970
         return Date(timeIntervalSince1970: floor(timestamp / interval) * interval)
-    }
-
-    nonisolated static func recentEventSort(lhs: DiskActivityEvent, rhs: DiskActivityEvent) -> Bool {
-        if lhs.timestamp == rhs.timestamp {
-            return lhs.path.path > rhs.path.path
-        }
-        return lhs.timestamp > rhs.timestamp
     }
 }

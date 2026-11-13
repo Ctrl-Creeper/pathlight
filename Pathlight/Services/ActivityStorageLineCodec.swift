@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 import Security
 
 nonisolated enum ActivityStorageLineCodecError: Error {
@@ -20,6 +21,26 @@ nonisolated protocol ActivityStorageLineCrypting: Sendable {
     func open(_ line: String) throws -> Data?
 }
 
+nonisolated extension ActivityStorageLineCrypting {
+    /// The key rows were sealed under before every host shared one key file,
+    /// if this cryptor ever had one.
+    var legacyKeyProvider: (any ActivityStorageKeyProviding)? { nil }
+}
+
+/// Hands that older key to the core's journal reader, which asks only when a
+/// row will not open under the shared key.
+nonisolated final class ActivityStorageLegacyKeys: LegacyKeys {
+    private let provider: any ActivityStorageKeyProviding
+
+    init(provider: any ActivityStorageKeyProviding) {
+        self.provider = provider
+    }
+
+    func keys() -> [Data] {
+        (try? provider.loadOrCreateKey()).map { [$0] } ?? []
+    }
+}
+
 nonisolated protocol ActivityStorageKeyProviding: Sendable {
     func loadOrCreateKey() throws -> Data
 }
@@ -37,6 +58,10 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
     }
 
     static let plaintext = ActivityStorageLineCodec()
+
+    var legacyKeys: (any LegacyKeys)? {
+        cryptor.legacyKeyProvider.map(ActivityStorageLegacyKeys.init(provider:))
+    }
 
     /// Loads the storage key without writing a journal row. Called at launch so
     /// file errors or a legacy migration prompt appear while the user is in the
