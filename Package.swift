@@ -63,6 +63,7 @@ let package = Package(
                 "Services/LongTermWatchTargetStore.swift",
                 "Services/MonitoringPresets.swift",
                 "Services/ProcessHintService.swift",
+                "Services/RustActivityStorageCryptor.swift",
                 "Services/SystemIntegration.swift",
                 "Services/UninstallService.swift",
                 "Services/WatchSessionModel.swift",
