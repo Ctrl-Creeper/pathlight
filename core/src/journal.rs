@@ -92,16 +92,21 @@ impl Journal {
             payload.push('\n');
         }
 
+        // Not opened for append: Windows will not truncate through an
+        // append-only handle, and both the tail repair and the rollback
+        // truncate. Writers are serialised by the storage lock instead.
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
-            .append(true)
+            .write(true)
             .open(&self.path)?;
         set_permissions(&self.path, 0o600)?;
         // Durable or not there at all: a caller advances its cursor past this
         // batch when this returns, so a batch that is half on disk has to be
         // taken back off before the error is reported.
         let start = recover_tail(&mut file)?;
+        file.seek(SeekFrom::Start(start))?;
         let written = file
             .write_all(payload.as_bytes())
             .and_then(|()| file.sync_all());
