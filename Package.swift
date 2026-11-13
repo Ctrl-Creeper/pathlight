@@ -13,9 +13,16 @@ let package = Package(
             targets: ["PathlightCore"]
         )
     ],
+    dependencies: [
+        // The Rust core. Its xcframework is built by
+        // core/scripts/build-xcframework.sh, which has to run before
+        // `swift test` does.
+        .package(path: "core/swift")
+    ],
     targets: [
         .target(
             name: "PathlightCore",
+            dependencies: [.product(name: "PathlightRustCore", package: "swift")],
             path: "Pathlight",
             exclude: [
                 "App",

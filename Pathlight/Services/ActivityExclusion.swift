@@ -24,11 +24,6 @@ typealias ActivityExclusionFactory = @Sendable (
     _ rootPath: URL
 ) -> (any ActivityExcluding)?
 
-/// One spelling for a pattern however it was typed, blanks and duplicates
-/// dropped. The core owns the rule, since it applies it again when it compiles
-/// the list; the app target injects `normalizedExclusionPatterns`.
-typealias ActivityExclusionNormalizing = @Sendable (_ patterns: [String]) -> [String]
-
 /// What a new watch starts with.
 // `nonisolated`, like the rules it describes: a pattern list is text, and the
 // watch that asks about it runs off the main actor.
