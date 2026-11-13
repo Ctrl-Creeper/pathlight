@@ -235,6 +235,7 @@ private struct ActivityStorageSettingsPane: View {
                 StatValueRow("Total activity data", value: sizeText(appModel.activityStorageUsage.totalBytes))
                 StatValueRow("Activity events", value: sizeText(appModel.activityStorageUsage.eventJournalBytes))
                 StatValueRow("Size attribution index", value: sizeText(appModel.activityStorageUsage.sizeIndexJournalBytes))
+                StatValueRow("Folder baselines and diary", value: sizeText(appModel.activityStorageUsage.otherRecordBytes))
                 StatValueRow("Activity event rows", value: countText(appModel.activityStorageUsage.eventEntryCount))
                 StatValueRow("Size index rows", value: countText(appModel.activityStorageUsage.sizeIndexEntryCount))
 
