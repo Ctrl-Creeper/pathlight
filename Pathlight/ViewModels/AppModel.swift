@@ -1061,8 +1061,9 @@ final class AppModel: ObservableObject {
     }
 
     func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
+        let patterns = dependencies.normalizedExclusionPatterns(patterns)
         editOptions(rootPath: rootPath) { options in
-            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.exclusionPatterns = patterns
         }
     }
 
@@ -1081,8 +1082,9 @@ final class AppModel: ObservableObject {
         maximumFileBytes: Int64?,
         rootPath: URL
     ) {
+        let patterns = dependencies.normalizedExclusionPatterns(patterns)
         editOptions(rootPath: rootPath) { options in
-            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.exclusionPatterns = patterns
             options.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
             options.monitorLatency = MonitoringStartConfiguration
                 .boundedMonitorLatency(monitorLatency)

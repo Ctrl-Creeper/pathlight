@@ -20,6 +20,8 @@ nonisolated final class RustActivityExclusion: ActivityExcluding, @unchecked Sen
         self.matcher = matcher
     }
 
+    static let normalized: ActivityExclusionNormalizing = { normalizedExclusionPatterns(patterns: $0) }
+
     func excludes(_ url: URL) -> Bool {
         matcher.excludes(path: url.standardizedFileURL.path)
     }

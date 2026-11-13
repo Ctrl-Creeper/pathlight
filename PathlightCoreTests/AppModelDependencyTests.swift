@@ -18,6 +18,7 @@ final class AppModelDependencyTests: XCTestCase {
             // Nothing is excluded and nothing is an anomaly here: both live
             // in the Rust core, which this package does not link.
             activityExclusion: { _, _ in nil },
+            normalizedExclusionPatterns: { $0 },
             activityAnomalies: { _, _, _ in [] },
             activityStorageCryptor: PlaintextActivityStorageCryptor(),
             activitySizeIndex: sizeIndex
