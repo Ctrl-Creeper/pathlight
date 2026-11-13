@@ -361,6 +361,13 @@ impl SizeIndex {
         self.locked(|| self.persist_inner(encrypt, true))
     }
 
+    /// Forgets one watch's baselines, in memory and on disk. The file is
+    /// rewritten rather than appended to: a "remove" line still names the
+    /// path, and the point of forgetting a watch is that nothing here does.
+    pub fn forget_scope(&self, scope: String, encrypt: bool) -> Result<(), CoreError> {
+        self.locked(|| self.forget_scope_while_locked(&scope, encrypt))
+    }
+
     /// Forgets every baseline, in memory and on disk.
     pub fn clear(&self) -> Result<(), CoreError> {
         self.locked(|| {
@@ -380,6 +387,31 @@ impl SizeIndex {
 }
 
 impl SizeIndex {
+    pub(crate) fn forget_scope_while_locked(
+        &self,
+        scope: &str,
+        encrypt: bool,
+    ) -> Result<(), CoreError> {
+        let prefix = key(scope, "");
+        let gone: Vec<String> = {
+            let mut sizes = self.sizes.lock().unwrap();
+            let gone: Vec<String> = sizes
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            gone.iter().for_each(|key| {
+                sizes.remove(key);
+            });
+            gone
+        };
+        if gone.is_empty() {
+            return Ok(());
+        }
+        gone.into_iter().for_each(|key| self.note(key, None));
+        self.persist_inner(encrypt, true)
+    }
+
     fn locked(&self, body: impl FnOnce() -> Result<(), CoreError>) -> Result<(), CoreError> {
         let _storage_lock = match &self.file {
             Some(file) => Some(crate::store::lock_directory(&file.lock_dir)?),

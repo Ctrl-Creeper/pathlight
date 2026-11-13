@@ -505,8 +505,15 @@ impl Storage {
     /// what it saw — and one who adds it back should not get it back unasked.
     pub fn forget_watch_records(&self, path: &str) -> io::Result<u64> {
         let journal = self.journal_handle();
+        // Read before the lock is taken: both ask the settings, which lock.
+        let index = self.size_index();
+        let encrypt = self.encrypting();
         let _guard = self.lock()?;
         let _ = fs::remove_file(crate::baseline::file(self.dir(), path));
+        // The index names the same files the rows did.
+        index
+            .forget_scope_while_locked(path, encrypt)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         journal
             .forget_root(path)
             .map_err(|error| io::Error::other(error.to_string()))
@@ -1138,6 +1145,10 @@ mod tests {
         let baseline = crate::baseline::file(storage.dir(), "/gone");
         fs::create_dir_all(baseline.parent().unwrap()).unwrap();
         fs::write(&baseline, b"state").unwrap();
+        let index = storage.size_index();
+        index.record("/gone", "/gone/secret.bin", Some(1));
+        index.record("/kept", "/kept/report.bin", Some(2));
+        index.persist().unwrap();
 
         // Removing the folder alone keeps what it recorded.
         assert!(storage.remove_watch("/gone").unwrap());
@@ -1147,6 +1158,14 @@ mod tests {
         assert_eq!(storage.forget_watch_records("/gone").unwrap(), 2);
         assert_eq!(storage.recorded().1, 1);
         assert!(!baseline.exists());
+        // Its baselines go with it, and not as "remove" lines that still
+        // name the files.
+        let index_text = fs::read_to_string(dir.path().join(SIZE_INDEX_FILE)).unwrap();
+        assert!(!index_text.contains("secret.bin"));
+        assert_eq!(
+            storage.size_index().peek("/kept", "/kept/report.bin"),
+            Some(2)
+        );
         storage.add_watch("/gone").unwrap();
         let journal = storage.journal_handle();
         assert!(journal.load("/gone".to_owned(), 10).unwrap().is_empty());
