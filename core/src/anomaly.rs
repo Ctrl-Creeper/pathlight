@@ -20,7 +20,7 @@ pub const WINDOW: Duration = Duration::from_secs(10 * 60);
 /// a day", so a day is what a host has to add up.
 pub const GROWTH_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// Enough gone at once that nobody deleted it one file at a time.
-const REMOVED_ITEMS: u64 = 100;
+pub const REMOVED_ITEMS: u64 = 100;
 /// Or enough bytes gone that the count does not matter.
 const REMOVED_BYTES: i64 = 1_000_000_000;
 /// Arriving this fast is either a copy the user started or one they did not.
@@ -116,6 +116,13 @@ pub fn anomalies<'a>(
 #[uniffi::export]
 pub fn activity_anomalies(events: Vec<ActivityEvent>, now: SystemTime) -> Vec<Anomaly> {
     anomalies(&events, now)
+}
+
+/// How many removed items make a deletion "many files", for a host whose
+/// message has to tell that apart from one large file crossing the byte line.
+#[uniffi::export]
+pub fn activity_anomaly_removed_items() -> u64 {
+    REMOVED_ITEMS
 }
 
 /// The window, for a host whose message has to say how long "recently" is.

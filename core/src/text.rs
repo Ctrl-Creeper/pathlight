@@ -131,6 +131,11 @@ pub const PAUSED: &str = "monitoring is paused";
 pub fn alert_title(alert: &Anomaly, root: &str) -> String {
     let name = leaf(root);
     match alert.kind {
+        // The byte threshold alone can raise this, for one big file: "many
+        // files" is only true when the count is what crossed the line.
+        AnomalyKind::Removal if alert.items < crate::anomaly::REMOVED_ITEMS => {
+            format!("Large deletion in {name}")
+        }
         AnomalyKind::Removal => format!("Many files deleted in {name}"),
         AnomalyKind::Burst => format!("{name} is filling up fast"),
         AnomalyKind::Growth => format!("{name} is growing quickly"),
@@ -146,8 +151,9 @@ pub fn alert_body(alert: &Anomaly) -> String {
     let size = size.trim_start_matches('+');
     match alert.kind {
         AnomalyKind::Removal => format!(
-            "{} items ({size}) removed in the last {minutes} minutes.",
-            alert.items
+            "{} {} ({size}) removed in the last {minutes} minutes.",
+            alert.items,
+            if alert.items == 1 { "item" } else { "items" }
         ),
         AnomalyKind::Burst => format!("{size} written in the last {minutes} minutes."),
         // No window in the sentence: this one is the threshold the user set
@@ -191,5 +197,24 @@ mod tests {
         assert!(body.contains("4.7 GB"), "unexpected wording: {body}");
         assert!(!body.contains('+'), "a size was written as a delta: {body}");
         assert!(alert_title(&alert, "/watched").contains("watched"));
+    }
+
+    /// One big file crossing the byte line is not "many files", and it is
+    /// one item, not "1 items".
+    #[test]
+    fn one_large_deletion_is_not_called_many_files() {
+        let one = Anomaly {
+            kind: AnomalyKind::Removal,
+            items: 1,
+            bytes: 1_200_000_000,
+        };
+        assert_eq!(alert_title(&one, "/watched"), "Large deletion in watched");
+        assert!(alert_body(&one).starts_with("1 item ("));
+        let many = Anomaly { items: 120, ..one };
+        assert_eq!(
+            alert_title(&many, "/watched"),
+            "Many files deleted in watched"
+        );
+        assert!(alert_body(&many).starts_with("120 items ("));
     }
 }
