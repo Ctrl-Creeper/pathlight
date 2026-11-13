@@ -441,7 +441,12 @@ final class AppModel: ObservableObject {
                     }
                 }
                 self.liveWatchSession = session
-                self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
+                // A long-term watch running on this same folder is already
+                // recording it. Both streams see every change, and writing
+                // both rows doubled the folder's history.
+                if self.longTermWatchTasks[session.rootPath.standardizedFileURL.path] == nil {
+                    self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
+                }
             }
         }
     }
