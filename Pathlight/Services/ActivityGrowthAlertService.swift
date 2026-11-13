@@ -24,6 +24,9 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
     /// The span the finding was measured over, so the message can say it. The
     /// core decides how long that is.
     let windowMinutes: Int
+    /// How many items make a deletion "many files". The byte threshold alone
+    /// can raise this finding, for one large file; the core owns the number.
+    var manyItems = 100
 
     var identifier: String {
         "pathlight-anomaly-\(kind.rawValue)-\(rootPath.standardizedFileURL.path)"
@@ -33,7 +36,7 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
         let name = rootPath.lastPathComponent.isEmpty ? rootPath.path : rootPath.lastPathComponent
         switch kind {
         case .massDeletion:
-            return "Many files deleted in \(name)"
+            return itemCount < manyItems ? "Large deletion in \(name)" : "Many files deleted in \(name)"
         case .burst:
             return "\(name) is filling up fast"
         }
@@ -42,7 +45,7 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
     var body: String {
         switch kind {
         case .massDeletion:
-            return "\(itemCount.formatted()) items (\(PathlightFormatters.size(bytes))) removed in the last \(windowMinutes) minutes."
+            return "\(itemCount.formatted()) \(itemCount == 1 ? "item" : "items") (\(PathlightFormatters.size(bytes))) removed in the last \(windowMinutes) minutes."
         case .burst:
             return "\(PathlightFormatters.size(bytes)) written in the last \(windowMinutes) minutes."
         }

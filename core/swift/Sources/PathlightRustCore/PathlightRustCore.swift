@@ -4086,6 +4086,17 @@ public func activityAnomalies(events: [ActivityEvent], now: Date) -> [Anomaly]  
 })
 }
 /**
+ * How many removed items make a deletion "many files", for a host whose
+ * message has to tell that apart from one large file crossing the byte line.
+ */
+public func activityAnomalyRemovedItems() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_activity_anomaly_removed_items(uniffiCallStatus
+    )
+})
+}
+/**
  * The window, for a host whose message has to say how long "recently" is.
  */
 public func activityAnomalyWindowSecs() -> UInt64  {
@@ -4196,6 +4207,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_activity_anomalies() != 51449) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_activity_anomaly_removed_items() != 62474) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_activity_anomaly_window_secs() != 38083) {

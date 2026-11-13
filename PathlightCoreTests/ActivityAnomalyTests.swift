@@ -37,4 +37,19 @@ struct ActivityAnomalyTests {
         #expect(removal.body.hasPrefix("120 items ("))
         #expect(!removal.body.contains("-"))
     }
+
+    /// The byte threshold alone raises this for one large file, which is
+    /// neither "many files" nor "1 items".
+    @Test("one large deletion is not called many files")
+    func describesOneLargeDeletion() {
+        let removal = ActivityAnomaly(
+            kind: .massDeletion,
+            rootPath: root,
+            bytes: 1_200_000_000,
+            itemCount: 1,
+            windowMinutes: 10
+        )
+        #expect(removal.title == "Large deletion in Documents")
+        #expect(removal.body.hasPrefix("1 item ("))
+    }
 }
