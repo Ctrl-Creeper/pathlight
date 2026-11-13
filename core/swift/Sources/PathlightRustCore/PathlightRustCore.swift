@@ -1666,6 +1666,264 @@ public func FfiConverterTypeLegacyKeys_lower(_ value: LegacyKeys) -> UInt64 {
 
 
 /**
+ * Remembers the last known size of each path so deletions can be attributed.
+ *
+ * Every entry is namespaced by a `scope`. Two watches over the same file — a
+ * whole-disk watch and a folder watch, or a live watch and a background one —
+ * are independent observers and each needs its own baseline. Sharing one entry
+ * lets whichever watch handles an event first record the new size, so the
+ * others measure a delta of zero and their threshold drops the change.
+ *
+ * [`SizeIndex::at`] keeps the baselines between runs. Without that a watch
+ * restarted overnight reports the first change to every file as the whole
+ * file, and a deletion as no bytes at all — the answer this app exists for.
+ */
+public protocol SizeIndexProtocol: AnyObject, Sendable {
+
+    /**
+     * Forgets every baseline, in memory and on disk.
+     */
+    func clear() throws
+
+    /**
+     * [`SizeIndex::flush`], then rewrites the file down to the baselines
+     * still worth keeping.
+     */
+    func compact(encrypt: Bool) throws
+
+    /**
+     * Writes what has been recorded since the last flush, under the storage
+     * lock, sealed when `encrypt`.
+     */
+    func flush(encrypt: Bool) throws
+
+    func knownSize(scope: String, path: String)  -> Int64?
+
+    func recordSize(scope: String, path: String, size: Int64)
+
+    /**
+     * Last known size of a path that just vanished; consumed on use.
+     */
+    func takeSize(scope: String, path: String)  -> Int64?
+
+}
+/**
+ * Remembers the last known size of each path so deletions can be attributed.
+ *
+ * Every entry is namespaced by a `scope`. Two watches over the same file — a
+ * whole-disk watch and a folder watch, or a live watch and a background one —
+ * are independent observers and each needs its own baseline. Sharing one entry
+ * lets whichever watch handles an event first record the new size, so the
+ * others measure a delta of zero and their threshold drops the change.
+ *
+ * [`SizeIndex::at`] keeps the baselines between runs. Without that a watch
+ * restarted overnight reports the first change to every file as the whole
+ * file, and a deletion as no bytes at all — the answer this app exists for.
+ */
+open class SizeIndex: SizeIndexProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_sizeindex(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_sizeindex(handle, $0) }
+    }
+
+
+    /**
+     * Baselines that live only as long as this object.
+     */
+public static func inMemory() -> SizeIndex  {
+    return try!  FfiConverterTypeSizeIndex_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_sizeindex_in_memory(uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Baselines kept in `path`. `key_journal` is the journal whose key seals
+     * them; `compact_at` of zero is the usual line count.
+     */
+public static func `open`(path: String, keyJournal: String, keepDays: UInt32, compactAt: UInt32) -> SizeIndex  {
+    return try!  FfiConverterTypeSizeIndex_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_constructor_sizeindex_open(
+        FfiConverterString.lower(path),
+        FfiConverterString.lower(keyJournal),
+        FfiConverterUInt32.lower(keepDays),
+        FfiConverterUInt32.lower(compactAt),uniffiCallStatus
+    )
+})
+}
+
+
+
+    /**
+     * Forgets every baseline, in memory and on disk.
+     */
+open func clear()throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_clear(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * [`SizeIndex::flush`], then rewrites the file down to the baselines
+     * still worth keeping.
+     */
+open func compact(encrypt: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_compact(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(encrypt),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Writes what has been recorded since the last flush, under the storage
+     * lock, sealed when `encrypt`.
+     */
+open func flush(encrypt: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_flush(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(encrypt),uniffiCallStatus
+    )
+}
+}
+
+open func knownSize(scope: String, path: String) -> Int64?  {
+    return try!  FfiConverterOptionInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_known_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+
+open func recordSize(scope: String, path: String, size: Int64)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_record_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(path),
+        FfiConverterInt64.lower(size),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Last known size of a path that just vanished; consumed on use.
+     */
+open func takeSize(scope: String, path: String) -> Int64?  {
+    return try!  FfiConverterOptionInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_take_size(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSizeIndex: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SizeIndex
+
+    public static func lift(_ handle: UInt64) throws -> SizeIndex {
+        return SizeIndex(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SizeIndex) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SizeIndex {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SizeIndex, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSizeIndex_lift(_ handle: UInt64) throws -> SizeIndex {
+    return try FfiConverterTypeSizeIndex.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSizeIndex_lower(_ value: SizeIndex) -> UInt64 {
+    return FfiConverterTypeSizeIndex.lower(value)
+}
+
+
+
+
+
+
+/**
  * The three size lookups attribution needs, implemented by the host.
  *
  * A shell owns its own size index because that is storage policy, not
@@ -3942,6 +4200,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_activityattributor_process() != 61309) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_clear() != 35802) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_compact() != 52092) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_flush() != 43051) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_known_size() != 7146) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_record_size() != 49784) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_take_size() != 33772) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pathlight_core_checksum_method_sizelookup_size() != 25057) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3988,6 +4264,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_constructor_activityattributor_new() != 8521) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_constructor_sizeindex_in_memory() != 46260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_constructor_sizeindex_open() != 4825) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_constructor_exclusionmatcher_new() != 65460) {
