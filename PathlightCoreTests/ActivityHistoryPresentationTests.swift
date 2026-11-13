@@ -44,6 +44,29 @@ struct ActivityHistoryPresentationTests {
         #expect(presentation.rows.map(\.title) == ["Deleted old.zip", "Created installer.dmg"])
     }
 
+    /// "Biggest first" is the store's order. Sorting the rows again by time
+    /// made the switch choose the rows and then hide that it had.
+    @Test("lists rows in the order the store returned them")
+    func listsRowsInTheOrderTheStoreReturnedThem() {
+        let root = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let snapshot = ActivityHistorySnapshot(
+            rootPath: root,
+            generatedAt: Date(timeIntervalSince1970: 20_000),
+            totalNetByteDelta: 3_072,
+            eventCount: 2,
+            unknownSizeEventCount: 0,
+            buckets: [],
+            recentEvents: [
+                event(.created, root: root, name: "older-and-bigger.dmg", timestamp: 3_600, byteDelta: 2_048),
+                event(.created, root: root, name: "newer-and-smaller.zip", timestamp: 3_900, byteDelta: 1_024)
+            ]
+        )
+
+        let presentation = ActivityHistoryPresentation(snapshot: snapshot)
+
+        #expect(presentation.rows.map(\.title) == ["Created older-and-bigger.dmg", "Created newer-and-smaller.zip"])
+    }
+
     @Test("merges five-minute totals into bars that fit the chart")
     func mergesBucketsToFitTheChart() {
         let buckets = (0..<40).map { index in

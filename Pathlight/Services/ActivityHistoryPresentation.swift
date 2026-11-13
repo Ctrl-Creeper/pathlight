@@ -53,13 +53,10 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
             Self.presentationBucket(for: bucket, maxMagnitude: maxMagnitude)
         }
 
+        // In the order the store returned them: it sorts by what was asked
+        // for, and sorting again here made "Biggest first" choose the rows
+        // and then show them newest first.
         rows = snapshot.recentEvents
-            .sorted { lhs, rhs in
-                if lhs.timestamp == rhs.timestamp {
-                    return lhs.path.path > rhs.path.path
-                }
-                return lhs.timestamp > rhs.timestamp
-            }
             .prefix(eventLimit)
             .map(Self.row)
     }
