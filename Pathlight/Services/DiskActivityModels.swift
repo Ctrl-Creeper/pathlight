@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 
 nonisolated struct DiskActivityChange: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
@@ -186,4 +187,81 @@ nonisolated struct WatchSessionSummary: Equatable, Sendable {
     let netByteDelta: Int64
     let eventCount: Int
     let unknownSizeEventCount: Int
+}
+
+/// The same row as the Rust core holds it. The core owns the journal, so
+/// events cross this seam on every read.
+nonisolated extension DiskActivityEventKind {
+    init(_ kind: EventKind) {
+        self = switch kind {
+        case .created: .created
+        case .modified: .modified
+        case .deleted: .deleted
+        case .moved: .moved
+        case .aggregate: .aggregate
+        }
+    }
+
+    var core: EventKind {
+        switch self {
+        case .created: .created
+        case .modified: .modified
+        case .deleted: .deleted
+        case .moved: .moved
+        case .aggregate: .aggregate
+        }
+    }
+}
+
+nonisolated extension DiskActivityEventConfidence {
+    init(_ confidence: Confidence) {
+        self = switch confidence {
+        case .confirmed: .confirmed
+        case .estimated: .estimated
+        case .unknown: .unknown
+        }
+    }
+
+    var core: Confidence {
+        switch self {
+        case .confirmed: .confirmed
+        case .estimated: .estimated
+        case .unknown: .unknown
+        }
+    }
+}
+
+nonisolated extension DiskActivityEvent {
+    init(_ event: ActivityEvent) {
+        self.init(
+            kind: DiskActivityEventKind(event.kind),
+            // A grouped row points at the root itself.
+            path: URL(
+                filePath: event.path,
+                directoryHint: event.kind == .aggregate ? .isDirectory : .inferFromPath
+            ),
+            // A root is a folder, and the journal writes it as one.
+            rootPath: URL(filePath: event.rootPath, directoryHint: .isDirectory),
+            timestamp: event.timestamp,
+            byteDelta: event.byteDelta,
+            confidence: DiskActivityEventConfidence(event.confidence),
+            previousPath: event.previousPath.map { URL(filePath: $0) },
+            affectedItemCount: Int(event.affectedItemCount),
+            processName: event.processName
+        )
+    }
+
+    var coreEvent: ActivityEvent {
+        ActivityEvent(
+            kind: kind.core,
+            path: path.path,
+            rootPath: rootPath.path,
+            timestamp: timestamp,
+            byteDelta: byteDelta,
+            confidence: confidence.core,
+            previousPath: previousPath?.path,
+            affectedItemCount: UInt32(clamping: affectedItemCount),
+            processName: processName
+        )
+    }
 }

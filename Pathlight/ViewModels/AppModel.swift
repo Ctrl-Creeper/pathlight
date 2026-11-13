@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import PathlightRustCore
 import os
 
 /// Central state for folder monitoring: live (short-term) watches, persisted
@@ -1061,7 +1062,7 @@ final class AppModel: ObservableObject {
     }
 
     func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
-        let patterns = dependencies.normalizedExclusionPatterns(patterns)
+        let patterns = normalizedExclusionPatterns(patterns: patterns)
         editOptions(rootPath: rootPath) { options in
             options.exclusionPatterns = patterns
         }
@@ -1082,7 +1083,7 @@ final class AppModel: ObservableObject {
         maximumFileBytes: Int64?,
         rootPath: URL
     ) {
-        let patterns = dependencies.normalizedExclusionPatterns(patterns)
+        let patterns = normalizedExclusionPatterns(patterns: patterns)
         editOptions(rootPath: rootPath) { options in
             options.exclusionPatterns = patterns
             options.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)

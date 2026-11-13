@@ -56,7 +56,6 @@ struct PathlightApp: App {
             activityExclusion: { patterns, rootPath in
                 RustActivityExclusion(patterns: patterns, rootPath: rootPath)
             },
-            normalizedExclusionPatterns: RustActivityExclusion.normalized,
             activityAnomalies: RustActivityAnomalies.anomalies(in:rootPath:now:),
             activityStorageCryptor: RustActivityStorageCryptor.live
         )

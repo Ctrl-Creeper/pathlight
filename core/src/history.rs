@@ -2,7 +2,7 @@
 //! Port of Swift's `ActivityHistoryService`.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::attribution::unix_seconds;
@@ -17,6 +17,13 @@ pub struct HistoryBucket {
     pub unknown_size_event_count: u32,
 }
 
+/// What one direct child of the root accounts for.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct ChildTotal {
+    pub byte_delta: i64,
+    pub event_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct HistorySnapshot {
     pub root_path: String,
@@ -29,6 +36,12 @@ pub struct HistorySnapshot {
     pub recent_events: Vec<ActivityEvent>,
     /// The totals above cover more rows than `recent_events` lists.
     pub is_truncated: bool,
+    /// When the folder last changed, whatever `query` narrowed the list to: a
+    /// search or a second page must not make a folder look quieter than it was.
+    pub latest_event_at: Option<SystemTime>,
+    /// Matched rows by the root's direct child they happened under. Grouped
+    /// rows are left out: they no longer say which child they were.
+    pub child_totals: HashMap<String, ChildTotal>,
 }
 
 /// What a person narrowed the history to.
@@ -104,6 +117,9 @@ pub struct Builder<'a> {
     matched: usize,
     total_net_byte_delta: i64,
     unknown: usize,
+    latest: Option<SystemTime>,
+    root_prefix: String,
+    child_totals: HashMap<String, ChildTotal>,
 }
 
 impl<'a> Builder<'a> {
@@ -126,11 +142,20 @@ impl<'a> Builder<'a> {
             matched: 0,
             total_net_byte_delta: 0,
             unknown: 0,
+            latest: None,
+            root_prefix: format!(
+                "{}/",
+                crate::paths::normalize(root_path).trim_end_matches('/')
+            ),
+            child_totals: HashMap::new(),
         }
     }
 
     /// One row of the journal, already filtered to this root.
     pub fn push(&mut self, event: ActivityEvent) {
+        if self.latest.is_none_or(|latest| event.timestamp > latest) {
+            self.latest = Some(event.timestamp);
+        }
         if !self.query.matches(&event) {
             return;
         }
@@ -152,6 +177,18 @@ impl<'a> Builder<'a> {
             None => {
                 self.unknown += 1;
                 bucket.unknown_size_event_count += 1;
+            }
+        }
+
+        if event.kind != EventKind::Aggregate {
+            let path = crate::paths::normalize(&event.path);
+            let child = path
+                .strip_prefix(&self.root_prefix)
+                .and_then(|rest| rest.split(['/', '\\']).find(|part| !part.is_empty()));
+            if let Some(child) = child {
+                let total = self.child_totals.entry(child.to_owned()).or_default();
+                total.byte_delta += event.byte_delta.unwrap_or(0);
+                total.event_count += 1;
             }
         }
 
@@ -187,6 +224,8 @@ impl<'a> Builder<'a> {
             unknown_size_event_count: self.unknown as u32,
             buckets: self.buckets.into_values().collect(),
             is_truncated: self.matched > self.wanted,
+            latest_event_at: self.latest,
+            child_totals: self.child_totals,
             recent_events: self
                 .page
                 .into_iter()
@@ -216,4 +255,25 @@ pub fn build_history(
         builder.push(event);
     }
     builder.finish()
+}
+
+/// [`build_history`] across the FFI, for a host holding rows that are not in
+/// a journal file.
+#[uniffi::export]
+pub fn history_of_events(
+    root_path: String,
+    events: Vec<ActivityEvent>,
+    bucket_interval_secs: u64,
+    recent_limit: u32,
+    query: Query,
+    generated_at: SystemTime,
+) -> HistorySnapshot {
+    build_history(
+        &root_path,
+        events,
+        bucket_interval_secs,
+        recent_limit,
+        &query,
+        generated_at,
+    )
 }
