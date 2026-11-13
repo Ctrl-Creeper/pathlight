@@ -1152,9 +1152,22 @@ public func FfiConverterTypeExclusionMatcher_lower(_ value: ExclusionMatcher) ->
 public protocol JournalProtocol: AnyObject, Sendable {
 
     /**
-     * Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
+     * Appends events as one line each, returning once they are on disk.
+     * Creates the directory (0700) and file (0600) as needed. An error other
+     * than [`CoreError::CommitStateUnknown`] left the journal as it was.
      */
     func append(events: [ActivityEvent]) throws
+
+    /**
+     * [`Journal::append`] holding the storage lock, for a host that does not
+     * go through [`crate::store::Storage`].
+     */
+    func appendLocked(events: [ActivityEvent]) throws
+
+    /**
+     * [`Journal::forget_root`] holding the storage lock.
+     */
+    func forgetRootLocked(rootPath: String) throws  -> UInt64
 
     /**
      * Newest first, then path descending, limited — the same order Swift returns.
@@ -1186,6 +1199,11 @@ public protocol JournalProtocol: AnyObject, Sendable {
      * detail expires, matching the macOS host.
      */
     func trim(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64) throws  -> UInt64
+
+    /**
+     * [`Journal::trim`] holding the storage lock, against the caller's clock.
+     */
+    func trimLocked(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64, now: Date) throws  -> TrimOutcome
 
 }
 open class Journal: JournalProtocol, @unchecked Sendable {
@@ -1277,7 +1295,9 @@ public static func withLegacyKeys(path: String, encrypt: Bool, keys: LegacyKeys)
 
 
     /**
-     * Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
+     * Appends events as one line each, returning once they are on disk.
+     * Creates the directory (0700) and file (0600) as needed. An error other
+     * than [`CoreError::CommitStateUnknown`] left the journal as it was.
      */
 open func append(events: [ActivityEvent])throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
@@ -1286,6 +1306,32 @@ open func append(events: [ActivityEvent])throws   {try rustCallWithError(FfiConv
         FfiConverterSequenceTypeActivityEvent.lower(events),uniffiCallStatus
     )
 }
+}
+
+    /**
+     * [`Journal::append`] holding the storage lock, for a host that does not
+     * go through [`crate::store::Storage`].
+     */
+open func appendLocked(events: [ActivityEvent])throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_journal_append_locked(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeActivityEvent.lower(events),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * [`Journal::forget_root`] holding the storage lock.
+     */
+open func forgetRootLocked(rootPath: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_journal_forget_root_locked(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(rootPath),uniffiCallStatus
+    )
+})
 }
 
     /**
@@ -1345,6 +1391,22 @@ open func trim(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64)
         FfiConverterUInt32.lower(retentionDays),
         FfiConverterUInt32.lower(aggregateDays),
         FfiConverterUInt64.lower(limitBytes),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * [`Journal::trim`] holding the storage lock, against the caller's clock.
+     */
+open func trimLocked(retentionDays: UInt32, aggregateDays: UInt32, limitBytes: UInt64, now: Date)throws  -> TrimOutcome  {
+    return try  FfiConverterTypeTrimOutcome_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_journal_trim_locked(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(retentionDays),
+        FfiConverterUInt32.lower(aggregateDays),
+        FfiConverterUInt64.lower(limitBytes),
+        FfiConverterTimestamp.lower(now),uniffiCallStatus
     )
 })
 }
@@ -2814,6 +2876,79 @@ public func FfiConverterTypeQuery_lower(_ value: Query) -> RustBuffer {
 }
 
 
+/**
+ * What a trim left behind.
+ */
+public struct TrimOutcome: Equatable, Hashable {
+    /**
+     * How many rows went.
+     */
+    public var dropped: UInt64
+    /**
+     * The oldest row it could date and kept, grouped rows included. A host
+     * that trims often can tell from this that nothing is due yet without
+     * reading the journal again. `None` when no row was dated.
+     */
+    public var oldestKept: Date?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * How many rows went.
+         */dropped: UInt64,
+        /**
+         * The oldest row it could date and kept, grouped rows included. A host
+         * that trims often can tell from this that nothing is due yet without
+         * reading the journal again. `None` when no row was dated.
+         */oldestKept: Date?) {
+        self.dropped = dropped
+        self.oldestKept = oldestKept
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TrimOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrimOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrimOutcome {
+        return
+            try TrimOutcome(
+                dropped: FfiConverterUInt64.read(from: &buf),
+                oldestKept: FfiConverterOptionTimestamp.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrimOutcome, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.dropped, into: &buf)
+        FfiConverterOptionTimestamp.write(value.oldestKept, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrimOutcome_lift(_ buf: RustBuffer) throws -> TrimOutcome {
+    return try FfiConverterTypeTrimOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrimOutcome_lower(_ value: TrimOutcome) -> RustBuffer {
+    return FfiConverterTypeTrimOutcome.lower(value)
+}
+
+
 
 public enum AnomalyKind: Equatable, Hashable {
 
@@ -3066,6 +3201,11 @@ enum CoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     )
     case Watch(message: String
     )
+    /**
+     * A failed append could not be rolled back, so part of the batch may be
+     * on disk. Retrying into the same journal could record it twice.
+     */
+    case CommitStateUnknown
 
 
 
@@ -3104,6 +3244,7 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
         case 3: return .Watch(
             message: try FfiConverterString.read(from: &buf)
             )
+        case 4: return .CommitStateUnknown
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3129,6 +3270,10 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
         case let .Watch(message):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(message, into: &buf)
+
+
+        case .CommitStateUnknown:
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -3812,7 +3957,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pathlight_core_checksum_method_exclusionmatcher_is_empty() != 64758) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pathlight_core_checksum_method_journal_append() != 25315) {
+    if (uniffi_pathlight_core_checksum_method_journal_append() != 12244) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_journal_append_locked() != 44699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_journal_forget_root_locked() != 55033) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_journal_load() != 33495) {
@@ -3822,6 +3973,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_journal_trim() != 8913) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_journal_trim_locked() != 53641) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_legacykeys_keys() != 1915) {

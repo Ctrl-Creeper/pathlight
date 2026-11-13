@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -63,7 +63,9 @@ impl Journal {
         })
     }
 
-    /// Appends events as one line each. Creates the directory (0700) and file (0600) as needed.
+    /// Appends events as one line each, returning once they are on disk.
+    /// Creates the directory (0700) and file (0600) as needed. An error other
+    /// than [`CoreError::CommitStateUnknown`] left the journal as it was.
     pub fn append(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
         if events.is_empty() {
             return Ok(());
@@ -92,10 +94,23 @@ impl Journal {
 
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)?;
         set_permissions(&self.path, 0o600)?;
-        file.write_all(payload.as_bytes())?;
+        // Durable or not there at all: a caller advances its cursor past this
+        // batch when this returns, so a batch that is half on disk has to be
+        // taken back off before the error is reported.
+        let start = recover_tail(&mut file)?;
+        let written = file
+            .write_all(payload.as_bytes())
+            .and_then(|()| file.sync_all());
+        if let Err(error) = written {
+            return match file.set_len(start).and_then(|()| file.sync_all()) {
+                Ok(()) => Err(error.into()),
+                Err(_) => Err(CoreError::CommitStateUnknown),
+            };
+        }
         Ok(())
     }
 
@@ -121,10 +136,60 @@ impl Journal {
         aggregate_days: u32,
         limit_bytes: u64,
     ) -> Result<u64, CoreError> {
+        self.trim_at(
+            retention_days,
+            aggregate_days,
+            limit_bytes,
+            SystemTime::now(),
+        )
+        .map(|outcome| outcome.dropped)
+    }
+
+    /// [`Journal::append`] holding the storage lock, for a host that does not
+    /// go through [`crate::store::Storage`].
+    pub fn append_locked(&self, events: Vec<ActivityEvent>) -> Result<(), CoreError> {
+        let _guard = self.lock()?;
+        self.append(events)
+    }
+
+    /// [`Journal::trim`] holding the storage lock, against the caller's clock.
+    pub fn trim_locked(
+        &self,
+        retention_days: u32,
+        aggregate_days: u32,
+        limit_bytes: u64,
+        now: SystemTime,
+    ) -> Result<TrimOutcome, CoreError> {
+        let _guard = self.lock()?;
+        self.trim_at(retention_days, aggregate_days, limit_bytes, now)
+    }
+
+    /// [`Journal::forget_root`] holding the storage lock.
+    pub fn forget_root_locked(&self, root_path: String) -> Result<u64, CoreError> {
+        let _guard = self.lock()?;
+        self.forget_root(&root_path)
+    }
+}
+
+impl Journal {
+    fn lock(&self) -> std::io::Result<crate::store::StorageLock> {
+        crate::store::lock_directory(self.path.parent().unwrap_or(Path::new(".")))
+    }
+
+    fn trim_at(
+        &self,
+        retention_days: u32,
+        aggregate_days: u32,
+        limit_bytes: u64,
+        now: SystemTime,
+    ) -> Result<TrimOutcome, CoreError> {
+        let mut outcome = TrimOutcome {
+            dropped: 0,
+            oldest_kept: None,
+        };
         if (retention_days == 0 && aggregate_days == 0 && limit_bytes == 0) || !self.path.exists() {
-            return Ok(0);
+            return Ok(outcome);
         }
-        let now = SystemTime::now();
         let cutoff = |days: u32| {
             (days > 0)
                 .then(|| now.checked_sub(Duration::from_secs(u64::from(days) * 86_400)))
@@ -140,6 +205,19 @@ impl Journal {
         };
         let ages = retention_days > 0 || aggregate_days > 0;
         let key = crate::crypt::key(&self.path);
+        let mut legacy = None;
+        // Opened only when a row has to be dated: a cap alone is positional.
+        let mut verdict = |line: &str| {
+            let json = ages
+                .then(|| self.open_line(line, key.as_ref(), &mut legacy))
+                .flatten();
+            judge(json, detailed, aggregate)
+        };
+        let mut oldest = |timestamp: SystemTime| {
+            if outcome.oldest_kept.is_none_or(|kept| timestamp < kept) {
+                outcome.oldest_kept = Some(timestamp);
+            }
+        };
 
         // Two passes over the file rather than one pass holding it: this runs
         // hourly behind every watch, and the cap it enforces is a gigabyte by
@@ -155,10 +233,11 @@ impl Journal {
                 continue;
             }
             total += 1;
-            match judge(&line, key.as_ref(), ages, detailed, aggregate) {
-                Verdict::Keep => {
+            match verdict(&line) {
+                Verdict::Keep(timestamp) => {
                     kept += 1;
                     kept_bytes += line.len() as u64 + 1;
+                    timestamp.into_iter().for_each(&mut oldest);
                 }
                 Verdict::Roll(event) => roll_up(&mut rollups, &event),
                 Verdict::Drop => {}
@@ -167,6 +246,9 @@ impl Journal {
 
         let mut grouped: Vec<((String, u64), ActivityEvent)> = rollups.into_iter().collect();
         grouped.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+        grouped
+            .iter()
+            .for_each(|(_, event)| oldest(event.timestamp));
         let rolled = grouped
             .iter()
             .map(|(_, event)| self.encoded_line(event))
@@ -180,7 +262,7 @@ impl Journal {
             limit => kept_bytes.saturating_sub(limit),
         };
         if kept == total && rolled.is_empty() && over == 0 {
-            return Ok(0);
+            return Ok(outcome);
         }
 
         // Written beside the journal and renamed over it, so a crash halfway
@@ -204,10 +286,7 @@ impl Journal {
             if line.is_empty() {
                 continue;
             }
-            if matches!(
-                judge(&line, key.as_ref(), ages, detailed, aggregate),
-                Verdict::Keep
-            ) {
+            if matches!(verdict(&line), Verdict::Keep(_)) {
                 emit(&line)?;
             }
         }
@@ -221,9 +300,13 @@ impl Journal {
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, &self.path)?;
-        Ok(total.saturating_sub(written))
+        outcome.dropped = total.saturating_sub(written);
+        Ok(outcome)
     }
+}
 
+#[uniffi::export]
+impl Journal {
     /// Newest first, then path descending, limited — the same order Swift returns.
     pub fn load(&self, root_path: String, limit: u32) -> Result<Vec<ActivityEvent>, CoreError> {
         if limit == 0 || !self.path.exists() {
@@ -341,12 +424,14 @@ impl Journal {
         let mut file = std::io::BufWriter::new(fs::File::create(&temporary)?);
         set_permissions(&temporary, 0o600)?;
         let mut dropped = 0u64;
+        let mut legacy = None;
         for line in self.lines()? {
             let line = line?;
             if line.is_empty() {
                 continue;
             }
-            let theirs = readable(&line, key.as_ref())
+            let theirs = self
+                .open_line(&line, key.as_ref(), &mut legacy)
                 .and_then(|json| ActivityEvent::from_json_line(&json).ok())
                 .is_some_and(|event| crate::paths::normalize(&event.root_path) == root);
             if theirs {
@@ -378,6 +463,47 @@ impl Journal {
     }
 }
 
+/// What a trim left behind.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TrimOutcome {
+    /// How many rows went.
+    pub dropped: u64,
+    /// The oldest row it could date and kept, grouped rows included. A host
+    /// that trims often can tell from this that nothing is due yet without
+    /// reading the journal again. `None` when no row was dated.
+    pub oldest_kept: Option<SystemTime>,
+}
+
+/// Where the last complete row ends, after cutting off an unterminated tail
+/// a crashed append left. That batch was never acknowledged, so whoever wrote
+/// it replays it.
+fn recover_tail(file: &mut fs::File) -> std::io::Result<u64> {
+    let end = file.seek(SeekFrom::End(0))?;
+    if end == 0 {
+        return Ok(0);
+    }
+    let mut block = vec![0u8; 64 * 1024];
+    let mut search_end = end;
+    while search_end > 0 {
+        let start = search_end.saturating_sub(block.len() as u64);
+        let chunk = &mut block[..(search_end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(chunk)?;
+        if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            let complete = start + newline as u64 + 1;
+            if complete < end {
+                file.set_len(complete)?;
+                file.sync_all()?;
+            }
+            return Ok(complete);
+        }
+        search_end = start;
+    }
+    file.set_len(0)?;
+    file.sync_all()?;
+    Ok(0)
+}
+
 /// One line for a reader. Bytes that are not text are a damaged row, not a
 /// damaged journal: the rows around them are still somebody's history.
 fn text(line: std::io::Result<String>) -> Result<Option<String>, CoreError> {
@@ -391,8 +517,9 @@ fn text(line: std::io::Result<String>) -> Result<Option<String>, CoreError> {
 /// What the retention windows say about one line. Trim asks twice — once to
 /// size the result, once to write it — so the rule lives in one place.
 enum Verdict {
-    /// Too new to age out, or a row this build cannot read.
-    Keep,
+    /// Too new to age out, or a row this build cannot read. The row's time
+    /// when it could be read.
+    Keep(Option<SystemTime>),
     /// Past its detail but still inside the grouped window.
     Roll(ActivityEvent),
     /// Past every window.
@@ -400,30 +527,24 @@ enum Verdict {
 }
 
 fn judge(
-    line: &str,
-    key: Option<&[u8; 32]>,
-    ages: bool,
+    json: Option<String>,
     detailed: Option<SystemTime>,
     aggregate: Option<SystemTime>,
 ) -> Verdict {
-    if !ages {
-        return Verdict::Keep;
-    }
-    let Some(event) =
-        readable(line, key).and_then(|json| ActivityEvent::from_json_line(&json).ok())
-    else {
-        // A row this build cannot read is not aged out on a guess.
-        return Verdict::Keep;
+    let Some(event) = json.and_then(|json| ActivityEvent::from_json_line(&json).ok()) else {
+        // A row this build cannot read, or one nothing asked to date, is not
+        // aged out on a guess.
+        return Verdict::Keep(None);
     };
     let inside_groups = aggregate.is_none_or(|cutoff| event.timestamp >= cutoff);
     if event.kind == EventKind::Aggregate {
         return match inside_groups {
-            true => Verdict::Keep,
+            true => Verdict::Keep(Some(event.timestamp)),
             false => Verdict::Drop,
         };
     }
     if detailed.is_none_or(|cutoff| event.timestamp >= cutoff) {
-        return Verdict::Keep;
+        return Verdict::Keep(Some(event.timestamp));
     }
     match inside_groups {
         true => Verdict::Roll(event),
