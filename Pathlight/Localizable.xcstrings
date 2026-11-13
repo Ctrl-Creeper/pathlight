@@ -969,6 +969,16 @@
         }
       }
     },
+    "Folder baselines and diary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件夹基线和监控日志"
+          }
+        }
+      }
+    },
     "This removes locally stored activity history, the size attribution index and the watch diary on this Mac.": {
       "localizations": {
         "zh-Hans": {

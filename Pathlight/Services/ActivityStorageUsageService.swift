@@ -5,6 +5,10 @@ nonisolated struct ActivityStorageUsageSnapshot: Equatable, Sendable {
     let sizeIndexJournalBytes: Int64
     let eventEntryCount: Int
     let sizeIndexEntryCount: Int
+    /// The walked tables and the watch diary: what a reset deletes besides the
+    /// two journals. Counted so the total is what is really kept here, and so
+    /// a reset is still offered when these are all that is left.
+    var otherRecordBytes: Int64 = 0
 
     static let empty = ActivityStorageUsageSnapshot(
         eventJournalBytes: 0,
@@ -14,7 +18,7 @@ nonisolated struct ActivityStorageUsageSnapshot: Equatable, Sendable {
     )
 
     var totalBytes: Int64 {
-        eventJournalBytes + sizeIndexJournalBytes
+        eventJournalBytes + sizeIndexJournalBytes + otherRecordBytes
     }
 }
 
@@ -41,7 +45,11 @@ nonisolated struct ActivityStorageUsageService: Sendable {
             eventJournalBytes: fileSize(at: eventJournalURL),
             sizeIndexJournalBytes: fileSize(at: sizeIndexJournalURL),
             eventEntryCount: lineCount(at: eventJournalURL),
-            sizeIndexEntryCount: lineCount(at: sizeIndexJournalURL)
+            sizeIndexEntryCount: lineCount(at: sizeIndexJournalURL),
+            otherRecordBytes: AppDependencies
+                .recordsBesideTheJournal(in: eventJournalURL.deletingLastPathComponent())
+                .filter { $0.standardizedFileURL != sizeIndexJournalURL.standardizedFileURL }
+                .reduce(0) { $0 + fileSize(at: $1) }
         )
     }
 

@@ -11,6 +11,10 @@ struct ActivityStorageUsageServiceTests {
         let sizeIndexURL = directoryURL.appending(path: "activity-size-index.jsonl")
         try Data("event-one\nevent-two\n".utf8).write(to: eventsURL)
         try Data("index-one\n".utf8).write(to: sizeIndexURL)
+        try Data(count: 16).write(to: directoryURL.appending(path: "baseline-sizes-1a2b.bin"))
+        try Data("diary\n".utf8).write(to: directoryURL.appending(path: "pathlight.log"))
+        // Not a record: the key is kept through a reset and is not counted.
+        try Data(count: 32).write(to: directoryURL.appending(path: "activity-events.key"))
         let service = ActivityStorageUsageService(
             eventJournalURL: eventsURL,
             sizeIndexJournalURL: sizeIndexURL
@@ -20,7 +24,8 @@ struct ActivityStorageUsageServiceTests {
 
         #expect(usage.eventJournalBytes == 20)
         #expect(usage.sizeIndexJournalBytes == 10)
-        #expect(usage.totalBytes == 30)
+        #expect(usage.otherRecordBytes == 22)
+        #expect(usage.totalBytes == 52)
         #expect(usage.eventEntryCount == 2)
         #expect(usage.sizeIndexEntryCount == 1)
     }
