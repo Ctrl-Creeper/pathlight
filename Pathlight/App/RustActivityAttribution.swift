@@ -27,7 +27,7 @@ nonisolated final class RustActivityAttribution: ActivityAttributing, @unchecked
     func process(_ changes: [DiskActivityChange]) -> [DiskActivityEvent] {
         attributor
             .process(changes: changes.map(Self.change(for:)))
-            .map(Self.event(for:))
+            .map(DiskActivityEvent.init)
     }
 
     private static func change(for change: DiskActivityChange) -> Change {
@@ -45,32 +45,6 @@ nonisolated final class RustActivityAttribution: ActivityAttributing, @unchecked
             // FSEvents never says who wrote; a privileged Linux watch does,
             // and this bridge is macOS-only.
             processName: nil
-        )
-    }
-
-    private static func event(for event: ActivityEvent) -> DiskActivityEvent {
-        let kind: DiskActivityEventKind = switch event.kind {
-        case .created: .created
-        case .modified: .modified
-        case .deleted: .deleted
-        case .moved: .moved
-        case .aggregate: .aggregate
-        }
-        let confidence: DiskActivityEventConfidence = switch event.confidence {
-        case .confirmed: .confirmed
-        case .estimated: .estimated
-        case .unknown: .unknown
-        }
-        return DiskActivityEvent(
-            kind: kind,
-            path: URL(filePath: event.path),
-            rootPath: URL(filePath: event.rootPath),
-            timestamp: event.timestamp,
-            byteDelta: event.byteDelta,
-            confidence: confidence,
-            previousPath: event.previousPath.map { URL(filePath: $0) },
-            affectedItemCount: Int(event.affectedItemCount),
-            processName: event.processName
         )
     }
 }

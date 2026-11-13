@@ -42,8 +42,8 @@ pub use anomaly::{Anomaly, AnomalyKind};
 pub use attribution::{ActivityAttributor, AggregationOptions, Attributor, SizeIndex, SizeLookup};
 pub use event::{ActivityEvent, Confidence, EventKind};
 pub use exclusion::ExclusionFilter;
-pub use history::{HistoryBucket, HistorySnapshot};
-pub use journal::Journal;
+pub use history::{ChildTotal, HistoryBucket, HistorySnapshot};
+pub use journal::{Journal, LegacyKeys, TrimOutcome};
 pub use monitor::{
     bounded_monitor_latency_ms, watcher_capabilities, ActivityListener, Capabilities, Change,
     ChangeKind, StreamEvent, Watcher, MAX_MONITOR_LATENCY_MS, MIN_MONITOR_LATENCY_MS,
@@ -57,6 +57,10 @@ pub enum CoreError {
     Encoding { message: String },
     #[error("watch error: {message}")]
     Watch { message: String },
+    /// A failed append could not be rolled back, so part of the batch may be
+    /// on disk. Retrying into the same journal could record it twice.
+    #[error("the journal may hold part of a failed append")]
+    CommitStateUnknown,
 }
 
 impl From<std::io::Error> for CoreError {

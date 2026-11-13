@@ -112,6 +112,13 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: core
+      # The package links the Rust core, so its xcframework comes first.
+      - name: Build xcframework
+        run: core/scripts/build-xcframework.sh debug
       - run: swift test
 
   macos-app:

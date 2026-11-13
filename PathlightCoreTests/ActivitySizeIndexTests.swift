@@ -106,6 +106,24 @@ struct ActivitySizeIndexTests {
         #expect(reopened.knownSize(for: secondFile) == 2_048)
     }
 
+    @Test("forgetting a watch removes its baselines from disk and leaves the others")
+    func forgettingAWatchRemovesItsBaselines() throws {
+        let journalURL = makeTemporaryJournalURL()
+        let gone = URL(filePath: "/Users/example/Downloads/secret.iso")
+        let kept = URL(filePath: "/Users/example/Desktop/report.pdf")
+        let index = ActivitySizeIndex(journalURL: journalURL)
+        index.recordKnownSize(1, for: gone, scope: "long-term:/Users/example/Downloads")
+        index.recordKnownSize(2, for: kept, scope: "long-term:/Users/example/Desktop")
+        index.flushPendingJournalWrites()
+
+        index.forget(scope: "long-term:/Users/example/Downloads")
+
+        #expect(!String(decoding: try Data(contentsOf: journalURL), as: UTF8.self).contains("secret.iso"))
+        let reopened = ActivitySizeIndex(journalURL: journalURL)
+        #expect(reopened.knownSize(for: gone, scope: "long-term:/Users/example/Downloads") == nil)
+        #expect(reopened.knownSize(for: kept, scope: "long-term:/Users/example/Desktop") == 2)
+    }
+
     @Test("encrypted journal hides paths and uses owner-only permissions")
     func encryptedJournalHidesPathsAndUsesOwnerOnlyPermissions() throws {
         let journalURL = makeTemporaryJournalURL()

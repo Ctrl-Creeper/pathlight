@@ -9,9 +9,7 @@ nonisolated struct MonitoringPreset: Identifiable, Equatable, Sendable {
 
     var options: LongTermWatchTargetOptions {
         var options = LongTermWatchTargetOptions.default
-        options.exclusionPatterns = ActivityExclusionPatterns.normalized(
-            ActivityExclusionPatterns.defaults + extraExclusionPatterns
-        )
+        options.exclusionPatterns = ActivityExclusionPatterns.defaults + extraExclusionPatterns
         return options
     }
 

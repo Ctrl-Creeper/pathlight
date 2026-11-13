@@ -6,7 +6,8 @@ struct ActivityDashboardActions {
     let refreshActivityDashboardHistories: ([URL]) -> Void
     let narrowActivityHistory: (ActivityHistoryQuery, URL) -> Void
     let setLongTermWatchEnabled: (Bool, URL) -> Void
-    let removeLongTermWatchTarget: (URL) -> Void
+    /// The folder, and whether what was recorded for it goes too.
+    let removeLongTermWatchTarget: (URL, Bool) -> Void
     let revealInFinder: (URL) -> Void
     let clearHistoryGap: (URL) -> Void
     let setGrowthAlertThreshold: (Int64?, URL) -> Void
@@ -35,6 +36,9 @@ struct ActivityDashboardView: View {
     @State private var selectedTargetID: String?
     @State private var presets = MonitoringPreset.available()
     @State private var monitoringSetup: MonitoringSetup?
+    /// The folder whose Remove was pressed, while the user decides what
+    /// happens to its history.
+    @State private var pendingRemoval: URL?
 
     private var untrackedPresets: [MonitoringPreset] {
         let tracked = Set(targets.map(\.id))
@@ -226,7 +230,7 @@ struct ActivityDashboardView: View {
                             actions.revealInFinder(row.rootPath)
                         },
                         onRemove: {
-                            actions.removeLongTermWatchTarget(row.rootPath)
+                            pendingRemoval = row.rootPath
                         },
                         onClearHistoryGap: {
                             actions.clearHistoryGap(row.rootPath)
@@ -247,6 +251,24 @@ struct ActivityDashboardView: View {
             .padding(14)
             .animation(PathlightMotion.state, value: presentation.targetRows.count)
             .animation(PathlightMotion.state, value: showsLaunchAtLoginNudge)
+        }
+        .confirmationDialog(
+            "Remove \(pendingRemoval?.lastPathComponent ?? "this folder")?",
+            isPresented: Binding(
+                get: { pendingRemoval != nil },
+                set: { if !$0 { pendingRemoval = nil } }
+            ),
+            presenting: pendingRemoval
+        ) { rootPath in
+            Button("Keep History") {
+                actions.removeLongTermWatchTarget(rootPath, false)
+            }
+            Button("Delete History", role: .destructive) {
+                actions.removeLongTermWatchTarget(rootPath, true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Pathlight stops watching this folder. Kept history comes back if you add it again; deleted history cannot be recovered. The folder's own files are not touched.")
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }

@@ -97,6 +97,9 @@ struct App {
     uninstall_targets: Vec<PathBuf>,
     /// The subset of those that exist, while the user is being asked.
     uninstall_prompt: Option<Vec<PathBuf>>,
+    /// The folder the user pressed Forget on, while they choose whether its
+    /// history goes with it.
+    forget_prompt: Option<String>,
     /// Set once storage is gone, so nothing writes it back afterwards.
     uninstalled: bool,
     /// Whether new rows are written encrypted, mirrored from storage so the
@@ -176,6 +179,7 @@ impl App {
             notice: None,
             uninstall_targets: uninstall::current_paths().unwrap_or_default(),
             uninstall_prompt: None,
+            forget_prompt: None,
             uninstalled: false,
             tray: None,
             tray_tried: false,
@@ -360,12 +364,19 @@ impl App {
         });
     }
 
-    fn forget(&mut self, root: &str) {
+    fn forget(&mut self, root: &str, delete_history: bool) {
+        // Dropping the session joins its worker, so its last rows are written
+        // before the history is deleted rather than after.
         self.sessions.remove(root);
         if let Some(storage) = self.storage().cloned() {
             match storage.remove_watch(root) {
                 Ok(_) => self.watches = storage.watches(),
                 Err(error) => self.notice = Some(format!("Could not forget that folder: {error}")),
+            }
+            if delete_history {
+                if let Err(error) = storage.forget_watch_records(root) {
+                    self.notice = Some(format!("Could not delete that folder's history: {error}"));
+                }
             }
         }
         if self.selected.as_deref() == Some(root) {
@@ -1075,7 +1086,13 @@ impl App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Forget").clicked() {
+                                    if ui
+                                        .button("Forget")
+                                        .on_hover_text(
+                                            "Stops watching and removes this folder from the list.",
+                                        )
+                                        .clicked()
+                                    {
                                         forget = Some(root.clone());
                                     }
                                     let button =
@@ -1118,8 +1135,8 @@ impl App {
         if let Some(root) = toggle {
             self.toggle(&root);
         }
-        if let Some(root) = forget {
-            self.forget(&root);
+        if forget.is_some() {
+            self.forget_prompt = forget;
         }
     }
 
@@ -1399,6 +1416,41 @@ impl App {
     }
 
     fn notices(&mut self, ctx: &egui::Context) {
+        if let Some(root) = self.forget_prompt.clone() {
+            egui::Modal::new(egui::Id::new("forget")).show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(
+                    egui::RichText::new(format!("Forget {}?", leaf(&root)))
+                        .size(16.0)
+                        .strong(),
+                );
+                ui.add_space(8.0);
+                ui.label("Pathlight stops watching this folder and removes it from the list.");
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Kept history comes back if you add the folder again. Deleted \
+                         history cannot be recovered. The folder's own files are not touched.",
+                    )
+                    .small(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.forget_prompt = None;
+                    }
+                    if ui.button("Keep history").clicked() {
+                        self.forget_prompt = None;
+                        self.forget(&root, false);
+                    }
+                    if ui.button("Delete history").clicked() {
+                        self.forget_prompt = None;
+                        self.forget(&root, true);
+                    }
+                });
+            });
+        }
+
         if let Some(targets) = self.uninstall_prompt.clone() {
             egui::Modal::new(egui::Id::new("uninstall")).show(ctx, |ui| {
                 ui.set_max_width(460.0);
@@ -1694,6 +1746,7 @@ mod tests {
             notice: None,
             uninstall_targets: vec![storage_dir.to_path_buf()],
             uninstall_prompt: None,
+            forget_prompt: None,
             uninstalled: false,
             encrypt: false,
             paused: false,
@@ -1727,6 +1780,50 @@ mod tests {
         harness.run();
         harness.get_by_label("Start monitoring").click();
         harness.step();
+    }
+
+    /// Forget asks first, and the history goes only when the user says so:
+    /// cancelling keeps the folder, "Keep history" keeps the rows.
+    #[test]
+    fn forget_asks_whether_the_history_goes_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let row = |root: &str| ActivityEvent {
+            kind: pathlight_core::EventKind::Modified,
+            path: format!("{root}/a.bin"),
+            root_path: root.to_owned(),
+            timestamp: std::time::SystemTime::now(),
+            byte_delta: Some(1),
+            confidence: pathlight_core::Confidence::Confirmed,
+            previous_path: None,
+            affected_item_count: 1,
+            process_name: None,
+        };
+        for root in ["/kept", "/gone"] {
+            storage.add_watch(root).unwrap();
+        }
+        storage.record(vec![row("/kept"), row("/gone")]).unwrap();
+        let mut harness = harness(app(dir.path(), vec!["/kept".to_owned()]));
+
+        harness.get_by_label("Forget").click();
+        harness.run();
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(storage.watches().len(), 2, "cancelling forgot the folder");
+
+        harness.get_by_label("Forget").click();
+        harness.run();
+        harness.get_by_label("Keep history").click();
+        harness.run();
+        assert_eq!(storage.watches().len(), 1);
+        assert_eq!(storage.recorded().1, 2, "keeping the history deleted it");
+
+        harness.get_by_label("Forget").click();
+        harness.run();
+        harness.get_by_label("Delete history").click();
+        harness.run();
+        assert!(storage.watches().is_empty());
+        assert_eq!(storage.recorded().1, 1, "only /gone's row goes");
     }
 
     /// The interaction the whole program is for, driven through the real

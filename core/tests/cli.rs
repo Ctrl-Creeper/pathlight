@@ -93,6 +93,15 @@ fn a_folder_added_in_the_terminal_is_switched_on_only_when_asked() {
     let removed = run(home.path(), &["watches", "remove", &path]);
     assert!(removed.status.success(), "{}", text(&removed));
     assert!(text(&run(home.path(), &["watches"])).contains("No folders yet"));
+    assert!(text(&removed).contains("kept"), "{}", text(&removed));
+
+    // History kept by that remove can still be deleted afterwards.
+    let deleted = run(
+        home.path(),
+        &["watches", "remove", &path, "--delete-history"],
+    );
+    assert!(deleted.status.success(), "{}", text(&deleted));
+    assert!(text(&deleted).contains("deleted 0"), "{}", text(&deleted));
 
     // A folder that was never added cannot be switched off, and the message
     // says which folder rather than failing silently.

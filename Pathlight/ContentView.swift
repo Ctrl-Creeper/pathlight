@@ -51,7 +51,7 @@ struct ContentView: View {
             refreshActivityDashboardHistories: { appModel.refreshActivityDashboardHistories(rootPaths: $0) },
             narrowActivityHistory: { appModel.narrowActivityHistory($0, rootPath: $1) },
             setLongTermWatchEnabled: { appModel.setLongTermWatchEnabled($0, rootPath: $1) },
-            removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0) },
+            removeLongTermWatchTarget: { appModel.removeLongTermWatchTarget(rootPath: $0, deletingHistory: $1) },
             revealInFinder: { appModel.revealURLInFinder($0) },
             clearHistoryGap: { appModel.clearLongTermWatchHistoryGap(rootPath: $0) },
             setGrowthAlertThreshold: { appModel.setGrowthAlertThreshold($0, rootPath: $1) },

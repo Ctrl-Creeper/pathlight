@@ -317,7 +317,8 @@ Usage: pathlight-monitor <command> [arguments]
   watches add FOLDER      Remember a folder, switched off.
   watches enable FOLDER   Switch a folder on, so `watch` picks it up.
   watches disable FOLDER  Switch it off again.
-  watches remove FOLDER   Forget it. Nothing already recorded is deleted.
+  watches remove FOLDER [--delete-history]
+                          Forget it. Its history is kept unless --delete-history.
   history FOLDER          What the journal holds for a folder. Narrow it with
                           --find TEXT (part of a path), --kind KIND (one of
                           new, changed, deleted, moved, group), --largest
@@ -704,14 +705,36 @@ fn watches(rest: &[OsString]) -> io::Result<()> {
             Ok(())
         }
         "remove" => {
-            let root = one_folder(&rest[1..], "usage: pathlight-monitor watches remove FOLDER")?;
-            if !storage.remove_watch(&root)? {
+            let delete = rest[1..]
+                .iter()
+                .any(|argument| argument == "--delete-history");
+            let folders: Vec<OsString> = rest[1..]
+                .iter()
+                .filter(|argument| *argument != "--delete-history")
+                .cloned()
+                .collect();
+            let root = one_folder(
+                &folders,
+                "usage: pathlight-monitor watches remove FOLDER [--delete-history]",
+            )?;
+            let removed = storage.remove_watch(&root)?;
+            // --delete-history still works on a folder already removed: that
+            // is how history kept by an earlier remove is deleted later.
+            if !removed && !delete {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("{root} is not one of the remembered folders"),
                 ));
             }
-            println!("Forgot {root}. What was recorded for it is still in the journal.");
+            if delete {
+                let rows = storage.forget_watch_records(&root)?;
+                println!("Forgot {root} and deleted {rows} recorded row(s) for it.");
+            } else {
+                println!(
+                    "Forgot {root}. What was recorded for it is kept, and comes back if the \
+                     folder is added again; `watches remove {root} --delete-history` deletes it."
+                );
+            }
             Ok(())
         }
         "enable" | "disable" => {

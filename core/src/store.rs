@@ -499,6 +499,26 @@ impl Storage {
         })
     }
 
+    /// Deletes everything recorded for one folder: its rows and its last
+    /// known state. Returns how many rows went. Asked for on its own, next to
+    /// removing the folder, because a person removing a watch may still want
+    /// what it saw — and one who adds it back should not get it back unasked.
+    pub fn forget_watch_records(&self, path: &str) -> io::Result<u64> {
+        let journal = self.journal_handle();
+        // Read before the lock is taken: both ask the settings, which lock.
+        let index = self.size_index();
+        let encrypt = self.encrypting();
+        let _guard = self.lock()?;
+        let _ = fs::remove_file(crate::baseline::file(self.dir(), path));
+        // The index names the same files the rows did.
+        index
+            .forget_scope_while_locked(path, encrypt)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        journal
+            .forget_root(path)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
     /// Switches one folder on or off, leaving the rest of the list alone.
     /// Unknown paths are added, because a host that can name a folder is a
     /// host the user just asked to watch it.
@@ -1097,6 +1117,59 @@ mod tests {
         assert_eq!(storage.watches().len(), 1);
         // Twice is not an error: nothing recorded is the state it asks for.
         storage.forget_records().unwrap();
+    }
+
+    /// Removing a folder keeps its history unless that is asked for too, and
+    /// then only its: adding it back starts empty, and the folder beside it
+    /// keeps every row.
+    #[test]
+    fn a_removed_watch_keeps_its_records_until_they_are_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::at(dir.path());
+        let row = |root: &str| ActivityEvent {
+            kind: crate::EventKind::Modified,
+            path: format!("{root}/report.bin"),
+            root_path: root.to_owned(),
+            timestamp: std::time::SystemTime::now(),
+            byte_delta: Some(4096),
+            confidence: crate::Confidence::Confirmed,
+            previous_path: None,
+            affected_item_count: 1,
+            process_name: None,
+        };
+        storage.add_watch("/gone").unwrap();
+        storage.add_watch("/kept").unwrap();
+        storage
+            .record(vec![row("/gone"), row("/kept"), row("/gone")])
+            .unwrap();
+        let baseline = crate::baseline::file(storage.dir(), "/gone");
+        fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+        fs::write(&baseline, b"state").unwrap();
+        let index = storage.size_index();
+        index.record("/gone", "/gone/secret.bin", Some(1));
+        index.record("/kept", "/kept/report.bin", Some(2));
+        index.persist().unwrap();
+
+        // Removing the folder alone keeps what it recorded.
+        assert!(storage.remove_watch("/gone").unwrap());
+        assert_eq!(storage.recorded().1, 3);
+        assert!(baseline.exists());
+
+        assert_eq!(storage.forget_watch_records("/gone").unwrap(), 2);
+        assert_eq!(storage.recorded().1, 1);
+        assert!(!baseline.exists());
+        // Its baselines go with it, and not as "remove" lines that still
+        // name the files.
+        let index_text = fs::read_to_string(dir.path().join(SIZE_INDEX_FILE)).unwrap();
+        assert!(!index_text.contains("secret.bin"));
+        assert_eq!(
+            storage.size_index().peek("/kept", "/kept/report.bin"),
+            Some(2)
+        );
+        storage.add_watch("/gone").unwrap();
+        let journal = storage.journal_handle();
+        assert!(journal.load("/gone".to_owned(), 10).unwrap().is_empty());
+        assert_eq!(journal.load("/kept".to_owned(), 10).unwrap().len(), 1);
     }
 
     #[test]

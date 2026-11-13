@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import PathlightRustCore
 import os
 
 /// Central state for folder monitoring: live (short-term) watches, persisted
@@ -177,9 +178,10 @@ final class AppModel: ObservableObject {
             options: configuration.liveOptions,
             monitorLatency: configuration.monitorLatency
         )
-        // Paused refuses the watch and says so in the dashboard; an empty
-        // Live Monitor window on top of that message would hide it.
-        return liveWatchSession != nil
+        // The task, not the session: the first session arrives from the stream
+        // a moment later, and asking for it here answered "no" every time, so
+        // the Live Monitor window never opened on its own.
+        return liveWatchTask != nil
     }
 
     /// The tail of the watch diary, read when somebody asks rather than kept
@@ -452,9 +454,7 @@ final class AppModel: ObservableObject {
         liveWatchBaselineTask?.cancel()
         liveWatchBaselineTask = nil
         if let rootPath = liveWatchSession?.rootPath {
-            dependencies.activityBaselineSizes.forget(
-                scope: ActivitySizeProviders.scope(kind: "live", rootPath: rootPath)
-            )
+            forgetBaselines(scope: ActivitySizeProviders.scope(kind: "live", rootPath: rootPath))
         }
         liveWatchSession = nil
         if let liveWatcherStatusKey {
@@ -991,15 +991,36 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func removeLongTermWatchTarget(rootPath: URL) {
+    /// Removes the folder from the watch list. Its history stays unless
+    /// `deletingHistory`, in which case adding it back starts empty.
+    func removeLongTermWatchTarget(rootPath: URL, deletingHistory: Bool = false) {
         let targetID = rootPath.standardizedFileURL.path
+        if deletingHistory {
+            // Rows still waiting for the journal would land after the delete
+            // below and bring part of the history back.
+            let queued = Set(pendingJournalOrder.filter {
+                pendingJournalEvents[$0]?.rootPath.standardizedFileURL.path == targetID
+            })
+            pendingJournalOrder.removeAll { queued.contains($0) }
+            for id in queued {
+                pendingJournalEvents[id] = nil
+            }
+            pendingJournalRoots.remove(targetID)
+            pendingJournalCheckpoints[targetID] = nil
+        }
         stopLongTermWatch(targetID: targetID)
         longTermWatchRuntimeStatuses.removeValue(forKey: targetID)
-        if let directory = dependencies.activityBaselineSizesDirectory {
-            try? FileManager.default.removeItem(at: ActivityBaselineSizes.fileURL(
-                scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath), in: directory
-            ))
+        if deletingHistory, let store = dependencies.activityEventStore {
+            activityDashboardHistories[targetID] = nil
+            Task {
+                do {
+                    try await store.removeEvents(rootPath: rootPath)
+                } catch {
+                    setMonitoringStatus("Could not delete the history of \(rootPath.path): \(error.localizedDescription)", for: .journal)
+                }
+            }
         }
+        forgetBaselines(scope: ActivitySizeProviders.scope(kind: "long-term", rootPath: rootPath))
         longTermWatchTargets = dependencies.longTermWatchTargets.remove(
             rootPath: rootPath,
             currentTargets: longTermWatchTargets
@@ -1036,8 +1057,9 @@ final class AppModel: ObservableObject {
     }
 
     func setExclusionPatterns(_ patterns: [String], rootPath: URL) {
+        let patterns = normalizedExclusionPatterns(patterns: patterns)
         editOptions(rootPath: rootPath) { options in
-            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.exclusionPatterns = patterns
         }
     }
 
@@ -1056,8 +1078,9 @@ final class AppModel: ObservableObject {
         maximumFileBytes: Int64?,
         rootPath: URL
     ) {
+        let patterns = normalizedExclusionPatterns(patterns: patterns)
         editOptions(rootPath: rootPath) { options in
-            options.exclusionPatterns = ActivityExclusionPatterns.normalized(patterns)
+            options.exclusionPatterns = patterns
             options.minimumRecordedByteDelta = max(minimumRecordedByteDelta, 0)
             options.monitorLatency = MonitoringStartConfiguration
                 .boundedMonitorLatency(monitorLatency)
@@ -1430,6 +1453,19 @@ final class AppModel: ObservableObject {
             // this scan unverified and do not append a guessed correction row.
             // The persisted history-gap checkpoint remains set after this scan.
         }
+    }
+
+    /// Everything kept about what one watch's folder holds: the walked table,
+    /// its file, and the size index's entries. A live session that ended and a
+    /// watch that was removed have no use for them, and they name its files.
+    private func forgetBaselines(scope: String) {
+        dependencies.activityBaselineSizes.forget(scope: scope)
+        if let directory = dependencies.activityBaselineSizesDirectory {
+            try? FileManager.default.removeItem(
+                at: ActivityBaselineSizes.fileURL(scope: scope, in: directory)
+            )
+        }
+        dependencies.forgetActivitySizes(scope)
     }
 
     private func stopLongTermWatch(targetID: LongTermWatchTarget.ID) {

@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 
 nonisolated enum ActivityEventStoreError: Error {
     /// The store could not prove whether part of a failed batch reached disk.
@@ -58,9 +59,14 @@ nonisolated protocol ActivityEventStoring: Sendable {
         eventJournalLimitBytes: Int64,
         now: Date
     ) async throws
+    /// Deletes every row recorded for the root, grouped rows included, so a
+    /// folder added back starts a fresh history. Mirrors `Journal::forget_root`.
+    func removeEvents(rootPath: URL) async throws
 }
 
 extension ActivityEventStoring {
+    func removeEvents(rootPath: URL) async throws {}
+
     /// Stores without their own single-pass reader still answer correctly; they
     /// just pay for materializing every event first.
     func loadEventPage(
@@ -69,26 +75,26 @@ extension ActivityEventStoring {
         bucketInterval: TimeInterval,
         query: ActivityHistoryQuery = .everything
     ) async throws -> ActivityEventPage {
-        var builder = ActivityEventPageBuilder(
-            rootPath: rootPath,
-            limit: limit,
-            bucketInterval: bucketInterval,
-            query: query
+        ActivityEventPage(
+            historyOfEvents(
+                rootPath: rootPath.standardizedFileURL.path,
+                events: try await loadEvents(rootPath: rootPath, limit: .max).map(\.coreEvent),
+                bucketIntervalSecs: UInt64(max(bucketInterval, 1)),
+                recentLimit: UInt32(clamping: max(limit, 0)),
+                query: query.coreQuery,
+                generatedAt: Date()
+            )
         )
-        // Any order will do: the builder sorts the page it kept, so what it was
-        // handed first no longer decides what it lists.
-        for event in try await loadEvents(rootPath: rootPath, limit: .max) {
-            builder.add(event)
-        }
-        return builder.page()
     }
 }
 
+/// The app's journal. The file, its line format, retention and the storage
+/// lock are the Rust core's (`core/src/journal.rs`), shared with the other
+/// hosts; what stays here is what only this app knows: where its key comes
+/// from, whether new rows are sealed, and when a trim is not due yet.
 actor JSONLActivityEventStore: ActivityEventStoring {
     private let journalURL: URL
     private let lineCodec: ActivityStorageLineCodec
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
     private var hasScannedJournal = false
     private var oldestKnownEventTimestamp: Date?
     private var requiresReopenAfterFailedRollback = false
@@ -99,14 +105,6 @@ actor JSONLActivityEventStore: ActivityEventStoring {
     ) {
         self.journalURL = journalURL
         self.lineCodec = lineCodec
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
     }
 
     static func live(
@@ -126,177 +124,69 @@ actor JSONLActivityEventStore: ActivityEventStoring {
             .appending(path: "activity-events.jsonl")
     }
 
-    func append(_ events: [DiskActivityEvent]) async throws {
-        try ActivityStorageFileProtection.withStorageLock(
-            in: journalURL.deletingLastPathComponent()
-        ) {
-            try appendWhileLocked(events)
+    /// The core's journal over this file. Built per call: whether new rows
+    /// are sealed is a preference, and it can change while the app runs.
+    private func journal(encrypting: Bool = false) -> Journal {
+        guard let keys = lineCodec.legacyKeys else {
+            return encrypting
+                ? Journal.encrypting(path: journalURL.path)
+                : Journal(path: journalURL.path)
         }
+        return Journal.withLegacyKeys(path: journalURL.path, encrypt: encrypting, keys: keys)
     }
 
-    private func appendWhileLocked(_ events: [DiskActivityEvent]) throws {
+    /// The journal for a call that may write rows. The key is made ready
+    /// through this app's provider first, because that is the one that adopts
+    /// an older Keychain key instead of minting a second; the core then finds
+    /// the key file already there.
+    private func writingJournal() throws -> Journal {
+        let encrypting = lineCodec.encryptsNewData
+        if encrypting {
+            try lineCodec.prepare()
+        }
+        return journal(encrypting: encrypting)
+    }
+
+    func append(_ events: [DiskActivityEvent]) async throws {
         guard !events.isEmpty else {
             return
         }
         guard !requiresReopenAfterFailedRollback else {
             throw ActivityEventStoreError.commitStateUnknown
         }
-
-        let fileManager = FileManager.default
-        try ActivityStorageFileProtection.createProtectedDirectory(
-            at: journalURL.deletingLastPathComponent()
-        )
-
-        if !fileManager.fileExists(atPath: journalURL.path) {
-            try ActivityStorageFileProtection.ensureProtectedFile(at: journalURL)
-        }
-        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
-
-        let lines = try events
-            .map { event in
-                let data = try encoder.encode(event)
-                return try lineCodec.encode(data)
-            }
-            .joined(separator: "\n")
-        let payload = Data((lines + "\n").utf8)
-
-        let handle = try FileHandle(forUpdating: journalURL)
-        defer {
-            try? handle.close()
-        }
-        let originalOffset = try Self.recoverIncompleteTail(in: handle)
         do {
-            try handle.seek(toOffset: originalOffset)
-            try handle.write(contentsOf: payload)
-            try handle.synchronize()
-        } catch {
-            do {
-                try handle.truncate(atOffset: originalOffset)
-                try handle.synchronize()
-            } catch {
-                requiresReopenAfterFailedRollback = true
-                throw ActivityEventStoreError.commitStateUnknown
-            }
-            throw error
+            try writingJournal().appendLocked(events: events.map(\.coreEvent))
+        } catch CoreError.CommitStateUnknown {
+            requiresReopenAfterFailedRollback = true
+            throw ActivityEventStoreError.commitStateUnknown
         }
         if let minTimestamp = events.map(\.timestamp).min() {
             oldestKnownEventTimestamp = min(oldestKnownEventTimestamp ?? .distantFuture, minTimestamp)
         }
     }
 
-    /// Discards only an unterminated tail left by a crashed append. Its cursor
-    /// was never committed, so the monitor will replay that batch after restart.
-    private nonisolated static func recoverIncompleteTail(in handle: FileHandle) throws -> UInt64 {
-        let end = try handle.seekToEnd()
-        guard end > 0 else { return 0 }
-
-        try handle.seek(toOffset: end - 1)
-        if try handle.read(upToCount: 1)?.first == 0x0A {
-            return end
-        }
-
-        let blockSize: UInt64 = 64 * 1_024
-        var searchEnd = end
-        while searchEnd > 0 {
-            let start = searchEnd > blockSize ? searchEnd - blockSize : 0
-            try handle.seek(toOffset: start)
-            let data = try handle.read(upToCount: Int(searchEnd - start)) ?? Data()
-            if let newline = data.lastIndex(of: 0x0A) {
-                let completeEnd = start + UInt64(newline + 1)
-                try handle.truncate(atOffset: completeEnd)
-                try handle.synchronize()
-                return completeEnd
-            }
-            searchEnd = start
-        }
-
-        try handle.truncate(atOffset: 0)
-        try handle.synchronize()
-        return 0
-    }
-
-    /// The journal a line at a time. Reading it whole costs the file twice —
-    /// the `Data` and the `String` decoded from it — and the cap the journal
-    /// is kept under is a gigabyte by default. Mirrors `Journal::lines`.
-    private func forEachLine(_ body: (String) throws -> Void) throws {
-        let handle = try FileHandle(forReadingFrom: journalURL)
-        defer { try? handle.close() }
-        let newline = UInt8(ascii: "\n")
-        var pending = Data()
-        while let chunk = try handle.read(upToCount: 1 << 16), !chunk.isEmpty {
-            pending.append(chunk)
-            var start = pending.startIndex
-            while let end = pending[start...].firstIndex(of: newline) {
-                if end > start {
-                    try body(String(decoding: pending[start..<end], as: UTF8.self))
-                }
-                start = pending.index(after: end)
-            }
-            // One compaction per chunk rather than one per line: dropping the
-            // front of a `Data` moves everything behind it.
-            pending = Data(pending[start...])
-        }
-        if !pending.isEmpty {
-            try body(String(decoding: pending, as: UTF8.self))
-        }
-    }
-
     func loadEvents(rootPath: URL, limit: Int) async throws -> [DiskActivityEvent] {
-        let fileManager = FileManager.default
-        guard limit > 0, fileManager.fileExists(atPath: journalURL.path) else {
-            return []
-        }
-
-        let root = rootPath.standardizedFileURL.path
-        var events: [DiskActivityEvent] = []
-        try forEachLine { line in
-            guard let data = try? lineCodec.decode(line),
-                  let event = try? decoder.decode(DiskActivityEvent.self, from: data),
-                  event.rootPath.standardizedFileURL.path == root else {
-                return
-            }
-            events.append(event)
-        }
-
-        return events
-            .sorted { lhs, rhs in
-                if lhs.timestamp == rhs.timestamp {
-                    return lhs.path.path > rhs.path.path
-                }
-                return lhs.timestamp > rhs.timestamp
-            }
-            .prefix(limit)
-            .map { $0 }
+        try journal()
+            .load(rootPath: rootPath.standardizedFileURL.path, limit: UInt32(clamping: max(limit, 0)))
+            .map(DiskActivityEvent.init)
     }
 
     /// One pass over the journal: totals and trend buckets come from every
-    /// retained line, while only the newest `limit` events are kept in memory.
+    /// retained line, while only the page asked for is kept in memory.
     func loadEventPage(
         rootPath: URL,
         limit: Int,
         bucketInterval: TimeInterval,
-        query: ActivityHistoryQuery = .everything
+        query: ActivityHistoryQuery
     ) async throws -> ActivityEventPage {
-        guard FileManager.default.fileExists(atPath: journalURL.path) else {
-            return .empty
-        }
-
-        let root = rootPath.standardizedFileURL.path
-        var builder = ActivityEventPageBuilder(
-            rootPath: rootPath,
-            limit: limit,
-            bucketInterval: bucketInterval,
-            query: query
+        ActivityEventPage(
+            try journal().loadHistory(
+                rootPath: rootPath.standardizedFileURL.path,
+                limit: UInt32(clamping: max(limit, 0)),
+                bucketIntervalSecs: UInt64(max(bucketInterval, 1)),
+                query: query.coreQuery
+            )
         )
-        try forEachLine { line in
-            guard let lineData = try? lineCodec.decode(line),
-                  let event = try? decoder.decode(DiskActivityEvent.self, from: lineData),
-                  event.rootPath.standardizedFileURL.path == root else {
-                return
-            }
-            builder.add(event)
-        }
-        return builder.page()
     }
 
     func enforceStoragePolicy(
@@ -304,15 +194,28 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         eventJournalLimitBytes: Int64,
         now: Date = Date()
     ) async throws {
-        try ActivityStorageFileProtection.withStorageLock(
-            in: journalURL.deletingLastPathComponent()
-        ) {
-            try enforceStoragePolicyWhileLocked(
-                preferences,
-                eventJournalLimitBytes: eventJournalLimitBytes,
-                now: now
-            )
+        guard FileManager.default.fileExists(atPath: journalURL.path),
+              !canSkipEnforcement(
+                  preferences: preferences,
+                  eventJournalLimitBytes: eventJournalLimitBytes,
+                  now: now
+              ) else {
+            return
         }
+        let outcome = try writingJournal().trimLocked(
+            retentionDays: UInt32(clamping: preferences.detailedRetentionDays),
+            aggregateDays: UInt32(clamping: preferences.aggregateRetentionDays),
+            // The core's zero is "no cap". Here zero is a budget the rest of
+            // the storage already spent, which leaves the journal nothing.
+            limitBytes: UInt64(max(eventJournalLimitBytes, 1)),
+            now: now
+        )
+        hasScannedJournal = true
+        oldestKnownEventTimestamp = outcome.oldestKept
+    }
+
+    func removeEvents(rootPath: URL) async throws {
+        _ = try journal().forgetRootLocked(rootPath: rootPath.standardizedFileURL.path)
     }
 
     func reset(additionalStorageFiles: [URL] = []) async throws {
@@ -330,34 +233,6 @@ actor JSONLActivityEventStore: ActivityEventStoring {
         hasScannedJournal = false
         oldestKnownEventTimestamp = nil
         requiresReopenAfterFailedRollback = false
-    }
-
-    private func enforceStoragePolicyWhileLocked(
-        _ preferences: ActivityStoragePreferences,
-        eventJournalLimitBytes: Int64,
-        now: Date
-    ) throws {
-        guard FileManager.default.fileExists(atPath: journalURL.path) else {
-            return
-        }
-
-        if canSkipEnforcement(preferences: preferences, eventJournalLimitBytes: eventJournalLimitBytes, now: now) {
-            return
-        }
-
-        let (events, unreadable) = try readAllEvents()
-        // Lines that stay cost budget like any other, or the rewrite would
-        // leave a file over the cap it was called to enforce.
-        let preservedBytes = unreadable.reduce(Int64(0)) { $0 + Int64($1.utf8.count + 1) }
-        let retainedEvents = retainedEvents(
-            from: events,
-            preferences: preferences,
-            eventJournalLimitBytes: max(eventJournalLimitBytes - preservedBytes, 0),
-            now: now
-        )
-        try rewriteJournal(with: retainedEvents, preserving: unreadable)
-        hasScannedJournal = true
-        oldestKnownEventTimestamp = retainedEvents.first?.timestamp
     }
 
     private func canSkipEnforcement(
@@ -384,142 +259,5 @@ actor JSONLActivityEventStore: ActivityEventStoring {
 
     nonisolated private static func detailedCutoff(preferences: ActivityStoragePreferences, now: Date) -> Date {
         now.addingTimeInterval(-TimeInterval(preferences.detailedRetentionDays) * 86_400)
-    }
-
-    /// The rows this build can read, and the lines it cannot. Unreadable is not
-    /// invalid: a journal whose key file is missing, or one a newer build
-    /// wrote, reads as nothing here. Retention rewrites the file, so a line
-    /// dropped on the way in is a line deleted — the core keeps them for the
-    /// same reason (`readable` in `journal.rs`).
-    private func readAllEvents() throws -> (events: [DiskActivityEvent], unreadable: [String]) {
-        var events: [DiskActivityEvent] = []
-        var unreadable: [String] = []
-        try forEachLine { line in
-            guard let data = try? lineCodec.decode(line),
-                  let event = try? decoder.decode(DiskActivityEvent.self, from: data) else {
-                unreadable.append(line)
-                return
-            }
-            events.append(event)
-        }
-        return (events, unreadable)
-    }
-
-    private func retainedEvents(
-        from events: [DiskActivityEvent],
-        preferences: ActivityStoragePreferences,
-        eventJournalLimitBytes: Int64,
-        now: Date
-    ) -> [DiskActivityEvent] {
-        let detailedCutoff = Self.detailedCutoff(preferences: preferences, now: now)
-        let aggregateRetentionDays = max(
-            preferences.detailedRetentionDays,
-            preferences.aggregateRetentionDays
-        )
-        let aggregateCutoff = now.addingTimeInterval(-TimeInterval(aggregateRetentionDays) * 86_400)
-        let survivingEvents = events.filter { $0.timestamp >= aggregateCutoff }
-        let olderDetailedEvents = survivingEvents.filter {
-            $0.kind != .aggregate && $0.timestamp < detailedCutoff
-        }
-        let detailedOrExistingAggregateEvents = survivingEvents.filter {
-            $0.kind == .aggregate || $0.timestamp >= detailedCutoff
-        }
-        let dailyAggregates = Dictionary(grouping: olderDetailedEvents, by: DailyAggregationKey.init)
-            .values
-            .map(Self.dailyAggregate)
-
-        let candidates = (detailedOrExistingAggregateEvents + dailyAggregates)
-            .sorted(by: Self.newestFirst)
-        guard eventJournalLimitBytes > 0 else {
-            return []
-        }
-
-        var retained: [DiskActivityEvent] = []
-        var usedBytes: Int64 = 0
-        for event in candidates {
-            guard let line = try? encodedLine(for: event) else {
-                continue
-            }
-            let lineBytes = Int64(line.utf8.count + 1)
-            guard usedBytes + lineBytes <= eventJournalLimitBytes else {
-                break
-            }
-            retained.append(event)
-            usedBytes += lineBytes
-        }
-
-        return retained.sorted(by: Self.oldestFirst)
-    }
-
-    private func rewriteJournal(
-        with events: [DiskActivityEvent],
-        preserving unreadable: [String] = []
-    ) throws {
-        try ActivityStorageFileProtection.createProtectedDirectory(
-            at: journalURL.deletingLastPathComponent()
-        )
-        let contents = try (unreadable + events.map(encodedLine(for:)))
-            .joined(separator: "\n")
-        let data = contents.isEmpty ? Data() : Data((contents + "\n").utf8)
-        try data.write(to: journalURL, options: .atomic)
-        try ActivityStorageFileProtection.applyProtectedFilePermissions(to: journalURL)
-    }
-
-    private func encodedLine(for event: DiskActivityEvent) throws -> String {
-        try lineCodec.encode(encoder.encode(event))
-    }
-
-    nonisolated private static func dailyAggregate(_ events: [DiskActivityEvent]) -> DiskActivityEvent {
-        let sortedEvents = events.sorted(by: oldestFirst)
-        let firstEvent = sortedEvents[0]
-        let hasUnknownSize = sortedEvents.contains { $0.byteDelta == nil }
-        let byteDelta = hasUnknownSize ? nil : sortedEvents.compactMap(\.byteDelta).reduce(Int64(0), +)
-        let confidence: DiskActivityEventConfidence
-        if byteDelta == nil {
-            confidence = .unknown
-        } else if sortedEvents.allSatisfy({ $0.confidence == .confirmed }) {
-            confidence = .confirmed
-        } else {
-            confidence = .estimated
-        }
-
-        return DiskActivityEvent(
-            kind: .aggregate,
-            path: firstEvent.rootPath.standardizedFileURL,
-            rootPath: firstEvent.rootPath.standardizedFileURL,
-            timestamp: dayStart(for: firstEvent.timestamp),
-            byteDelta: byteDelta,
-            confidence: confidence,
-            previousPath: nil,
-            affectedItemCount: sortedEvents.reduce(0) { $0 + $1.affectedItemCount }
-        )
-    }
-
-    nonisolated private static func dayStart(for date: Date) -> Date {
-        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970 / 86_400) * 86_400)
-    }
-
-    nonisolated private static func newestFirst(lhs: DiskActivityEvent, rhs: DiskActivityEvent) -> Bool {
-        if lhs.timestamp == rhs.timestamp {
-            return lhs.path.path > rhs.path.path
-        }
-        return lhs.timestamp > rhs.timestamp
-    }
-
-    nonisolated private static func oldestFirst(lhs: DiskActivityEvent, rhs: DiskActivityEvent) -> Bool {
-        if lhs.timestamp == rhs.timestamp {
-            return lhs.path.path < rhs.path.path
-        }
-        return lhs.timestamp < rhs.timestamp
-    }
-
-    nonisolated private struct DailyAggregationKey: Hashable {
-        let rootPath: String
-        let dayStart: Date
-
-        init(event: DiskActivityEvent) {
-            rootPath = event.rootPath.standardizedFileURL.path
-            dayStart = JSONLActivityEventStore.dayStart(for: event.timestamp)
-        }
     }
 }

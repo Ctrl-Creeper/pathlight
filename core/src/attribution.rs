@@ -96,7 +96,7 @@ pub fn allocated_size(path: &Path) -> Option<i64> {
 /// [`SizeIndex::at`] keeps the baselines between runs. Without that a watch
 /// restarted overnight reports the first change to every file as the whole
 /// file, and a deletion as no bytes at all — the answer this app exists for.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, uniffi::Object)]
 pub struct SizeIndex {
     sizes: Mutex<HashMap<String, i64>>,
     /// Where the baselines outlive the run that measured them, when a host
@@ -120,6 +120,8 @@ struct Persisted {
     /// encrypted records: one key for everything Pathlight keeps, so turning
     /// encryption on does not leave every path readable over here.
     key_source: Option<PathBuf>,
+    /// How many lines the file may hold before a flush rewrites it.
+    compact_at: usize,
     state: Mutex<Pending>,
 }
 
@@ -163,6 +165,7 @@ impl SizeIndex {
                 lock_dir,
                 keep_days,
                 key_source,
+                compact_at: COMPACT_AT,
                 state: Mutex::new(Pending {
                     lines: Vec::new(),
                     written,
@@ -229,6 +232,16 @@ impl SizeIndex {
     /// Used by `Storage` to make a records-generation check and this write
     /// indivisible across processes.
     pub(crate) fn persist_while_locked(&self) -> Result<(), CoreError> {
+        let encrypt = self
+            .file
+            .as_ref()
+            .is_some_and(|file| file.key_source.is_some());
+        self.persist_inner(encrypt, false)
+    }
+
+    /// `encrypt` seals what this call writes; `force` rewrites the file even
+    /// when nothing is pending and the line count has not asked for it.
+    fn persist_inner(&self, encrypt: bool, force: bool) -> Result<(), CoreError> {
         let Some(file) = &self.file else {
             return Ok(());
         };
@@ -236,15 +249,15 @@ impl SizeIndex {
         // its in-memory locks before asking Storage to persist.
         let (lines, compacting) = {
             let mut state = file.state.lock().unwrap();
-            if state.lines.is_empty() {
+            if state.lines.is_empty() && !force {
                 return Ok(());
             }
-            let compacting = state.written + state.lines.len() >= COMPACT_AT;
+            let compacting = force || state.written + state.lines.len() >= file.compact_at;
             (std::mem::take(&mut state.lines), compacting)
         };
         let key = match &file.key_source {
-            Some(journal) => Some(crate::crypt::key_or_create(journal)?),
-            None => None,
+            Some(journal) if encrypt => Some(crate::crypt::key_or_create(journal)?),
+            _ => None,
         };
         let lines = match compacting {
             true => {
@@ -293,6 +306,118 @@ impl SizeIndex {
         if let Some(line) = line(key, size, crate::event::swift_date::text(SystemTime::now())) {
             file.state.lock().unwrap().lines.push(line);
         }
+    }
+}
+
+/// The index across the FFI, for a host that keeps its own preferences: where
+/// the key is and whether to seal are separate questions there, because the
+/// setting can change while rows written under the old answer still have to
+/// be read.
+#[uniffi::export]
+impl SizeIndex {
+    /// Baselines that live only as long as this object.
+    #[uniffi::constructor]
+    pub fn in_memory() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Baselines kept in `path`. `key_journal` is the journal whose key seals
+    /// them; `compact_at` of zero is the usual line count.
+    #[uniffi::constructor]
+    pub fn open(path: String, key_journal: String, keep_days: u32, compact_at: u32) -> Arc<Self> {
+        let mut index = Self::at(
+            PathBuf::from(path),
+            Some(PathBuf::from(key_journal)),
+            keep_days,
+        );
+        if let (Some(file), true) = (index.file.as_mut(), compact_at > 0) {
+            file.compact_at = compact_at as usize;
+        }
+        Arc::new(index)
+    }
+
+    pub fn record_size(&self, scope: String, path: String, size: i64) {
+        self.record(&scope, &path, Some(size));
+    }
+
+    /// Last known size of a path that just vanished; consumed on use.
+    pub fn take_size(&self, scope: String, path: String) -> Option<i64> {
+        self.take(&scope, &path)
+    }
+
+    pub fn known_size(&self, scope: String, path: String) -> Option<i64> {
+        self.peek(&scope, &path)
+    }
+
+    /// Writes what has been recorded since the last flush, under the storage
+    /// lock, sealed when `encrypt`.
+    pub fn flush(&self, encrypt: bool) -> Result<(), CoreError> {
+        self.locked(|| self.persist_inner(encrypt, false))
+    }
+
+    /// [`SizeIndex::flush`], then rewrites the file down to the baselines
+    /// still worth keeping.
+    pub fn compact(&self, encrypt: bool) -> Result<(), CoreError> {
+        self.locked(|| self.persist_inner(encrypt, true))
+    }
+
+    /// Forgets one watch's baselines, in memory and on disk. The file is
+    /// rewritten rather than appended to: a "remove" line still names the
+    /// path, and the point of forgetting a watch is that nothing here does.
+    pub fn forget_scope(&self, scope: String, encrypt: bool) -> Result<(), CoreError> {
+        self.locked(|| self.forget_scope_while_locked(&scope, encrypt))
+    }
+
+    /// Forgets every baseline, in memory and on disk.
+    pub fn clear(&self) -> Result<(), CoreError> {
+        self.locked(|| {
+            self.reset();
+            let removed = self
+                .file
+                .as_ref()
+                .map(|file| std::fs::remove_file(&file.path));
+            match removed {
+                Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+                    Err(error.into())
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+}
+
+impl SizeIndex {
+    pub(crate) fn forget_scope_while_locked(
+        &self,
+        scope: &str,
+        encrypt: bool,
+    ) -> Result<(), CoreError> {
+        let prefix = key(scope, "");
+        let gone: Vec<String> = {
+            let mut sizes = self.sizes.lock().unwrap();
+            let gone: Vec<String> = sizes
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            gone.iter().for_each(|key| {
+                sizes.remove(key);
+            });
+            gone
+        };
+        if gone.is_empty() {
+            return Ok(());
+        }
+        gone.into_iter().for_each(|key| self.note(key, None));
+        self.persist_inner(encrypt, true)
+    }
+
+    fn locked(&self, body: impl FnOnce() -> Result<(), CoreError>) -> Result<(), CoreError> {
+        let _storage_lock = match &self.file {
+            Some(file) => Some(crate::store::lock_directory(&file.lock_dir)?),
+            None => None,
+        };
+        body()
     }
 }
 
@@ -429,6 +554,57 @@ fn apply(sizes: &mut HashMap<String, Baseline>, lines: &[String]) {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    /// A host with its own preferences seals per write, not per index: rows
+    /// from before the setting changed are still read, a forced compaction
+    /// rewrites without anything pending, and clearing leaves no file.
+    #[test]
+    fn a_host_chooses_per_write_whether_to_seal_and_reads_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity-size-index.jsonl");
+        let journal = dir.path().join("activity-events.jsonl");
+        let open = || {
+            SizeIndex::open(
+                path.to_string_lossy().into_owned(),
+                journal.to_string_lossy().into_owned(),
+                0,
+                0,
+            )
+        };
+        let index = open();
+        index.record_size("watch".into(), "/plain.bin".into(), 1);
+        index.flush(false).unwrap();
+        index.record_size("watch".into(), "/sealed.bin".into(), 2);
+        index.flush(true).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("plain.bin") && !text.contains("sealed.bin"));
+        let reopened = open();
+        assert_eq!(
+            reopened.known_size("watch".into(), "/plain.bin".into()),
+            Some(1)
+        );
+        assert_eq!(
+            reopened.known_size("watch".into(), "/sealed.bin".into()),
+            Some(2)
+        );
+
+        reopened.compact(true).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("plain.bin"));
+        assert_eq!(
+            open().known_size("watch".into(), "/plain.bin".into()),
+            Some(1)
+        );
+
+        reopened.clear().unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            reopened.known_size("watch".into(), "/plain.bin".into()),
+            None
+        );
+    }
 
     #[test]
     fn compaction_rebases_onto_entries_written_by_another_process() {

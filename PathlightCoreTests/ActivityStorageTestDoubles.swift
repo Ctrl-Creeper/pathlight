@@ -8,10 +8,10 @@ func makeSealedActivityStorageLineCodec(encryptNewData: Bool = true) -> Activity
     )
 }
 
-/// Marked like a real row and reversible, but not encryption: the cipher lives
-/// in the Rust core, which this package does not link. What these tests can
-/// check is that a codec set to encrypt sends every line through its cryptor
-/// and never leaves json on disk — `core/src/crypt.rs` owns the cipher itself.
+/// Marked like a real row and reversible, but not encryption. What tests using
+/// it check is that a codec set to encrypt sends every line through its cryptor
+/// and never leaves json on disk — `core/src/crypt.rs` owns the cipher itself,
+/// and a test that reads a journal back uses `RustActivityStorageCryptor`.
 nonisolated struct SealedActivityStorageCryptor: ActivityStorageLineCrypting {
     static let marker = "pathlight:v1:aes-gcm:"
 
