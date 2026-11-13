@@ -1697,6 +1697,13 @@ public protocol SizeIndexProtocol: AnyObject, Sendable {
      */
     func flush(encrypt: Bool) throws
 
+    /**
+     * Forgets one watch's baselines, in memory and on disk. The file is
+     * rewritten rather than appended to: a "remove" line still names the
+     * path, and the point of forgetting a watch is that nothing here does.
+     */
+    func forgetScope(scope: String, encrypt: Bool) throws
+
     func knownSize(scope: String, path: String)  -> Int64?
 
     func recordSize(scope: String, path: String, size: Int64)
@@ -1832,6 +1839,21 @@ open func flush(encrypt: Bool)throws   {try rustCallWithError(FfiConverterTypeCo
         uniffiCallStatus in
     uniffi_pathlight_core_fn_method_sizeindex_flush(
             self.uniffiCloneHandle(),
+        FfiConverterBool.lower(encrypt),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Forgets one watch's baselines, in memory and on disk. The file is
+     * rewritten rather than appended to: a "remove" line still names the
+     * path, and the point of forgetting a watch is that nothing here does.
+     */
+open func forgetScope(scope: String, encrypt: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_method_sizeindex_forget_scope(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
         FfiConverterBool.lower(encrypt),uniffiCallStatus
     )
 }
@@ -4207,6 +4229,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_sizeindex_flush() != 43051) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_method_sizeindex_forget_scope() != 36836) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_sizeindex_known_size() != 7146) {
