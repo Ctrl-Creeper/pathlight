@@ -302,7 +302,7 @@ private struct ActivityStorageSettingsPane: View {
 
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes locally stored activity history and the size attribution index on this Mac.")
+            Text("This removes locally stored activity history, the size attribution index and the watch diary on this Mac.")
         }
     }
 

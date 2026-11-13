@@ -50,6 +50,21 @@ final class AppModelDependencyTests: XCTestCase {
         XCTAssertFalse(cancelled.startShortTermWatchFromOpenPanel())
     }
 
+    func testAResetTakesTheDiaryAndTheWalkedTablesWithTheJournal() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "PathlightReset-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for name in ["baseline-sizes-1a2b.bin", "activity-events.key", "watches.json"] {
+            try Data().write(to: directory.appending(path: name))
+        }
+
+        let names = Set(AppDependencies.recordsBesideTheJournal(in: directory).map(\.lastPathComponent))
+
+        // The key and the settings are not records: a reset keeps both.
+        XCTAssertEqual(names, ["activity-size-index.jsonl", "pathlight.log", "baseline-sizes-1a2b.bin"])
+    }
+
     func testLoadsPersistedLongTermWatchTargets() {
         let store = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
