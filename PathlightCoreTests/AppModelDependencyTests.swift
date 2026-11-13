@@ -32,6 +32,24 @@ final class AppModelDependencyTests: XCTestCase {
                      "enumeration must not seed paths into the live event index")
     }
 
+    /// The caller opens the Live Monitor window on this answer, so it has to
+    /// be yes as soon as a folder was chosen, not once the first event lands.
+    func testStartingALiveWatchFromThePanelSaysItStarted() {
+        var dependencies = makeDependencies()
+        dependencies.systemActions.presentFolderPanel = { _, _ in
+            FileManager.default.temporaryDirectory
+        }
+        let model = AppModel(dependencies: dependencies)
+        defer { model.cleanup() }
+
+        XCTAssertTrue(model.startShortTermWatchFromOpenPanel())
+
+        dependencies.systemActions.presentFolderPanel = { _, _ in nil }
+        let cancelled = AppModel(dependencies: dependencies)
+        defer { cancelled.cleanup() }
+        XCTAssertFalse(cancelled.startShortTermWatchFromOpenPanel())
+    }
+
     func testLoadsPersistedLongTermWatchTargets() {
         let store = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
