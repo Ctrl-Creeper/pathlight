@@ -20,7 +20,8 @@ nonisolated enum RustActivityAnomalies {
                 rootPath: rootPath,
                 bytes: found.bytes,
                 itemCount: Int(found.items),
-                windowMinutes: windowMinutes
+                windowMinutes: windowMinutes,
+                manyItems: Int(activityAnomalyRemovedItems())
             )
         }
     }
