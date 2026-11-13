@@ -121,7 +121,9 @@ extern "C" {
         path: *const c_char,
     ) -> c_int;
     fn open_by_handle_at(mount_fd: c_int, handle: *mut c_void, flags: c_int) -> c_int;
-    fn open(path: *const c_char, flags: c_int) -> c_int;
+    // Variadic, as libc declares it: Rust 1.100 rejects a definition of a
+    // runtime symbol whose signature differs from the one std links against.
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
