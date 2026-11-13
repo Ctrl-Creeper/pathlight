@@ -66,15 +66,21 @@ nonisolated final class ActivityStorageLineCodec: @unchecked Sendable {
     /// Loads the storage key without writing a journal row. Called at launch so
     /// file errors or a legacy migration prompt appear while the user is in the
     /// app instead of stalling the first background write minutes later.
+    /// Whether rows written from now on are sealed. A preference, so it can
+    /// change while the app runs.
+    var encryptsNewData: Bool {
+        preferencesStore?.loadPreferences().encryptNewData == true
+    }
+
     func prepare() throws {
-        guard preferencesStore?.loadPreferences().encryptNewData == true else {
+        guard encryptsNewData else {
             return
         }
         _ = try cryptor.seal(Data())
     }
 
     func encode(_ payload: Data) throws -> String {
-        guard preferencesStore?.loadPreferences().encryptNewData == true else {
+        guard encryptsNewData else {
             return String(decoding: payload, as: UTF8.self)
         }
 
