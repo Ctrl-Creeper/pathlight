@@ -57,6 +57,42 @@ final class AppModelJournalTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.path.lastPathComponent == "other.txt" }?.byteDelta, 7)
     }
 
+    /// A folder watched long-term and opened in Live Monitor is still one
+    /// folder: both streams see every change, and writing both rows doubled
+    /// its history.
+    func testAFolderWatchedBothWaysIsRecordedOnce() async throws {
+        let root = URL(filePath: "/tmp/pathlight-journal-tests/\(UUID().uuidString)", directoryHint: .isDirectory)
+        let file = root.appending(path: "one.bin")
+        let monitor = ScriptedDiskActivityMonitor(events: [
+            .change(DiskActivityChange(kind: .created, path: file, rootPath: root, timestamp: Date()), eventID: 1)
+        ])
+        let store = InMemoryActivityEventStore()
+        let model = AppModel(
+            dependencies: AppDependencies(
+                systemActions: .inert,
+                activityMonitor: monitor,
+                activityAttribution: stubActivityAttribution,
+                activitySizeProviders: { _ in ActivitySizeProviders(size: { _ in 400 }) },
+                activityEventStore: store,
+                longTermWatchTargets: LongTermWatchTargetStore(
+                    persistence: UserDefaultsLongTermWatchTargetPersistence(
+                        defaults: UserDefaults(suiteName: "AppModelJournalTests.\(UUID().uuidString)")!
+                    )
+                ),
+                activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
+                launchAtLoginService: NoopLaunchAtLoginService()
+            )
+        )
+        defer { model.cleanup() }
+
+        model.enableLongTermWatch(rootPath: root)
+        model.startShortTermWatch(rootPath: root)
+
+        try await Task.sleep(for: .milliseconds(2_500))
+        let rows = await store.allEvents()
+        XCTAssertEqual(rows.map(\.path.lastPathComponent), ["one.bin"])
+    }
+
     func testRemovingAWatchDeletesItsHistoryOnlyWhenAsked() async throws {
         let root = URL(filePath: "/tmp/pathlight-journal-tests/\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = InMemoryActivityEventStore()
