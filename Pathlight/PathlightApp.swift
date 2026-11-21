@@ -104,16 +104,16 @@ struct PathlightApp: App {
             ActivityMenuBarView()
                 .environmentObject(appModel)
         } label: {
-            let todayText = MenuBarActivityPresentation(
+            let labelText = MenuBarActivityPresentation(
                 targets: appModel.longTermWatchTargets,
                 histories: Array(appModel.activityDashboardHistories.values),
                 runtimeStatuses: appModel.longTermWatchRuntimeStatuses
-            ).todayTotalText
-            if todayText.isEmpty {
+            ).labelText
+            if labelText.isEmpty {
                 Image(systemName: "waveform.path.ecg")
             } else {
                 Label {
-                    Text(todayText)
+                    Text(labelText)
                         .monospacedDigit()
                 } icon: {
                     Image(systemName: "waveform.path.ecg")

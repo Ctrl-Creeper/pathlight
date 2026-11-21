@@ -22,7 +22,7 @@ struct ActivityMenuBarView: View {
             Button {
                 openDashboard()
             } label: {
-                Text("\(row.title)  •  \(row.statusText)  •  \(row.todayChangeText)")
+                Text("\(row.title)  •  \(row.statusText)  •  \(row.netChangeText)")
             }
         }
 
