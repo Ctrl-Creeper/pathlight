@@ -4,28 +4,22 @@ labels:
   - bug
   - needs-triage
 body:
-  - type: checkboxes
-    id: latest_version
-    attributes:
-      label: Latest Version
-      description: Please confirm you are using the latest Pathlight release before reporting a bug.
-      options:
-        - label: I am using the latest version of Pathlight.
-          required: true
-
   - type: dropdown
     id: affected_area
     attributes:
       label: Affected Area
       description: Pick the closest part of Pathlight.
       options:
-        - Scan engine / scan progress estimation / scan results
-        - Onboarding / welcome screen
-        - Sunburst visualization
-        - File browser
-        - Inspector
-        - Sidebar / recent scans
-        - Settings
+        - Live Monitor
+        - Long-term watches
+        - Activity history / dashboard
+        - Recorded sizes / exclusion patterns
+        - Alerts / notifications
+        - Menu bar
+        - Settings / storage and retention
+        - Windows or Linux window
+        - Command line (pathlight-monitor)
+        - Install, update, launch at login, uninstall
         - Crash or hang
         - Other
     validations:
@@ -36,7 +30,7 @@ body:
     attributes:
       label: Summary
       description: What broke?
-      placeholder: Pathlight skipped files in ~/Library without showing a clear warning.
+      placeholder: A file I deleted in a watched folder never appeared in its history.
     validations:
       required: true
 
@@ -47,8 +41,8 @@ body:
       description: List the actions that trigger the bug.
       placeholder: |
         1. Open Pathlight
-        2. Scan a folder or volume
-        3. Click a sunburst segment
+        2. Watch a folder
+        3. Change a file inside it
         4. Observe...
     validations:
       required: true
@@ -76,37 +70,32 @@ body:
       required: true
 
   - type: dropdown
-    id: scan_target
+    id: host
     attributes:
-      label: Scan Target
-      description: If this involves scanning, what kind of path was scanned?
+      label: Host
+      description: Which Pathlight was running?
       options:
-        - Home folder
-        - Desktop, Documents, or Downloads
-        - Library folder
-        - Applications folder
-        - Macintosh HD or startup volume
-        - External drive
-        - Network volume
-        - Package or app bundle
-        - Other
+        - macOS app
+        - Windows window
+        - Linux window
+        - Command line
     validations:
-      required: false
+      required: true
 
   - type: input
     id: pathlight_version
     attributes:
       label: Pathlight Version
-      description: App release where bug occurred.
-      placeholder: v1.2.0
+      description: App release where bug occurred (About Pathlight, or `pathlight-monitor --version`).
+      placeholder: 1.5.0
     validations:
       required: true
 
   - type: input
-    id: macos_version
+    id: os_version
     attributes:
-      label: macOS Version
-      placeholder: macOS 26.5.1
+      label: Operating System
+      placeholder: macOS 26.5.1, Windows 11 24H2, Ubuntu 24.04
     validations:
       required: true
 

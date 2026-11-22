@@ -90,6 +90,10 @@ final class AppModel: ObservableObject {
     }
     private var monitoringStatusMessages: [MonitoringStatusSource: String] = [:]
     private var watcherStartFailures: [String: String] = [:]
+    /// Folders this app is recording, each held against the other hosts
+    /// (`pathlight-monitor watch` shares this storage). Keyed by root path and
+    /// shared by a live and a long-term watch on one folder.
+    private var folderClaims: [String: AnyObject?] = [:]
     /// Invalidates continuations from an append that was already in flight
     /// when the user deleted all history.
     private var journalGeneration: UInt64 = 0
@@ -431,6 +435,9 @@ final class AppModel: ObservableObject {
                 }
             }
 
+            // Another Pathlight recording this folder leaves this session a
+            // view of it: both writing rows doubled the folder's history.
+            let recordsHere = self.claimFolder(rootPath) == nil
             let stream = coordinator.sessions(
                 rootPath: rootPath,
                 options: options,
@@ -459,7 +466,7 @@ final class AppModel: ObservableObject {
                 // A long-term watch running on this same folder is already
                 // recording it. Both streams see every change, and writing
                 // both rows doubled the folder's history.
-                if self.longTermWatchTasks[session.rootPath.standardizedFileURL.path] == nil {
+                if recordsHere, self.longTermWatchTasks[session.rootPath.standardizedFileURL.path] == nil {
                     self.enqueueForJournal(session.latestChanges, rootPath: session.rootPath)
                 }
             }
@@ -480,6 +487,7 @@ final class AppModel: ObservableObject {
         if let liveWatcherStatusKey {
             clearWatcherStartFailure(key: liveWatcherStatusKey)
             self.liveWatcherStatusKey = nil
+            releaseUnusedFolderClaims()
         }
     }
 
@@ -1311,6 +1319,17 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled, self.longTermWatchTaskIDs[target.id] == taskID {
                 let currentTarget = self.longTermWatchTargets.first(where: { $0.id == target.id }) ?? target
                 let rootKey = currentTarget.rootPath.standardizedFileURL.path
+                // Asked again on every pass, so the watch starts by itself
+                // once the other recorder has stopped.
+                if let refusal = self.claimFolder(currentTarget.rootPath) {
+                    self.reportWatcherStartFailure(
+                        key: watcherStatusKey,
+                        rootPath: currentTarget.rootPath,
+                        message: refusal
+                    )
+                    try? await Task.sleep(for: .seconds(30))
+                    continue
+                }
                 // Within this process, resume after the latest accepted cursor,
                 // including a batch still waiting for durable journal commit.
                 // After a crash only the persisted checkpoint survives, causing
@@ -1518,6 +1537,27 @@ final class AppModel: ObservableObject {
         longTermWatchTaskIDs[targetID] = nil
         clearWatcherStartFailure(key: "long-term:\(targetID)")
         updateLongTermWatchRuntimeStatus(targetID: targetID, state: .paused, retryCount: 0)
+        releaseUnusedFolderClaims()
+    }
+
+    /// `nil` when this app holds the folder, otherwise why it may not.
+    private func claimFolder(_ rootPath: URL) -> String? {
+        let key = rootPath.standardizedFileURL.path
+        guard folderClaims[key] == nil else { return nil }
+        do {
+            folderClaims[key] = .some(try dependencies.claimWatchFolder(rootPath))
+            return nil
+        } catch let CoreError.Watch(message) {
+            return message
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func releaseUnusedFolderClaims() {
+        folderClaims = folderClaims.filter { key, _ in
+            longTermWatchTasks[key] != nil || liveWatcherStatusKey == "live:\(key)"
+        }
     }
 
     private func stopAllLongTermWatches() {
@@ -1527,6 +1567,7 @@ final class AppModel: ObservableObject {
         }
         longTermWatchTasks.removeAll()
         longTermWatchTaskIDs.removeAll()
+        releaseUnusedFolderClaims()
         for target in longTermWatchTargets {
             clearWatcherStartFailure(key: "long-term:\(target.id)")
             updateLongTermWatchRuntimeStatus(targetID: target.id, state: .paused, retryCount: 0)

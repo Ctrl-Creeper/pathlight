@@ -98,19 +98,41 @@ pub struct Session {
 /// change twice: the folder's history doubled and so did its alerts. Whoever
 /// opens second is told, instead of both carrying on.
 fn claim(storage: &Storage, root: &str) -> Result<std::fs::File, String> {
+    claim_in(storage.dir(), root)
+}
+
+/// A folder held against every other recorder, for as long as this lives.
+#[derive(Debug, uniffi::Object)]
+pub struct FolderClaim {
+    _file: std::fs::File,
+}
+
+/// The claim a [`Session`] takes, for a host that runs its own pipeline: the
+/// macOS app records beside `pathlight-monitor` in one storage directory.
+#[uniffi::export]
+pub fn claim_folder(
+    storage_dir: String,
+    root: String,
+) -> Result<std::sync::Arc<FolderClaim>, crate::CoreError> {
+    claim_in(std::path::Path::new(&storage_dir), &root)
+        .map(|file| std::sync::Arc::new(FolderClaim { _file: file }))
+        .map_err(|message| crate::CoreError::Watch { message })
+}
+
+fn claim_in(dir: &std::path::Path, root: &str) -> Result<std::fs::File, String> {
     // By what the folder is, not how it was typed: `/tmp/x` and
     // `/private/tmp/x` are one folder and would be two claims.
     let resolved = std::fs::canonicalize(root)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.to_owned());
-    let path = storage.dir().join(format!(
+    let path = dir.join(format!(
         "watching-{:016x}.lock",
         crate::baseline::fnv1a(&crate::paths::normalize(&resolved))
     ));
     let refused = |error: &dyn std::fmt::Display| {
         format!("{root} is already being watched by another Pathlight ({error})")
     };
-    std::fs::create_dir_all(storage.dir()).map_err(|error| refused(&error))?;
+    std::fs::create_dir_all(dir).map_err(|error| refused(&error))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -1146,7 +1168,19 @@ mod tests {
         let refusal = second.err().expect("a second recorder was allowed");
         assert!(refusal.contains("already being watched"), "{refusal}");
 
+        // A host running its own pipeline is refused the same way.
+        let claim = |folder: &std::path::Path| {
+            claim_folder(
+                storage_dir.path().to_string_lossy().into_owned(),
+                folder.to_string_lossy().into_owned(),
+            )
+        };
+        assert!(claim(root.path()).is_err());
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(claim(elsewhere.path()).is_ok());
+
         drop(first);
+        drop(claim(root.path()).expect("the folder was free again"));
         drop(watch(root.path(), storage_dir.path()));
     }
 
