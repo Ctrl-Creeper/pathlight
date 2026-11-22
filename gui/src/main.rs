@@ -2024,6 +2024,9 @@ mod tests {
             }]
         );
 
+        // The first launch has ended: a folder has one recorder at a time,
+        // and one still running here would rightly refuse the next.
+        harness.state_mut().sessions.clear();
         let mut next = app(storage_dir.path(), Vec::new());
         next.watches = Storage::at(storage_dir.path()).watches();
         next.resume();
@@ -2031,6 +2034,8 @@ mod tests {
             next.sessions.contains_key(&root),
             "the watch was not resumed"
         );
+        drop(next);
+        harness.state_mut().resume();
 
         // And a watch the user switched off stays off, which is the other half
         // of remembering: a stopped watch that came back would be a monitor
