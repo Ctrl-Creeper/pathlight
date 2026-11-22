@@ -89,6 +89,36 @@ pub struct Session {
     live: Arc<Mutex<Live>>,
     watcher: Option<Arc<Watcher>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Held for as long as this watch records, released when it is dropped.
+    _claim: std::fs::File,
+}
+
+/// One recorder per folder per storage. The window and `pathlight-monitor
+/// watch` share one journal, and both recording the same folder wrote every
+/// change twice: the folder's history doubled and so did its alerts. Whoever
+/// opens second is told, instead of both carrying on.
+fn claim(storage: &Storage, root: &str) -> Result<std::fs::File, String> {
+    // By what the folder is, not how it was typed: `/tmp/x` and
+    // `/private/tmp/x` are one folder and would be two claims.
+    let resolved = std::fs::canonicalize(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.to_owned());
+    let path = storage.dir().join(format!(
+        "watching-{:016x}.lock",
+        crate::baseline::fnv1a(&crate::paths::normalize(&resolved))
+    ));
+    let refused = |error: &dyn std::fmt::Display| {
+        format!("{root} is already being watched by another Pathlight ({error})")
+    };
+    std::fs::create_dir_all(storage.dir()).map_err(|error| refused(&error))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|error| refused(&error))?;
+    file.try_lock().map_err(|error| refused(&error))?;
+    Ok(file)
 }
 
 impl Session {
@@ -123,6 +153,7 @@ impl Session {
         // events started arriving would record the noise it exists to drop.
         let exclusions =
             ExclusionFilter::new(&storage.patterns(), root).map_err(|error| error.to_string())?;
+        let claim = claim(&storage, root)?;
         let storage_threshold = storage.growth_alert_bytes();
         let now = SystemTime::now();
         let day_start = utc_day_start(now);
@@ -181,6 +212,7 @@ impl Session {
             live,
             watcher: Some(watcher),
             worker: Some(worker),
+            _claim: claim,
         })
     }
 
@@ -441,9 +473,15 @@ impl Worker {
             size
         };
         let prior_size = |path: &str| {
-            index
-                .take(&prior_scope, path)
-                .or_else(|| baseline_size(&baseline, path))
+            // Both forget it, whichever one answers: a baseline that outlived
+            // the file would answer for it again.
+            let walked = baseline
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .sizes
+                .take(path)
+                .and_then(|size| i64::try_from(size).ok());
+            index.take(&prior_scope, path).or(walked)
         };
         let known_size = |path: &str| {
             index
@@ -1089,6 +1127,27 @@ mod tests {
 
         let journal = fs::read_to_string(Storage::at(storage_dir.path()).journal()).unwrap();
         assert!(journal.contains("report.bin"), "journal was {journal:?}");
+    }
+
+    /// The window and the terminal share one journal. Both recording one
+    /// folder wrote every change twice, so the second to open is refused, and
+    /// can open once the first has stopped.
+    #[test]
+    fn a_folder_already_being_recorded_is_not_recorded_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let first = watch(root.path(), storage_dir.path());
+
+        let second = Session::start(
+            &root.path().to_string_lossy(),
+            Storage::at(storage_dir.path()),
+            |_, _| {},
+        );
+        let refusal = second.err().expect("a second recorder was allowed");
+        assert!(refusal.contains("already being watched"), "{refusal}");
+
+        drop(first);
+        drop(watch(root.path(), storage_dir.path()));
     }
 
     /// The setting the window offers, end to end: a saved bound is read when

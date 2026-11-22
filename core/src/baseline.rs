@@ -185,8 +185,30 @@ impl Sizes {
             .binary_search_by_key(&hash, |entry| entry.0)
             .ok()
             .map(|at| self.table[at].1)
+            .filter(|bytes| *bytes != GONE)
+    }
+
+    /// The size `path` had at the walk, for the deletion reporting it, and
+    /// the last time this table answers for it. Left in place, the entry
+    /// priced a second delete event for the same path again and made the
+    /// file's return look like a change of nothing: one `git switch` recorded
+    /// a file it had only rewritten as bytes lost twice.
+    // ponytail: marked rather than removed, because removing shifts up to the
+    // whole table and a mass deletion is exactly when this is called most.
+    pub fn take(&mut self, path: &str) -> Option<u64> {
+        let hash = fnv1a(path);
+        let at = self
+            .table
+            .binary_search_by_key(&hash, |entry| entry.0)
+            .ok()?;
+        let bytes = std::mem::replace(&mut self.table[at].1, GONE);
+        (bytes != GONE).then_some(bytes)
     }
 }
+
+/// A path that was here at the walk and has been deleted since. No file
+/// allocates this many bytes.
+const GONE: u64 = u64::MAX;
 
 /// Write `snapshot` where [`file`] says, through a temporary so an interrupted
 /// write leaves the old baseline rather than half of a new one. Sealed under
@@ -468,6 +490,29 @@ fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
 mod tests {
     use super::*;
     use crate::snapshot;
+
+    /// A deletion is priced from the walk once. The entry used to stay, so a
+    /// second delete event for the path lost its bytes again and the file's
+    /// return measured as no change.
+    #[test]
+    fn a_walked_size_answers_for_one_deletion_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, vec![7u8; 9_000]).unwrap();
+        let snapshot = snapshot::scan(dir.path()).unwrap();
+        let mut sizes = Sizes::from(&snapshot);
+        let path = crate::paths::normalize(&file.canonicalize().unwrap().to_string_lossy());
+        let path = if sizes.get(&path).is_some() {
+            path
+        } else {
+            crate::paths::normalize(&file.to_string_lossy())
+        };
+
+        let walked = sizes.get(&path).expect("the walk measured the file");
+        assert_eq!(sizes.take(&path), Some(walked));
+        assert_eq!(sizes.take(&path), None);
+        assert_eq!(sizes.get(&path), None);
+    }
 
     /// What is written has to come back the same, or a gap would be recovered
     /// against a folder that never existed.
