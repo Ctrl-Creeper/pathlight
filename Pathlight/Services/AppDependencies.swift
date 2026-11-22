@@ -40,8 +40,8 @@ struct AppDependencies {
     var launchAtLoginService: any LaunchAtLoginControlling
     var activityGrowthAlertPoster: (any ActivityGrowthAlertPosting)?
     /// Short-window anomaly detection. The thresholds live in the Rust core,
-    /// so a host that does not link it raises no anomalies rather than
-    /// inventing its own idea of one.
+    /// so a test that injects none raises no anomalies rather than inventing
+    /// its own idea of one.
     var activityAnomalies: ActivityAnomalyDetecting
     var processHints: (any ProcessHinting)?
     /// Loads the activity storage key up front; no-op when nothing is encrypted.

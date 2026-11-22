@@ -62,8 +62,8 @@ struct ActivityHistoryPresentation: Equatable, Sendable {
     }
 
     /// The store totals every five minutes; the chart shows the coarsest step
-    /// that still fits the whole span in `limit` bars, so two hours get
-    /// five-minute bars and a month gets days instead of a few thin bars.
+    /// that still fits the whole span in `limit` points, so two hours get
+    /// five-minute steps and a month gets days.
     static func merged(_ buckets: [ActivityHistoryBucket], limit: Int) -> [ActivityHistoryBucket] {
         guard let first = buckets.first, let last = buckets.last else { return [] }
         let span = last.endDate.timeIntervalSince(first.startDate)

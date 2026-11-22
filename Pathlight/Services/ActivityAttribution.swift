@@ -186,8 +186,7 @@ nonisolated final class ActivityBaselineSizes: @unchecked Sendable {
 ///
 /// Declared here and implemented in the Rust core, which every host shares —
 /// two implementations of "how many bytes changed" eventually disagree, and the
-/// journal both hosts read would then hold both answers. This package does not
-/// link the core, so `swift test` needs no xcframework; the app target injects
+/// journal both hosts read would then hold both answers. The app target injects
 /// `RustActivityAttribution`, the way it already injects its monitor.
 protocol ActivityAttributing: Sendable {
     func process(_ changes: [DiskActivityChange]) -> [DiskActivityEvent]

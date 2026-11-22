@@ -29,7 +29,7 @@ This is a fork of [Ctrl-Creeper/pathlight](https://github.com/Ctrl-Creeper/pathl
 - **The watch's own diary** — when it opened, what it caught up on after a gap, what it warned about, what failed. Every host shows the same file, which is the answer to "it missed something last night"
 - **gitignore-style exclusions** per folder to drop caches, `.DS_Store`, temp files, and other churn
 - **Copy a path** from any row, and see which build this is beside what its watcher promises on this OS
-- **Menu bar summary** of today's changes while any watch is enabled
+- **Menu bar summary**: how many watches are active, and each folder's state and net change one click away
 - **Keeps running** in the menu bar when you close the window or quit, so monitoring never silently stops
 
 ### Windows and Linux
