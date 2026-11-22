@@ -1149,6 +1149,118 @@ public func FfiConverterTypeExclusionMatcher_lower(_ value: ExclusionMatcher) ->
 
 
 
+/**
+ * A folder held against every other recorder, for as long as this lives.
+ */
+public protocol FolderClaimProtocol: AnyObject, Sendable {
+
+}
+/**
+ * A folder held against every other recorder, for as long as this lives.
+ */
+open class FolderClaim: FolderClaimProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_pathlight_core_fn_clone_folderclaim(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_pathlight_core_fn_free_folderclaim(handle, $0) }
+    }
+
+
+
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFolderClaim: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = FolderClaim
+
+    public static func lift(_ handle: UInt64) throws -> FolderClaim {
+        return FolderClaim(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: FolderClaim) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FolderClaim {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: FolderClaim, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFolderClaim_lift(_ handle: UInt64) throws -> FolderClaim {
+    return try FfiConverterTypeFolderClaim.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFolderClaim_lower(_ value: FolderClaim) -> UInt64 {
+    return FfiConverterTypeFolderClaim.lower(value)
+}
+
+
+
+
+
+
 public protocol JournalProtocol: AnyObject, Sendable {
 
     /**
@@ -4187,6 +4299,19 @@ public func watcherCapabilities() -> Capabilities  {
     )
 })
 }
+/**
+ * The claim a [`Session`] takes, for a host that runs its own pipeline: the
+ * macOS app records beside `pathlight-monitor` in one storage directory.
+ */
+public func claimFolder(storageDir: String, root: String)throws  -> FolderClaim  {
+    return try  FfiConverterTypeFolderClaim_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_pathlight_core_fn_func_claim_folder(
+        FfiConverterString.lower(storageDir),
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -4231,6 +4356,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_func_watcher_capabilities() != 30058) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pathlight_core_checksum_func_claim_folder() != 59735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pathlight_core_checksum_method_activityattributor_process() != 61309) {

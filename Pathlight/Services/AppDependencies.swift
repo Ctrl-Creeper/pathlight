@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import PathlightRustCore
 
 @MainActor
 struct AppDependencies {
@@ -22,6 +23,10 @@ struct AppDependencies {
     /// Forgets what the size index knows under one watch's scope, when that
     /// watch is removed or its live session ends.
     var forgetActivitySizes: @Sendable (_ scope: String) -> Void
+    /// Holds a folder against the other hosts for as long as the returned
+    /// object lives, or throws when one of them is already recording it. No
+    /// default claim: a test would be locking the user's real storage.
+    var claimWatchFolder: @Sendable (_ rootPath: URL) throws -> AnyObject?
     var activityEventStore: (any ActivityEventStoring)?
     var longTermWatchTargets: LongTermWatchTargetStore
     var activityBaselineService: ActivityBaselineService
@@ -60,6 +65,7 @@ struct AppDependencies {
             ActivitySizeProviders(size: FileAllocatedSizeProvider.allocatedSize(for:))
         },
         forgetActivitySizes: @escaping @Sendable (String) -> Void = { _ in },
+        claimWatchFolder: @escaping @Sendable (URL) throws -> AnyObject? = { _ in nil },
         activityEventStore: (any ActivityEventStoring)? = JSONLActivityEventStore.live(),
         longTermWatchTargets: LongTermWatchTargetStore = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence()
@@ -83,6 +89,7 @@ struct AppDependencies {
         self.activityExclusion = activityExclusion
         self.activitySizeProviders = activitySizeProviders
         self.forgetActivitySizes = forgetActivitySizes
+        self.claimWatchFolder = claimWatchFolder
         self.activityEventStore = activityEventStore
         self.longTermWatchTargets = longTermWatchTargets
         self.activityBaselineService = activityBaselineService
@@ -173,6 +180,12 @@ struct AppDependencies {
                 )
             },
             forgetActivitySizes: { activitySizeIndex.forget(scope: $0) },
+            claimWatchFolder: {
+                try claimFolder(
+                    storageDir: ActivityStorageIsolation.directoryPath,
+                    root: $0.standardizedFileURL.path
+                )
+            },
             activityEventStore: activityEventStore,
             // A scan may observe a new size before its delayed change event.
             // Keep those measurements out of the live attribution index so they

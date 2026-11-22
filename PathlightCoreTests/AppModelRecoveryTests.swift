@@ -1,4 +1,5 @@
 import Foundation
+import PathlightRustCore
 import XCTest
 @testable import PathlightCore
 
@@ -179,6 +180,29 @@ final class AppModelRecoveryTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         XCTAssertTrue(model.monitoringStatusMessage?.contains("not being watched") == true)
+    }
+
+    /// `pathlight-monitor watch` shares the app's storage. A folder it is
+    /// already recording is not recorded a second time by the app.
+    func testFolderRecordedByAnotherPathlightIsNotWatched() async throws {
+        let storage = FileManager.default.temporaryDirectory
+            .appending(path: "pathlight-claim-\(UUID().uuidString)", directoryHint: .isDirectory)
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let claim: @Sendable (URL) throws -> AnyObject? = {
+            try claimFolder(storageDir: storage.path, root: $0.path)
+        }
+        let monitor = RecoveryTestMonitor()
+        let scan = RecoveryScanGate(blockingScan: .max, monitor: monitor)
+        let (model, _, root) = makeModel(monitor: monitor, scan: scan, claimWatchFolder: claim)
+        defer { model.cleanup() }
+        let other = try claim(root)
+
+        model.enableLongTermWatch(rootPath: root, options: detailedOptions)
+        try await eventually("refusal reported") {
+            model.monitoringStatusMessage?.contains("already being watched") == true
+        }
+        XCTAssertNil(model.longTermWatchTargets.first?.checkpoint)
+        withExtendedLifetime(other) {}
     }
 
     func testUnavailableEncryptionKeyIsReportedAtLaunch() async throws {
@@ -479,7 +503,8 @@ final class AppModelRecoveryTests: XCTestCase {
         eventStore: (any ActivityEventStoring)? = nil,
         keyWarmUp: @escaping @Sendable () throws -> Void = {},
         storageReset: (@Sendable () async throws -> Void)? = nil,
-        baselineDirectory: URL? = nil
+        baselineDirectory: URL? = nil,
+        claimWatchFolder: @escaping @Sendable (URL) throws -> AnyObject? = { _ in nil }
     ) -> (AppModel, UserDefaultsLongTermWatchTargetPersistence, URL) {
         let suite = "AppModelRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -495,6 +520,7 @@ final class AppModelRecoveryTests: XCTestCase {
             activityMonitor: monitor,
             activityAttribution: stubActivityAttribution,
             activitySizeProviders: { _ in ActivitySizeProviders(size: { _ in 4_096 }) },
+            claimWatchFolder: claimWatchFolder,
             activityEventStore: eventStore,
             longTermWatchTargets: LongTermWatchTargetStore(persistence: persistence),
             activityBaselineService: ActivityBaselineService(
