@@ -234,7 +234,7 @@ struct ActivityDashboardPresentationTests {
         #expect(presentation.topChanges.first?.url == downloads.appending(path: "Movies"))
     }
 
-    @Test("summarizes menu bar activity with today's net change")
+    @Test("summarizes menu bar activity as an active count, net per folder and today's total")
     func summarizesMenuBarActivity() {
         let downloads = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
         let calendar = Calendar(identifier: .gregorian)
@@ -278,8 +278,43 @@ struct ActivityDashboardPresentationTests {
 
         #expect(presentation.rows.map(\.title) == ["Downloads"])
         #expect(presentation.rows.first?.statusText == "Watching")
-        #expect(presentation.rows.first?.todayChangeText == "+2 KB today")
-        #expect(presentation.summaryText == "1 watching • +2 KB today")
+        // The row is the window's card in one line: net over everything kept.
+        #expect(presentation.rows.first?.netChangeText == "+4 KB net")
+        #expect(presentation.labelText == "1 active")
+        #expect(presentation.summaryText == "1 active • +2 KB today")
+    }
+
+    /// The label counts what the window counts: a folder that is switched on
+    /// but gone is not being watched, and a paused one is not active.
+    @Test("the menu bar label counts the same watches the window calls active")
+    func menuBarLabelCountsActiveWatches() {
+        let here = URL(filePath: "/Users/example/Downloads", directoryHint: .isDirectory)
+        let gone = URL(filePath: "/Volumes/Unplugged", directoryHint: .isDirectory)
+        let paused = URL(filePath: "/Users/example/Desktop", directoryHint: .isDirectory)
+        let targets = [
+            LongTermWatchTarget(rootPath: here),
+            LongTermWatchTarget(rootPath: gone),
+            LongTermWatchTarget(rootPath: paused, isEnabled: false)
+        ]
+        let statuses = [
+            gone.standardizedFileURL.path: LongTermWatchRuntimeStatus(
+                state: .rootMissing,
+                lastActivityAt: nil,
+                retryCount: 0
+            )
+        ]
+
+        let menu = MenuBarActivityPresentation(targets: targets, histories: [], runtimeStatuses: statuses)
+        let window = ActivityDashboardPresentation(
+            targets: targets,
+            selectedRootPath: nil,
+            histories: [],
+            runtimeStatuses: statuses
+        )
+
+        #expect(menu.labelText == "1 active")
+        #expect(window.summaryText == "3 tracked folders • 1 active")
+        #expect(menu.rows.first?.netChangeText == "No history")
     }
 
     @Test("shows empty state when there are no long-term targets")

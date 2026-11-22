@@ -79,11 +79,7 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         title = "Activity"
         emptyStateTitle = targets.isEmpty ? "No Long-Term Watches" : nil
 
-        // A folder that vanished is still enabled but is not being watched;
-        // counting it as active is how the old summary hid the failure.
-        let activeCount = targets.filter { target in
-            target.isEnabled && runtimeStatuses[target.id]?.state != .rootMissing
-        }.count
+        let activeCount = Self.activeCount(targets: targets, runtimeStatuses: runtimeStatuses)
         if targets.isEmpty {
             summaryText = "No tracked folders"
         } else {
@@ -258,6 +254,18 @@ struct ActivityDashboardPresentation: Equatable, Sendable {
         count == 1 ? "1 event" : "\(count.formatted()) events"
     }
 
+    /// One count for the window and the menu bar, so they cannot disagree.
+    /// A folder that vanished is still enabled but is not being watched;
+    /// counting it as active is how the old summary hid the failure.
+    static func activeCount(
+        targets: [LongTermWatchTarget],
+        runtimeStatuses: [LongTermWatchTarget.ID: LongTermWatchRuntimeStatus]
+    ) -> Int {
+        targets.filter { target in
+            target.isEnabled && runtimeStatuses[target.id]?.state != .rootMissing
+        }.count
+    }
+
     static func statusText(for status: LongTermWatchRuntimeStatus) -> String {
         switch status.state {
         case .starting:
@@ -317,15 +325,17 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
         let id: String
         let title: String
         let statusText: String
-        let todayChangeText: String
+        /// Over everything recorded, the same figure the window's card shows.
+        let netChangeText: String
         let isEnabled: Bool
         let rootPath: URL
     }
 
     let rows: [Row]
     let summaryText: String
-    /// Compact "+1.2 GB" for the menu bar label; empty when nothing is monitored.
-    let todayTotalText: String
+    /// "2 active" for the menu bar label; empty when nothing is monitored.
+    /// How much changed is one click away, in the rows.
+    let labelText: String
 
     init(
         targets: [LongTermWatchTarget],
@@ -350,7 +360,8 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
                 id: target.id,
                 title: ActivityDashboardPresentation.displayName(for: target.rootPath),
                 statusText: ActivityDashboardPresentation.statusText(for: status),
-                todayChangeText: "\(ActivityDashboardPresentation.signedSize(todayDelta)) today",
+                netChangeText: historyByRoot[target.id]
+                    .map { "\(ActivityDashboardPresentation.signedSize($0.totalNetByteDelta)) net" } ?? "No history",
                 isEnabled: target.isEnabled,
                 rootPath: target.rootPath
             )
@@ -358,11 +369,14 @@ struct MenuBarActivityPresentation: Equatable, Sendable {
 
         if targets.isEmpty {
             summaryText = "No folders monitored"
-            todayTotalText = ""
+            labelText = ""
         } else {
-            let watchingCount = targets.filter(\.isEnabled).count
-            summaryText = "\(watchingCount.formatted()) watching • \(ActivityDashboardPresentation.signedSize(todayTotal)) today"
-            todayTotalText = ActivityDashboardPresentation.signedSize(todayTotal)
+            let active = ActivityDashboardPresentation.activeCount(
+                targets: targets,
+                runtimeStatuses: runtimeStatuses
+            )
+            labelText = "\(active.formatted()) active"
+            summaryText = "\(labelText) • \(ActivityDashboardPresentation.signedSize(todayTotal)) today"
         }
     }
 }
