@@ -161,8 +161,10 @@ struct AppDependencies {
                         )
                     },
                     prior: { url in
-                        activitySizeIndex.takeKnownSize(for: url, scope: scope)
-                            ?? baselineSizes.size(for: url, scope: scope)
+                        // Both forget it, whichever one answers: a baseline
+                        // that outlived the file would answer for it again.
+                        let walked = baselineSizes.take(for: url, scope: scope)
+                        return activitySizeIndex.takeKnownSize(for: url, scope: scope) ?? walked
                     },
                     known: { url in
                         activitySizeIndex.knownSize(for: url, scope: scope)
