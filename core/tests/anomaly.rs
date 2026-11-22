@@ -114,3 +114,28 @@ fn a_deletion_of_unknown_size_still_counts() {
     assert_eq!(found[0].items, 150);
     assert_eq!(found[0].bytes, 0);
 }
+
+/// Git's own churn is not somebody losing files: lock files and loose
+/// objects go by the hundred on every fetch. A repository deleted outright
+/// still is, and so is the same count anywhere else.
+#[test]
+fn git_deleting_its_own_bookkeeping_is_not_many_files_deleted() {
+    let churn: Vec<ActivityEvent> = (0..150)
+        .map(|index| {
+            let mut gone = event(EventKind::Deleted, 0, 1, 30);
+            gone.path = format!("/watched/repo/.git/objects/{index}.lock");
+            gone
+        })
+        .collect();
+    assert!(anomalies(&churn, now()).is_empty());
+
+    let mut work: Vec<ActivityEvent> = churn;
+    for (index, gone) in work.iter_mut().enumerate() {
+        gone.path = format!("/watched/repo/src/{index}.rs");
+    }
+    assert_eq!(anomalies(&work, now()).len(), 1);
+
+    let mut whole = event(EventKind::Deleted, 0, 150, 30);
+    whole.path = "/watched/repo/.git".to_owned();
+    assert_eq!(anomalies(&[whole], now()).len(), 1);
+}

@@ -84,7 +84,13 @@ pub fn anomalies<'a>(
     {
         let delta = event.byte_delta.unwrap_or(0);
         if event.kind == EventKind::Deleted || delta < 0 {
-            removed_items = removed_items.saturating_add(u64::from(event.affected_item_count));
+            // Git deletes its own lock files and loose objects by the
+            // hundred, every fetch and every maintenance run: a week of one
+            // folder of repositories raised "many files deleted" in 63 hours
+            // of 64. Nobody lost those. Their bytes still count below.
+            if !is_git_bookkeeping(&event.path) {
+                removed_items = removed_items.saturating_add(u64::from(event.affected_item_count));
+            }
             removed_bytes = removed_bytes.saturating_add(delta.min(0));
         }
         if delta > 0 {
@@ -110,6 +116,12 @@ pub fn anomalies<'a>(
         });
     }
     found
+}
+
+/// A path inside a repository's `.git`, which git itself churns.
+fn is_git_bookkeeping(path: &str) -> bool {
+    let mut parts = path.split(['/', '\\']);
+    parts.any(|part| part == ".git") && parts.next().is_some()
 }
 
 /// [`anomalies`] across the FFI.
