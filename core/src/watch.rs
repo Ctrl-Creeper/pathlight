@@ -441,9 +441,15 @@ impl Worker {
             size
         };
         let prior_size = |path: &str| {
-            index
-                .take(&prior_scope, path)
-                .or_else(|| baseline_size(&baseline, path))
+            // Both forget it, whichever one answers: a baseline that outlived
+            // the file would answer for it again.
+            let walked = baseline
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .sizes
+                .take(path)
+                .and_then(|size| i64::try_from(size).ok());
+            index.take(&prior_scope, path).or(walked)
         };
         let known_size = |path: &str| {
             index
