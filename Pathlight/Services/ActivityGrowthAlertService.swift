@@ -57,9 +57,9 @@ nonisolated struct ActivityAnomaly: Equatable, Sendable {
 ///
 /// The window and the thresholds live in the Rust core, which every host
 /// shares — a second definition of "anomaly" means this app stays quiet
-/// through what the Windows and Linux window calls an emergency. This package
-/// does not link the core, so the app injects the detector and a host without
-/// one simply never raises an anomaly. What the notification *says* stays
+/// through what the Windows and Linux window calls an emergency. The app
+/// injects the detector, so a test can run without one and simply never
+/// raises an anomaly. What the notification *says* stays
 /// here: the wording is this platform's, not the policy's.
 typealias ActivityAnomalyDetecting = @Sendable (
     _ events: [DiskActivityEvent],

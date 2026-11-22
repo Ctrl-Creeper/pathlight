@@ -6,8 +6,7 @@ import Foundation
 ///
 /// Declared here and implemented in the Rust core, which every host shares —
 /// two implementations of "is this path noise" drift, and the journal both
-/// hosts read would then hold two answers about what was worth recording. This
-/// package does not link the core, so `swift test` needs no xcframework; the
+/// hosts read would then hold two answers about what was worth recording. The
 /// app target injects `RustActivityExclusion`, the way it already injects
 /// attribution and its monitor.
 nonisolated protocol ActivityExcluding: Sendable {

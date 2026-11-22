@@ -15,8 +15,8 @@ final class AppModelDependencyTests: XCTestCase {
         let dependencies = AppDependencies.live(
             activityMonitor: InertDiskActivityMonitor(),
             activityAttribution: stubActivityAttribution,
-            // Nothing is excluded and nothing is an anomaly here: both live
-            // in the Rust core, which this package does not link.
+            // Nothing is excluded and nothing is an anomaly here: neither is
+            // what this test is about.
             activityExclusion: { _, _ in nil },
             activityAnomalies: { _, _, _ in [] },
             activityStorageCryptor: PlaintextActivityStorageCryptor(),
