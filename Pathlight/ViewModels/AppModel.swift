@@ -70,6 +70,7 @@ final class AppModel: ObservableObject {
     private var pendingJournalRoots: Set<String> = []
     private var pendingJournalCheckpoints: [String: LongTermWatchCheckpoint] = [:]
     private var committedJournalEvents: [UUID: DiskActivityEvent] = [:]
+    private var committedJournalTimes: [UUID: Date] = [:]
     private var pendingJournalSince: Date?
     private var journalFlushTask: Task<Void, Never>?
     private var journalFlushInProgress = false
@@ -92,9 +93,16 @@ final class AppModel: ObservableObject {
     private static let journalFlushDelay: TimeInterval = 1.2
     /// A never-quiet file still gets persisted at least this often.
     private static let journalFlushMaxWait: TimeInterval = 5
-    /// Session coalescing is one second. Retaining committed versions slightly
-    /// longer lets a max-wait flush turn a later merged version into a delta.
-    private static let committedJournalEventRetention: TimeInterval = 2
+    /// How long a committed row is remembered, from when it was written, so a
+    /// later merged version of it becomes a delta instead of a second row.
+    ///
+    /// The session merges by the events' own times (within a second of each
+    /// other), but a watcher delivers them up to its latency apart, so this
+    /// has to outlast the longest latency. It used to be two seconds measured
+    /// from the event's time: with any real latency the row was forgotten the
+    /// moment it was committed, and the merge wrote the whole file again.
+    private static let committedJournalEventRetention: TimeInterval =
+        MonitoringStartConfiguration.maximumMonitorLatency + 5
     /// One or two failed flushes are normal transients; past that the store is
     /// really unavailable and the user deserves to hear about it.
     private static let journalFlushFailureReportThreshold = 3
@@ -326,6 +334,7 @@ final class AppModel: ObservableObject {
         pendingJournalCheckpoints.removeAll()
         pendingJournalSince = nil
         committedJournalEvents.removeAll()
+        committedJournalTimes.removeAll()
 
         liveWatchTask?.cancel()
         liveWatchTask = nil
@@ -565,13 +574,16 @@ final class AppModel: ObservableObject {
             setMonitoringStatus(nil, for: .encryptionKey)
             journalFlushInProgress = false
             journalFlushInFlightRoots.subtract(batch.roots)
+            let committedAt = Date()
             for entry in batch.entries {
                 committedJournalEvents[entry.id] = entry.event
+                committedJournalTimes[entry.id] = committedAt
             }
-            let retentionCutoff = Date().addingTimeInterval(-Self.committedJournalEventRetention)
-            committedJournalEvents = committedJournalEvents.filter {
-                $0.value.timestamp >= retentionCutoff || pendingJournalEvents[$0.key] != nil
+            let retentionCutoff = committedAt.addingTimeInterval(-Self.committedJournalEventRetention)
+            committedJournalTimes = committedJournalTimes.filter {
+                $0.value >= retentionCutoff || pendingJournalEvents[$0.key] != nil
             }
+            committedJournalEvents = committedJournalEvents.filter { committedJournalTimes[$0.key] != nil }
             for (root, checkpoint) in batch.checkpoints {
                 var checkpoint = checkpoint
                 if checkpoint.hasHistoryGap,

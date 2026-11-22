@@ -93,6 +93,51 @@ final class AppModelJournalTests: XCTestCase {
         XCTAssertEqual(rows.map(\.path.lastPathComponent), ["one.bin"])
     }
 
+    /// A watcher reports late: a file made at 4.9 s and touched at 5.3 s lands
+    /// in two batches seconds apart, by which time the first is committed.
+    /// The session merges them into one row, and the journal must get only
+    /// what the merge added — it used to get the whole file a second time.
+    func testAMergeDeliveredAfterTheCommitWritesOnlyItsDelta() async throws {
+        let root = URL(filePath: "/tmp/pathlight-journal-tests/\(UUID().uuidString)", directoryHint: .isDirectory)
+        let file = root.appending(path: "Build.o")
+        let made = Date().addingTimeInterval(-10)
+        let monitor = ScriptedDiskActivityMonitor(
+            events: [
+                .change(DiskActivityChange(kind: .created, path: file, rootPath: root, timestamp: made), eventID: 1)
+            ],
+            later: [
+                .change(DiskActivityChange(kind: .modified, path: file, rootPath: root, timestamp: made.addingTimeInterval(0.4)), eventID: 2)
+            ]
+        )
+        let store = InMemoryActivityEventStore()
+        let sizes = SizeTable(sizes: [file.path: [400, 400]])
+        let model = AppModel(
+            dependencies: AppDependencies(
+                systemActions: .inert,
+                activityMonitor: monitor,
+                activityAttribution: stubActivityAttribution,
+                activitySizeProviders: { _ in
+                    ActivitySizeProviders(size: { sizes.next(for: $0) }, known: { sizes.known(for: $0) })
+                },
+                activityEventStore: store,
+                longTermWatchTargets: LongTermWatchTargetStore(
+                    persistence: UserDefaultsLongTermWatchTargetPersistence(
+                        defaults: UserDefaults(suiteName: "AppModelJournalTests.\(UUID().uuidString)")!
+                    )
+                ),
+                activityStoragePreferences: FixedActivityStoragePreferencesStore(encryptNewData: false),
+                launchAtLoginService: NoopLaunchAtLoginService()
+            )
+        )
+        defer { model.cleanup() }
+
+        model.startShortTermWatch(rootPath: root)
+
+        try await Task.sleep(for: .milliseconds(5_500))
+        let rows = await store.allEvents()
+        XCTAssertEqual(rows.compactMap(\.byteDelta).reduce(0, +), 400, "rows: \(rows.map { ($0.kind, $0.byteDelta) })")
+    }
+
     func testRemovingAWatchDeletesItsHistoryOnlyWhenAsked() async throws {
         let root = URL(filePath: "/tmp/pathlight-journal-tests/\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = InMemoryActivityEventStore()
@@ -197,16 +242,26 @@ private final class SizeTable: @unchecked Sendable {
 
 private final class ScriptedDiskActivityMonitor: DiskActivityMonitoring, @unchecked Sendable {
     private let events: [DiskActivityStreamEvent]
+    /// Delivered three seconds after the rest, as a second batch.
+    private let later: [DiskActivityStreamEvent]
 
-    init(events: [DiskActivityStreamEvent]) {
+    init(events: [DiskActivityStreamEvent], later: [DiskActivityStreamEvent] = []) {
         self.events = events
+        self.later = later
     }
 
     nonisolated func events(for root: URL, since eventID: UInt64?, latency: TimeInterval) -> AsyncStream<DiskActivityStreamEvent> {
         let events = events
+        let later = later
         return AsyncStream { continuation in
             for event in events {
                 continuation.yield(event)
+            }
+            if !later.isEmpty {
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    later.forEach { continuation.yield($0) }
+                }
             }
             // Keep the stream open like a real watcher; the task is cancelled by the model.
         }
