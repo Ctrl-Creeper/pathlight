@@ -105,9 +105,9 @@ fn contains_ignoring_case(haystack: &str, needle: &str) -> bool {
 /// Mirrors Swift's `ActivityEventPageBuilder`: matched rows go into a window
 /// twice the size of the page and are cut back to the page whenever it fills,
 /// so a journal of any length costs the page plus one bucket per interval.
-pub struct Builder<'a> {
-    root_path: &'a str,
-    query: &'a Query,
+pub struct Builder {
+    root_path: String,
+    query: Query,
     generated_at: SystemTime,
     interval: u64,
     /// Rows to hold: the page plus everything a caller is paging past.
@@ -122,18 +122,18 @@ pub struct Builder<'a> {
     child_totals: HashMap<String, ChildTotal>,
 }
 
-impl<'a> Builder<'a> {
+impl Builder {
     pub fn new(
-        root_path: &'a str,
+        root_path: &str,
         bucket_interval_secs: u64,
         recent_limit: u32,
-        query: &'a Query,
+        query: &Query,
         generated_at: SystemTime,
     ) -> Self {
         let wanted = query.skip as usize + recent_limit as usize;
         Self {
-            root_path,
-            query,
+            root_path: crate::paths::normalize(root_path),
+            query: query.clone(),
             generated_at,
             interval: bucket_interval_secs.max(1),
             wanted,
@@ -205,7 +205,7 @@ impl<'a> Builder<'a> {
     /// arrive in journal order, so cutting early picks the same rows a sort of
     /// the whole journal would have.
     fn cut(&mut self) {
-        let query = self.query;
+        let query = &self.query;
         self.page.sort_by(|lhs, rhs| query.order(lhs, rhs));
         self.page.truncate(self.wanted);
     }
@@ -215,21 +215,28 @@ impl<'a> Builder<'a> {
     /// display understates the answer by the ratio between the journal and the
     /// page.
     pub fn finish(mut self) -> HistorySnapshot {
+        self.snapshot(self.generated_at)
+    }
+
+    /// The answer so far, leaving the builder ready for the rows written
+    /// after it: what lets a second read cost only what was appended.
+    pub fn snapshot(&mut self, generated_at: SystemTime) -> HistorySnapshot {
         self.cut();
         HistorySnapshot {
-            root_path: crate::paths::normalize(self.root_path),
-            generated_at: self.generated_at,
+            root_path: self.root_path.clone(),
+            generated_at,
             total_net_byte_delta: self.total_net_byte_delta,
             event_count: self.matched as u32,
             unknown_size_event_count: self.unknown as u32,
-            buckets: self.buckets.into_values().collect(),
+            buckets: self.buckets.values().cloned().collect(),
             is_truncated: self.matched > self.wanted,
             latest_event_at: self.latest,
-            child_totals: self.child_totals,
+            child_totals: self.child_totals.clone(),
             recent_events: self
                 .page
-                .into_iter()
+                .iter()
                 .skip(self.query.skip as usize)
+                .cloned()
                 .collect(),
         }
     }
