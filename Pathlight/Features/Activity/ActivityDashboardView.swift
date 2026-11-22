@@ -962,7 +962,7 @@ private struct ActivityDashboardTrendSection: View {
             HStack(spacing: 6) {
                 Label("Space Trend", systemImage: "chart.xyaxis.line")
                     .font(.headline)
-                HelpTip("Each bar is one period's net change; the period grows with the span, from 5 minutes to a week. Hover a bar for its bytes and event count.")
+                HelpTip("The line is the running net change since the start of the recorded history. Hover it for one period's change, the total so far and the event count; a period grows with the span, from 5 minutes to a week.")
             }
 
             if buckets.isEmpty {
@@ -985,22 +985,65 @@ private struct ActivityDashboardTrendChart: View {
 
     @State private var selectedDate: Date?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Chart(buckets) { bucket in
-                BarMark(
-                    xStart: .value("Start", bucket.startDate),
-                    xEnd: .value("End", bucket.endDate.addingTimeInterval(
-                        -bucket.endDate.timeIntervalSince(bucket.startDate) * 0.15
-                    )),
-                    y: .value("Change", bucket.byteDelta)
-                )
-                .foregroundStyle(bucket.byteDelta >= 0 ? Color.green.gradient : Color.orange.gradient)
-                .cornerRadius(3)
+    /// The running net change: where the folder has got to, period by period,
+    /// starting from zero at the left edge. A trend is a line; the bars this
+    /// replaces showed each period on its own and left the adding-up to the eye.
+    private struct Point: Identifiable {
+        let date: Date
+        let total: Int64
+        var id: Date { date }
+    }
 
-                if let selectedBucket, selectedBucket.id == bucket.id {
-                    RuleMark(x: .value("Selected", selectedBucket.startDate))
+    private var points: [Point] {
+        var total: Int64 = 0
+        return (buckets.first.map { [Point(date: $0.startDate, total: 0)] } ?? [])
+            + buckets.map { bucket in
+                total += bucket.byteDelta
+                return Point(date: bucket.endDate, total: total)
+            }
+    }
+
+    var body: some View {
+        let points = points
+        let tint: Color = (points.last?.total ?? 0) >= 0 ? .green : .orange
+        VStack(alignment: .leading, spacing: 6) {
+            Chart {
+                RuleMark(y: .value("Start", 0))
+                    .foregroundStyle(.secondary.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+                ForEach(points) { point in
+                    AreaMark(
+                        x: .value("Time", point.date),
+                        y: .value("Net change", point.total)
+                    )
+                    .interpolationMethod(.monotone)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [tint.opacity(0.28), tint.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
+                    LineMark(
+                        x: .value("Time", point.date),
+                        y: .value("Net change", point.total)
+                    )
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(tint)
+                }
+
+                if let selected = selectedPoint {
+                    RuleMark(x: .value("Selected", selected.date))
                         .foregroundStyle(.secondary.opacity(0.4))
+                    PointMark(
+                        x: .value("Time", selected.date),
+                        y: .value("Net change", selected.total)
+                    )
+                    .symbolSize(50)
+                    .foregroundStyle(tint)
                 }
             }
             .chartYAxis {
@@ -1023,22 +1066,28 @@ private struct ActivityDashboardTrendChart: View {
         }
     }
 
-    private var selectedBucket: ActivityHistoryPresentation.Bucket? {
+    private var selectedIndex: Int? {
         guard let selectedDate else {
             return nil
         }
-        // A bar spans its period, so the hovered bar is the one whose period
-        // holds the pointer — not the one whose left edge is nearest.
-        return buckets.first { $0.startDate <= selectedDate && selectedDate < $0.endDate }
-            ?? buckets.last { $0.startDate <= selectedDate }
+        // The period that holds the pointer, not the one whose edge is nearest.
+        return buckets.firstIndex { $0.startDate <= selectedDate && selectedDate < $0.endDate }
+            ?? buckets.lastIndex { $0.startDate <= selectedDate }
+    }
+
+    /// The end of the hovered period: `points` leads with the zero it starts from.
+    private var selectedPoint: Point? {
+        selectedIndex.map { points[$0 + 1] }
     }
 
     private var selectionCaption: String {
-        guard let bucket = selectedBucket else {
+        guard let index = selectedIndex, let point = selectedPoint else {
             return " "
         }
+        let bucket = buckets[index]
         let eventLabel = bucket.eventCount == 1 ? "event" : "events"
-        return "\(bucket.label) • \(bucket.detail) • \(bucket.eventCount.formatted()) \(eventLabel)"
+        let total = ActivityDashboardPresentation.signedSize(point.total)
+        return "\(bucket.label) • \(bucket.detail) • \(total) so far • \(bucket.eventCount.formatted()) \(eventLabel)"
     }
 }
 

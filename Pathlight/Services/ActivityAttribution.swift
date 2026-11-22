@@ -88,7 +88,19 @@ nonisolated final class ActivityBaselineSizes: @unchecked Sendable {
         defer { lock.unlock() }
         guard tables[scope] != nil else { return nil }
         if tables[scope]!.pending.count >= Table.mergeAt { tables[scope]!.merge() }
-        return tables[scope]!.size(for: key)
+        // A negative size is a path that was here at the walk and has gone since.
+        return tables[scope]!.size(for: key).flatMap { $0 < 0 ? nil : $0 }
+    }
+
+    /// The size a path had at the walk, for the deletion that is reporting it,
+    /// and the last time this table answers for it. Left in place, the entry
+    /// priced a second delete event for the same path again, and made the
+    /// file's return look like a change of nothing: one `git switch` recorded
+    /// a file it had only rewritten as bytes lost twice.
+    func take(for url: URL, scope: String) -> Int64? {
+        guard let size = size(for: url, scope: scope) else { return nil }
+        record(-1, for: url, scope: scope)
+        return size
     }
 
     func forget(scope: String) {

@@ -65,6 +65,28 @@ final class AppModelDependencyTests: XCTestCase {
         XCTAssertEqual(names, ["activity-size-index.jsonl", "pathlight.log", "baseline-sizes-1a2b.bin"])
     }
 
+    /// `git switch` rewrites a file as delete, delete, create. The walked
+    /// baseline answered for the path every time: the bytes were lost twice
+    /// and the file coming back measured as no change.
+    func testADeletionConsumesTheWalkedBaseline() {
+        let file = URL(filePath: "/Users/example/Develop/app/Main.swift")
+        let scope = "long-term:/Users/example/Develop"
+        let dependencies = AppDependencies.live(
+            activityMonitor: InertDiskActivityMonitor(),
+            activityAttribution: stubActivityAttribution,
+            activityExclusion: { _, _ in nil },
+            activityAnomalies: { _, _, _ in [] },
+            activityStorageCryptor: PlaintextActivityStorageCryptor(),
+            activitySizeIndex: ActivitySizeIndex()
+        )
+        dependencies.activityBaselineSizes.record(8_192, for: file, scope: scope)
+        let providers = dependencies.activitySizeProviders(scope)
+
+        XCTAssertEqual(providers.prior(file), 8_192)
+        XCTAssertNil(providers.prior(file), "a second delete event priced the same file again")
+        XCTAssertNil(providers.known(file), "the file's return would measure as a change of nothing")
+    }
+
     func testLoadsPersistedLongTermWatchTargets() {
         let store = LongTermWatchTargetStore(
             persistence: UserDefaultsLongTermWatchTargetPersistence(defaults: makeDefaults())
