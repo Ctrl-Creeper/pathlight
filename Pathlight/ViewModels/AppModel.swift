@@ -812,9 +812,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // Reloading history reads the whole journal, so event-driven refreshes are
-    // throttled per root: the first fires immediately, later ones coalesce into
-    // one trailing refresh so sustained churn costs at most one reload per second.
+    // Event-driven refreshes are throttled per root: the first fires
+    // immediately, later ones coalesce into one trailing refresh so sustained
+    // churn costs at most one reload per second. The core carries a repeated
+    // read on from where the last one stopped, so only the first is a whole
+    // journal; the measured duration below covers the reads that still are.
     private func scheduleEventDrivenHistoryRefresh(rootPath: URL) {
         // At most a tenth of the time spent reading: a 200 MB journal takes
         // seconds to read, and re-reading it every second on a folder that

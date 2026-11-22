@@ -419,3 +419,48 @@ fn trim_dates_rows_under_an_older_key_and_reports_the_oldest_kept() {
     assert_eq!(kept.len(), 1);
     assert_eq!(outcome.oldest_kept, Some(kept[0].timestamp));
 }
+
+/// A second read is carried on from the first, so it must give the answer a
+/// first read would have: after an append, and after a rewrite took rows away.
+#[test]
+fn a_repeated_history_read_matches_a_fresh_one_after_appends_and_rewrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = at(dir.path());
+    let read = || {
+        journal
+            .load_history(ROOT.to_owned(), 10, 3_600, Default::default())
+            .unwrap()
+    };
+
+    journal
+        .append(vec![event("old.bin", 400), event("a.bin", 3)])
+        .unwrap();
+    assert_eq!(read().event_count, 2);
+
+    journal.append(vec![event("b.bin", 2)]).unwrap();
+    let grown = read();
+    assert_eq!(grown.event_count, 3);
+    assert_eq!(grown.total_net_byte_delta, 3 * 1_024);
+    assert!(grown.recent_events[0].path.ends_with("b.bin"));
+
+    // Half a row with no newline is still being written: not counted, and
+    // counted once when the rest of it lands.
+    let row = event("c.bin", 1).to_json_line().unwrap();
+    let (first, rest) = row.split_at(row.len() / 2);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("activity-events.jsonl"))
+        .unwrap();
+    std::io::Write::write_all(&mut file, first.as_bytes()).unwrap();
+    assert_eq!(read().event_count, 3);
+    std::io::Write::write_all(&mut file, format!("{rest}\n").as_bytes()).unwrap();
+    assert_eq!(read().event_count, 4);
+
+    assert_eq!(journal.trim(180, 180, 0).unwrap(), 1);
+    let trimmed = read();
+    assert_eq!(trimmed.event_count, 3);
+    assert_eq!(trimmed.total_net_byte_delta, 3 * 1_024);
+
+    journal.forget_root(ROOT).unwrap();
+    assert_eq!(read().event_count, 0);
+}

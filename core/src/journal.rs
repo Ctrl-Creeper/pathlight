@@ -355,32 +355,149 @@ impl Journal {
         // Streamed, not loaded: the totals have to cover every retained row,
         // but only the page has to be held, and the journal is capped in
         // gigabytes while the page is a screenful.
-        let mut history = crate::history::Builder::new(
-            &root_path,
-            bucket_interval_secs,
-            limit,
-            &query,
-            SystemTime::now(),
-        );
-        if self.path.exists() {
-            let root = crate::paths::normalize(&root_path);
-            let key = crate::crypt::key(&self.path);
-            let mut legacy = None;
-            for line in self.lines()? {
-                let Some(line) = text(line)? else { continue };
-                let Some(event) = self
-                    .open_line(&line, key.as_ref(), &mut legacy)
-                    .and_then(|json| ActivityEvent::from_json_line(&json).ok())
-                else {
-                    continue;
-                };
-                if crate::paths::normalize(&event.root_path) == root {
-                    history.push(event);
-                }
+        //
+        // And resumed, not repeated: a dashboard asks the same question after
+        // every flush, and the answer to it only ever gains the rows appended
+        // since. Reading the whole file each time cost seconds per refresh on
+        // a journal of a few hundred megabytes.
+        let root = crate::paths::normalize(&root_path);
+        let asked = (self.path.clone(), root.clone(), limit, bucket_interval_secs);
+        let Ok(mut file) = fs::File::open(&self.path) else {
+            return Ok(crate::history::Builder::new(
+                &root_path,
+                bucket_interval_secs,
+                limit,
+                &query,
+                SystemTime::now(),
+            )
+            .finish());
+        };
+        let resumed = take_resume(&asked, &query).filter(|resume| resume.still_holds(&mut file));
+        let mut resume = resumed.unwrap_or_else(|| Resume {
+            asked,
+            query: query.clone(),
+            offset: 0,
+            head: Vec::new(),
+            tail: Vec::new(),
+            history: crate::history::Builder::new(
+                &root_path,
+                bucket_interval_secs,
+                limit,
+                &query,
+                SystemTime::now(),
+            ),
+        });
+
+        file.seek(SeekFrom::Start(resume.offset))?;
+        let mut reader = std::io::BufReader::new(file);
+        let key = crate::crypt::key(&self.path);
+        let mut legacy = None;
+        // A sealed row that will not open may open once its key is back (a
+        // locked Keychain), so a read that met one is not remembered.
+        let mut unopened = false;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line)?;
+            // A line without its newline is a row still being written.
+            if read == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            resume.offset += read as u64;
+            let Ok(text) = std::str::from_utf8(&line[..read - 1]) else {
+                continue;
+            };
+            let Some(json) = self.open_line(text, key.as_ref(), &mut legacy) else {
+                unopened |= text.starts_with(ENCRYPTED_PREFIX);
+                continue;
+            };
+            let Ok(event) = ActivityEvent::from_json_line(&json) else {
+                continue;
+            };
+            if crate::paths::normalize(&event.root_path) == root {
+                resume.history.push(event);
             }
         }
-        Ok(history.finish())
+
+        let snapshot = resume.history.snapshot(SystemTime::now());
+        let mut file = reader.into_inner();
+        if !unopened && resume.mark(&mut file).is_ok() {
+            keep_resume(resume);
+        }
+        Ok(snapshot)
     }
+}
+
+/// How many bytes at each end of what was read are compared before a read is
+/// resumed.
+const RESUME_MARK: u64 = 256;
+
+/// How many questions are remembered: a few watched folders and the search
+/// somebody is in the middle of.
+const RESUMES_KEPT: usize = 8;
+
+/// A history read that can be carried on from where it stopped.
+struct Resume {
+    /// Journal, root, page size and bucket width.
+    asked: (PathBuf, String, u32, u64),
+    query: crate::history::Query,
+    /// How far into the journal `history` has been fed.
+    offset: u64,
+    /// The first and last bytes of what was read. Trim, forget and a rolled
+    /// back append all rewrite the file, and every one of them moves or
+    /// changes these.
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    history: crate::history::Builder,
+}
+
+impl Resume {
+    fn marks(&self, file: &mut fs::File) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+        let length = self.offset.min(RESUME_MARK);
+        let mut head = vec![0; length as usize];
+        let mut tail = vec![0; length as usize];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut head)?;
+        file.seek(SeekFrom::Start(self.offset - length))?;
+        file.read_exact(&mut tail)?;
+        Ok((head, tail))
+    }
+
+    fn mark(&mut self, file: &mut fs::File) -> std::io::Result<()> {
+        (self.head, self.tail) = self.marks(file)?;
+        Ok(())
+    }
+
+    /// Whether the file still starts with exactly what this read consumed.
+    fn still_holds(&self, file: &mut fs::File) -> bool {
+        self.marks(file)
+            .is_ok_and(|(head, tail)| head == self.head && tail == self.tail)
+    }
+}
+
+static RESUMES: std::sync::Mutex<Vec<Resume>> = std::sync::Mutex::new(Vec::new());
+
+/// Taken out rather than borrowed, so the lock is never held across a read:
+/// two reads of one question at once just means one of them starts over.
+fn take_resume(
+    asked: &(PathBuf, String, u32, u64),
+    query: &crate::history::Query,
+) -> Option<Resume> {
+    let mut resumes = RESUMES.lock().ok()?;
+    let found = resumes
+        .iter()
+        .position(|resume| &resume.asked == asked && &resume.query == query)?;
+    Some(resumes.remove(found))
+}
+
+fn keep_resume(resume: Resume) {
+    let Ok(mut resumes) = RESUMES.lock() else {
+        return;
+    };
+    if resumes.len() >= RESUMES_KEPT {
+        resumes.remove(0);
+    }
+    resumes.push(resume);
 }
 
 impl Journal {
