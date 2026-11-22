@@ -51,6 +51,12 @@ final class AppModel: ObservableObject {
     private var activityHistoryTask: Task<Void, Never>?
     private var activityHistoryTaskID: UUID?
     private var lastEventDrivenHistoryRefreshAt: [String: Date] = [:]
+    /// How long the last history read took. A read is the whole journal, and
+    /// the refresh it serves must not cost more than the watching does.
+    private var lastHistoryLoadDuration: TimeInterval = 0
+    private var lastFlushDrivenStoragePolicyAt = Date.distantPast
+    /// The core's hosts trim hourly; this is the same job on the same file.
+    private static let storagePolicyInterval: TimeInterval = 10 * 60
     private var pendingEventDrivenHistoryRefreshTasks: [String: Task<Void, Never>] = [:]
     private var growthAlertLastPostedAt: [String: Date] = [:]
     private var anomalyAlertLastPostedAt: [String: Date] = [:]
@@ -599,7 +605,12 @@ final class AppModel: ObservableObject {
                 persistCheckpoint(checkpoint, rootPath: root)
             }
             advanceUnblockedCheckpoints()
-            applyActivityStoragePolicy()
+            // Not after every flush: the policy compacts the size index and
+            // recounts the journal, and a busy folder flushes every second.
+            if Date().timeIntervalSince(lastFlushDrivenStoragePolicyAt) >= Self.storagePolicyInterval {
+                lastFlushDrivenStoragePolicyAt = Date()
+                applyActivityStoragePolicy()
+            }
             for root in batch.roots {
                 scheduleEventDrivenHistoryRefresh(rootPath: URL(filePath: root, directoryHint: .isDirectory))
             }
@@ -805,7 +816,10 @@ final class AppModel: ObservableObject {
     // throttled per root: the first fires immediately, later ones coalesce into
     // one trailing refresh so sustained churn costs at most one reload per second.
     private func scheduleEventDrivenHistoryRefresh(rootPath: URL) {
-        let throttleInterval: TimeInterval = 1
+        // At most a tenth of the time spent reading: a 200 MB journal takes
+        // seconds to read, and re-reading it every second on a folder that
+        // never goes quiet kept three cores and gigabytes busy doing it.
+        let throttleInterval = max(1, lastHistoryLoadDuration * 10)
         let key = rootPath.standardizedFileURL.path
         let now = Date()
         if let lastRefreshAt = lastEventDrivenHistoryRefreshAt[key],
@@ -862,12 +876,14 @@ final class AppModel: ObservableObject {
             }
 
             do {
+                let started = Date()
                 let history = try await service.loadHistory(
                     rootPath: rootPath,
                     eventLimit: eventLimit,
                     bucketInterval: bucketInterval,
                     query: query
                 )
+                self.lastHistoryLoadDuration = Date().timeIntervalSince(started)
                 guard !Task.isCancelled, self.activityHistoryTaskID == taskID else {
                     return
                 }

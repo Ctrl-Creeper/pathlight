@@ -114,12 +114,25 @@ nonisolated struct ActivityStorageUsageService: Sendable {
         return Int64(fileSize)
     }
 
+    /// Counted a block at a time. Loading the file to split it held a
+    /// journal's worth of memory twice over, every time usage was asked for.
     private func lineCount(at url: URL) -> Int {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
             return 0
         }
-        return String(decoding: data, as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .count
+        defer { try? handle.close() }
+        var count = 0
+        var lineHasContent = false
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            for byte in chunk {
+                if byte == 0x0A {
+                    count += lineHasContent ? 1 : 0
+                    lineHasContent = false
+                } else {
+                    lineHasContent = true
+                }
+            }
+        }
+        return count + (lineHasContent ? 1 : 0)
     }
 }
